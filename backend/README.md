@@ -1,8 +1,10 @@
 # 智能体平台后端
 
-基于 Python 3.12、FastAPI、LangChain、LangGraph 和 RAGFlow 的同步制度审核服务。首版只处理文本，不保存审核结果，也不依赖 Redis 或关系型数据库。
+基于 Python 3.12/3.13、FastAPI、LangChain、LangGraph 和 RAGFlow 的同步制度审核服务。首版只处理文本，不保存审核结果，也不依赖 Redis 或关系型数据库。
 
 ## 环境准备
+
+需要 Python 3.12 或 3.13。
 
 复制 `.env.example` 为 `.env`，填入模型服务和 RAGFlow 的配置：
 

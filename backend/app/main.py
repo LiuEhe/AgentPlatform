@@ -1,6 +1,6 @@
 """FastAPI 应用创建与依赖生命周期管理。"""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 import httpx
@@ -24,7 +24,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_logging(app_settings)
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.settings = app_settings
         app.state.runtime = None
         if not app_settings.readiness_issues():
