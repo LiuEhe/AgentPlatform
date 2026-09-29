@@ -10,6 +10,7 @@
 
 - `LLM_MODEL`、`LLM_API_KEY`：OpenAI 兼容模型名称与密钥。
 - `LLM_BASE_URL`：可选的 OpenAI 兼容服务地址；连接 OpenAI 官方服务时留空。
+- `LLM_TIMEOUT_SECONDS`：模型请求超时时间，默认 180 秒，可配置范围为 30–600 秒；百炼兼容接口通过 `enable_thinking=false` 关闭思考模式。
 - `RAGFLOW_BASE_URL`、`RAGFLOW_API_KEY`、`RAGFLOW_DATASET_ID`：RAGFlow 地址、API Key 和制度知识库 ID。
 - `MAX_UPLOAD_BYTES`：单个上传文件大小上限，默认 20 MiB。
 - `MAX_REVIEW_CHARS`：DOCX 转换为 Markdown 后的正文字符数上限。

@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     llm_model: str | None = None
     llm_api_key: str | None = None
     llm_base_url: str | None = None
+    llm_timeout_seconds: int = Field(default=180, ge=30, le=600)
 
     ragflow_base_url: str | None = "http://localhost:9380"
     ragflow_api_key: str | None = None

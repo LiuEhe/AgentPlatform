@@ -18,6 +18,7 @@ def build_chat_model(settings: Settings) -> BaseChatModel:
         model=settings.llm_model,
         api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
-        timeout=60,
+        timeout=settings.llm_timeout_seconds,
         max_retries=1,
+        extra_body={"enable_thinking": False},
     )
