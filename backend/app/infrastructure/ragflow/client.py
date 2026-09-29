@@ -76,14 +76,17 @@ class RagFlowClient:
             if not isinstance(content, str) or not content.strip():
                 continue
             similarity = item.get("similarity")
+            document_name = item.get("document_name") or item.get("document_keyword")
             chunks.append(
                 RetrievedChunk(
                     content=content,
-                    document_name=item.get("document_name"),
+                    document_name=document_name if isinstance(document_name, str) else None,
                     document_id=item.get("document_id"),
                     chunk_id=item.get("id"),
                     url=item.get("url"),
-                    similarity=(float(similarity) if isinstance(similarity, (float, int)) else None),
+                    similarity=(
+                        float(similarity) if isinstance(similarity, (float, int)) else None
+                    ),
                 )
             )
         return chunks[:top_k]

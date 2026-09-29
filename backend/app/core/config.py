@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
     log_level: str = "INFO"
     max_review_chars: int = Field(default=50_000, ge=1_000, le=200_000)
+    max_upload_bytes: int = Field(default=20_971_520, ge=1)
 
     llm_provider: str = "openai_compatible"
     llm_model: str | None = None

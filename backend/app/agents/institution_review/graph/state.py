@@ -2,20 +2,22 @@
 
 from typing import TypedDict
 
-from app.schemas.review import ReviewFinding, ReviewReference
+from app.agents.institution_review.schemas import Clause, ClauseReview
+from app.schemas.review import ReviewReference
 
 
 class ReviewState(TypedDict, total=False):
-    """在制度审核图节点之间传递的请求、依据和发现项。"""
+    """保存文档、拆分条款、审核结果和各章节 Markdown。"""
 
     review_id: str
     title: str
     content: str
-    clauses: list[str]
+    clauses: list[Clause]
+    clause_reviews: list[ClauseReview]
     references: list[ReviewReference]
-    terminology_findings: list[ReviewFinding]
-    conflict_findings: list[ReviewFinding]
-    duplicate_findings: list[ReviewFinding]
-    compliance_findings: list[ReviewFinding]
-    findings: list[ReviewFinding]
-    summary: str
+    reference_names: list[str]
+    terminology_markdown: str
+    overview_markdown: str
+    conflict_markdown: str
+    suggestion_markdown: str
+    report_markdown: str
