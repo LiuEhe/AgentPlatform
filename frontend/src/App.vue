@@ -16,13 +16,13 @@ import { RouterLink, RouterView } from 'vue-router'
       </RouterLink>
 
       <nav class="top-nav" aria-label="主导航">
-        <RouterLink to="/" class="nav-link">智能体</RouterLink>
-        <span class="nav-link nav-link-muted">智能体工作空间</span>
+        <RouterLink to="/" class="nav-link" exact-active-class="nav-link-active">首页</RouterLink>
+        <RouterLink to="/agents" class="nav-link" active-class="nav-link-active">智能体广场</RouterLink>
       </nav>
 
       <div class="topbar-meta">
         <span class="status-dot" aria-hidden="true"></span>
-        <span>智能体工作空间</span>
+        <span>专业能力 · 即刻可用</span>
       </div>
     </header>
 

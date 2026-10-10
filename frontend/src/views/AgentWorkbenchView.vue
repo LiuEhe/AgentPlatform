@@ -53,7 +53,7 @@ async function runReview(file: File) {
 
   <div v-else class="workbench-page">
     <div class="breadcrumb">
-      <RouterLink to="/">智能体</RouterLink>
+      <RouterLink to="/agents">智能体广场</RouterLink>
       <span aria-hidden="true">/</span>
       <span>制度审核助手</span>
     </div>
