@@ -1,6 +1,7 @@
 """读取并校验应用环境配置。"""
 
 from functools import lru_cache
+from pathlib import Path
 from urllib.parse import urlparse
 
 from pydantic import Field, field_validator
@@ -11,7 +12,7 @@ class Settings(BaseSettings):
     """服务运行所需的环境配置。"""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=Path(__file__).resolve().parents[2] / ".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
