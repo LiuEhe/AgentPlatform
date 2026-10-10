@@ -1,48 +1,106 @@
-"""封装制度审核 LangGraph 的统一执行入口。"""
+"""通过注册表按标识分发智能体调用。"""
 
 import logging
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Protocol
 from uuid import uuid4
 
-from langgraph.graph.state import CompiledStateGraph
-
-from app.agents.institution_review.graph.state import ReviewState
 from app.core.errors import AppError
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class AgentContext:
+    """一次智能体调用的通用上下文。"""
+
+    invocation_id: str
+    agent_id: str
+
+
+@dataclass(frozen=True)
+class AgentExecution:
+    """一次智能体调用的统一执行结果。"""
+
+    invocation_id: str
+    agent_id: str
+    output: object
+
+
+class AgentAdapter(Protocol):
+    """定义智能体适配器的统一调用协议。"""
+
+    async def invoke(
+        self,
+        payload: Mapping[str, object],
+        context: AgentContext,
+    ) -> object: ...
+
+
+class AgentRegistry:
+    """管理可由平台运行时调用的智能体适配器。"""
+
+    def __init__(self) -> None:
+        self._agents: dict[str, AgentAdapter] = {}
+
+    def register(self, agent_id: str, agent: AgentAdapter) -> None:
+        """注册一个智能体适配器。"""
+        if not agent_id.strip():
+            raise AppError("INVALID_AGENT_ID", "智能体标识不能为空", 500)
+        if agent_id in self._agents:
+            raise AppError("DUPLICATE_AGENT_ID", "智能体标识重复注册", 500)
+        self._agents[agent_id] = agent
+
+    def resolve(self, agent_id: str) -> AgentAdapter:
+        """根据智能体标识获取适配器。"""
+        agent = self._agents.get(agent_id)
+        if agent is None:
+            raise AppError("AGENT_NOT_FOUND", "请求的智能体未注册", 404)
+        return agent
+
+
 class AgentRuntime:
-    """通过编译后的制度审核图执行一次同步审核。"""
+    """统一负责智能体分发、调用标识和执行日志。"""
 
-    def __init__(self, graph: CompiledStateGraph) -> None:
-        self._graph = graph
+    def __init__(self, registry: AgentRegistry) -> None:
+        self._registry = registry
 
-    async def review(self, title: str, content: str) -> str:
-        """执行审核图并返回最终 Markdown 报告。"""
-        review_id = str(uuid4())
-        initial_state: ReviewState = {
-            "review_id": review_id,
-            "title": title,
-            "content": content,
-        }
+    async def invoke(
+        self,
+        agent_id: str,
+        payload: Mapping[str, object],
+    ) -> AgentExecution:
+        """按智能体标识执行一次调用。"""
+        invocation_id = str(uuid4())
+        context = AgentContext(invocation_id=invocation_id, agent_id=agent_id)
         try:
-            result = await self._graph.ainvoke(initial_state)
+            agent = self._registry.resolve(agent_id)
+            output = await agent.invoke(payload, context)
         except AppError as exc:
             logger.warning(
-                "review_failed review_id=%s code=%s",
-                review_id,
+                "agent_invoke_failed invocation_id=%s agent_id=%s code=%s",
+                invocation_id,
+                agent_id,
                 exc.code,
             )
             raise
         except Exception as exc:
             logger.error(
-                "review_failed review_id=%s error_type=%s",
-                review_id,
+                "agent_invoke_failed invocation_id=%s agent_id=%s error_type=%s",
+                invocation_id,
+                agent_id,
                 type(exc).__name__,
             )
-            raise AppError("REVIEW_FAILED", "制度审核流程执行失败", 502) from exc
+            raise AppError("AGENT_EXECUTION_FAILED", "智能体执行失败", 502) from exc
 
-        if not result.get("report_markdown"):
-            raise AppError("REVIEW_FAILED", "制度审核流程未生成完整报告", 502)
-        logger.info("review_completed review_id=%s", review_id)
-        return result["report_markdown"]
+        logger.info(
+            "agent_invoke_completed invocation_id=%s agent_id=%s",
+            invocation_id,
+            agent_id,
+        )
+        return AgentExecution(
+            invocation_id=invocation_id,
+            agent_id=agent_id,
+            output=output,
+        )

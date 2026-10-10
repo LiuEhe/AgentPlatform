@@ -24,7 +24,7 @@ router = APIRouter(tags=["institution-review"])
 async def create_review(request: Request, file: UploadFile = File(...)) -> Response:
     """接收 DOCX 制度草稿并同步返回 Markdown 报告。"""
     settings = request.app.state.settings
-    runtime = getattr(request.app.state, "runtime", None)
+    runtime = getattr(request.app.state, "agent_runtime", None)
     if runtime is None:
         raise AppError("SERVICE_NOT_READY", "模型或 RAGFlow 服务尚未配置就绪", 503)
 

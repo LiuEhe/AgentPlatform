@@ -4,6 +4,7 @@ import logging
 import re
 from pathlib import Path
 
+from app.agents.institution_review.adapter import INSTITUTION_REVIEW_AGENT_ID
 from app.core.config import Settings
 from app.core.errors import AppError
 from app.nodes.document.docx_to_markdown import DocumentReadError, convert_docx_to_markdown
@@ -50,7 +51,13 @@ class ReviewService:
         title = title or "未命名制度"
 
         try:
-            report = await self._runtime.review(title, markdown)
+            execution = await self._runtime.invoke(
+                INSTITUTION_REVIEW_AGENT_ID,
+                {"title": title, "content": markdown},
+            )
+            report = execution.output
+            if not isinstance(report, str):
+                raise AppError("AGENT_OUTPUT_INVALID", "制度审核未返回 Markdown 报告", 502)
         except AppError as exc:
             logger.warning(
                 "review_failed code=%s error_type=%s",

@@ -7,7 +7,7 @@ import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.agents.institution_review.graph.graph import build_review_graph
+from app.agents import build_agent_registry
 from app.api.health import router as health_router
 from app.api.reviews import router as reviews_router
 from app.core.config import Settings, get_settings
@@ -26,16 +26,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.settings = app_settings
-        app.state.runtime = None
+        app.state.agent_runtime = None
         if not app_settings.readiness_issues():
             timeout = httpx.Timeout(60.0, connect=5.0)
             async with httpx.AsyncClient(timeout=timeout) as client:
                 model = create_llm_service(app_settings)
                 rag_client = RagFlowClient(app_settings, client)
-                graph = build_review_graph(model, rag_client)
-                app.state.runtime = AgentRuntime(graph)
+                registry = build_agent_registry(model, rag_client)
+                app.state.agent_runtime = AgentRuntime(registry)
                 yield
-                app.state.runtime = None
+                app.state.agent_runtime = None
         else:
             yield
 
@@ -46,7 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = app_settings
-    app.state.runtime = None
+    app.state.agent_runtime = None
     app.add_middleware(
         CORSMiddleware,
         allow_origins=app_settings.cors_origins,

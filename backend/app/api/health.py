@@ -19,7 +19,7 @@ async def ready(request: Request) -> JSONResponse:
     """检查审核运行时配置是否完整。"""
     settings: Settings = request.app.state.settings
     issues = settings.readiness_issues()
-    runtime_ready = getattr(request.app.state, "runtime", None) is not None
+    runtime_ready = getattr(request.app.state, "agent_runtime", None) is not None
     if not runtime_ready and not issues:
         issues.append("审核运行时尚未初始化")
     status = "ready" if not issues else "not_ready"
