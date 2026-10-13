@@ -117,7 +117,8 @@ def create_report_sections_node(model: BaseChatModel):
             conflict = (
                 "| 章/条/款/项 | 问题类型 | 问题说明 | 严重程度 | 知识库依据 |\n"
                 "| --- | --- | --- | --- | --- |\n"
-                "| — | 无法核实 | 未检索到可比对的知识库片段，无法判断是否存在冲突或重复。 | — | 无 |"
+                "| — | 无法核实 | 未检索到可比对的知识库片段，"
+                "无法判断是否存在冲突或重复。 | — | 无 |"
             )
         elif not rows:
             conflict = (
@@ -129,7 +130,8 @@ def create_report_sections_node(model: BaseChatModel):
             conflict = await invoke_markdown(
                 model,
                 "将逐条审查结果汇总为 Markdown 表格，列出章/条/款/项、问题类型（冲突或重复）、"
-                "问题说明、严重程度和知识库依据。只能报告输入中已有 findings，不能从原始条款推断新问题。"
+                "问题说明、严重程度和知识库依据。只能报告输入中已有 findings，"
+                "不能从原始条款推断新问题。"
                 "不要输出章节标题。",
                 f"逐条审查结构化结果：\n{review_data}\n"
                 f"知识库实际检索文件名：\n{source_data}",
