@@ -1,7 +1,6 @@
 """制度审核节点共享的结构化模型调用逻辑。"""
 
 import logging
-from typing import TypeVar
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from pydantic import BaseModel
@@ -10,10 +9,9 @@ from app.agents.institution_review.config import SYSTEM_PROMPT
 from app.core.errors import AppError
 
 logger = logging.getLogger(__name__)
-OutputT = TypeVar("OutputT", bound=BaseModel)
 
 
-async def invoke_structured(
+async def invoke_structured[OutputT: BaseModel](
     model: BaseChatModel,
     output_schema: type[OutputT],
     task: str,
