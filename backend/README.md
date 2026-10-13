@@ -26,6 +26,18 @@ uv run uvicorn app.main:create_app --factory --reload
 
 使用 Python 虚拟环境时，也可以在 `backend/` 目录下运行 `python -m pip install -e .`，然后执行 `uvicorn app.main:create_app --factory --reload`。
 
+## 质量检查
+
+使用 `uv` 安装开发依赖后，在 `backend/` 目录执行：
+
+```powershell
+uv sync --locked --group dev
+uv run ruff check app tests
+uv run pytest
+```
+
+GitHub Actions 会在 Pull Request 和推送到 `main` 时执行后端静态检查、测试，以及前端锁文件安装和生产构建。
+
 ## 接口
 
 - `GET /health/live`：进程存活状态。
