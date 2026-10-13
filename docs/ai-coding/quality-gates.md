@@ -4,11 +4,11 @@
 
 | 能力 | 当前状态 | 使用方式/限制 |
 | --- | --- | --- |
-| Ruff | `backend/pyproject.toml` 有规则配置；仓库未发现 Ruff 依赖声明、执行脚本或 CI 调用 | 环境有 Ruff 时可对后端运行 `ruff check app`（在 `backend/`）；否则需如实报告未运行。是否把 Ruff 纳入开发依赖待后续确认。 |
-| 后端测试 | 未发现测试目录或 pytest 配置，`pyproject.toml` 未声明 pytest | 不能声称已有后端自动测试基线。后续应先围绕关键用例建立测试，再决定测试依赖和命令。 |
-| 前端类型检查与构建 | `frontend/package.json` 的 `build` 脚本运行 `vue-tsc -b && vite build` | 在 `frontend/` 运行 `pnpm build`。当前未见单独 lint 或前端测试脚本。 |
+| Ruff | `backend/pyproject.toml` 配置了规则并在 `dev` 依赖组声明 Ruff | 在 `backend/` 运行 `uv run ruff check app tests`。 |
+| 后端测试 | `backend/tests/` 使用 pytest 覆盖制度审核服务的输入限制、DOCX 解析、内容长度限制和 Agent 调用 | 在 `backend/` 运行 `uv run pytest`。测试通过假运行时隔离外部模型和 RAGFlow，不发起外部服务调用。 |
+| 前端类型检查与构建 | `frontend/package.json` 的 `build` 脚本运行 `vue-tsc -b && vite build` | 在 `frontend/` 运行 `pnpm build`。当前没有单独 lint 或前端测试脚本。 |
 | 依赖锁定 | `backend/uv.lock`、`frontend/pnpm-lock.yaml` 已跟踪 | 依赖声明变化时检查对应锁文件；不得只改锁文件来掩盖依赖决策。 |
-| CI | 未发现 GitHub Actions、GitLab CI 或其他 CI 配置 | 当前没有自动合并门禁，不要描述为 CI 已验证。 |
+| CI | `.github/workflows/ci.yml` 在 Pull Request 和推送到 `main` 时运行检查 | 后端覆盖 Python 3.12/3.13；前端执行冻结锁文件安装和生产构建。 |
 
 ## 代码任务的检查要求
 
@@ -18,14 +18,11 @@
 - 测试数量不是覆盖质量的替代指标。关键验收应验证可观察行为、边界条件和错误路径。
 - 只改文档时进行链接、路径、命令和规则一致性检查；除非任务明确要求，不运行与文档改动无关的测试。
 
-## 建议的低成本落地顺序
+## 当前覆盖范围与后续扩展
 
-1. 明确后端开发工具是否由项目统一管理；再决定是否把 Ruff 作为开发依赖并固定调用命令。
-2. 从上传校验、文档解析、审核服务错误处理等关键路径建立后端测试基线。
-3. 保持前端构建作为现有类型检查和构建门禁。
-4. 当本地命令稳定且团队需要自动反馈时，再配置最小 CI 工作流。
+当前测试聚焦制度审核应用服务，未覆盖真实模型、RAGFlow 网络调用或完整 ASGI 端到端生命周期。后续只有在需求涉及这些集成边界时，再增加相应集成测试或服务契约测试。
 
-在上述工作完成前，这些是建议，不属于当前已具备的自动化能力。
+当前没有前端单元测试、浏览器端到端测试、独立类型检查任务或依赖漏洞扫描。除非实际需求证明它们有价值，否则不额外引入工具。
 
 ## 变更范围审查
 
