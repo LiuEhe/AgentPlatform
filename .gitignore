@@ -4,5 +4,5 @@ __pycache__/
 *.py[cod]
 .ruff_cache/
 .pytest_cache/
-docs/
 agent_platform_backend.egg-info/
+docs/superpowers
