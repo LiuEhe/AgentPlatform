@@ -4,58 +4,55 @@
 
 ### 面向智能体应用构建与运行的模块化平台工程
 
-以清晰的工作流编排和可复用组件为基础，让智能体能力可以逐步接入、组合与演进。
+当前提供基于 DOCX 的制度审核工作流，包含 Vue 前端、FastAPI 后端，以及 OpenAI 兼容模型和 RAGFlow 接入。
 
-**Python 3.12 / 3.13** · **FastAPI** · **LangChain** · **LangGraph** · **RAGFlow**
+**Python 3.12 / 3.13** · **FastAPI** · **LangChain / LangGraph** · **Vue 3 / TypeScript** · **RAGFlow**
 
 </div>
 
 ---
 
-## 平台介绍
+## 项目现状
 
-AgentPlatform 是一个用于构建智能体应用的工程底座。项目将接口接入、流程编排、通用节点、模型调用和外部知识服务分层组织，减少业务流程与基础设施之间的耦合。
+AgentPlatform 用分层结构组织智能体应用：前端通过 API 提交任务，后端服务处理文档并调用运行时；具体智能体负责流程编排，外部模型和知识库通过基础设施客户端接入。
 
-平台关注的是智能体应用如何被组织和扩展：流程由节点组成，节点通过明确的数据状态协作，模型与知识服务通过独立接入层连接。新的应用可以沿用平台结构逐步建设，而不必把所有逻辑集中在单一入口中。
+目前已实现的业务是制度审核：上传 DOCX 制度草稿后，后端将文档转成 Markdown，按章、节和条拆分，并结合 RAGFlow 知识库和 OpenAI 兼容模型检查条款冲突、重复和术语问题，最终返回 Markdown 报告。前端提供首页、智能体广场和制度审核工作台。
 
-> **项目方向**：模块化组织 · 显式流程编排 · 通用能力复用 · 基础设施可替换
+当前版本不保存审核结果，不提供登录、审核历史、会话、流式输出或节点级进度；项目没有关系型数据库或 Redis。
 
 ## 架构概览
 
 ```mermaid
 flowchart LR
-    Client[调用方 / 应用界面] --> API[FastAPI 接入层]
-    API --> Runtime[智能体运行时]
-    Runtime --> Workflow[LangGraph 工作流]
-    Workflow --> Nodes[通用与业务节点]
-    Nodes --> LLM[模型接入层]
-    Nodes --> Knowledge[知识服务接入层]
-    LLM --> Model[OpenAI 兼容模型服务]
-    Knowledge --> RAGFlow[RAGFlow]
-    Workflow --> Result[结构化流程结果]
-    Result --> API
+    Browser[浏览器 / Vue 工作台] --> APIClient[前端 API 客户端]
+    APIClient --> API[FastAPI 路由]
+    API --> ReviewService[ReviewService]
+    ReviewService --> Docx[DOCX 转 Markdown 节点]
+    ReviewService --> Runtime[AgentRuntime]
+    Runtime --> Registry[AgentRegistry]
+    Registry --> Adapter[制度审核适配器]
+    Adapter --> Graph[LangGraph 审核流程]
+    Graph --> Split[条款拆分]
+    Graph --> ClauseReview[逐条检索与审查]
+    Graph --> Terminology[全文术语检查]
+    ClauseReview --> RAG[RAGFlow]
+    ClauseReview --> Model[OpenAI 兼容模型]
+    Terminology --> Model
+    Graph --> Report[Markdown 报告]
+    Report --> API
 ```
 
-### 分层职责
+应用启动时创建模型和 RAGFlow 客户端，并将它们注入制度审核流程。流程并行执行逐条知识库审查和全文术语检查，再生成简述、冲突检测、术语检测和修改建议四部分报告。
 
-| 层次 | 职责 |
+## 技术栈
+
+| 部分 | 技术 |
 | --- | --- |
-| API 接入 | 接收请求、校验输入并返回处理结果 |
-| 运行时与流程 | 启动工作流，管理节点之间的状态流转 |
-| 节点 | 封装可复用处理步骤，组合成完整流程 |
-| 基础设施 | 对接模型服务、知识服务等外部依赖 |
-
-## 技术基础
-
-| 领域 | 当前技术 |
-| --- | --- |
-| 语言与服务 | Python 3.12 / 3.13、FastAPI |
-| 智能体编排 | LangChain、LangGraph |
-| 知识服务 | RAGFlow |
-| 配置与数据校验 | Pydantic、pydantic-settings |
-| HTTP 通信 | HTTPX |
-
-当前基础工程不依赖 Redis。仓库现阶段以 Python 后端为主，前端可独立接入。
+| 后端 | Python 3.12 / 3.13、FastAPI、Pydantic、HTTPX |
+| 智能体流程 | LangChain、LangGraph |
+| 模型与知识库 | OpenAI 兼容聊天模型、RAGFlow |
+| 前端 | Vue 3、TypeScript、Vue Router、Vite |
+| Markdown 报告 | marked、DOMPurify |
 
 ## 代码结构
 
@@ -63,22 +60,73 @@ flowchart LR
 Agent/
 ├── backend/
 │   ├── app/
-│   │   ├── agents/          # 工作流与智能体组织
-│   │   ├── api/             # HTTP 接口
-│   │   ├── core/            # 配置、错误处理与日志
-│   │   ├── infrastructure/  # 模型及外部服务接入
-│   │   ├── nodes/            # 可跨流程复用的通用节点
-│   │   ├── runtime/          # 工作流运行入口
-│   │   ├── schemas/          # 请求、响应和数据结构
-│   │   └── services/         # 应用服务
-│   ├── pyproject.toml
-│   └── README.md             # 后端配置与启动说明
-└── README.md                 # 平台介绍
+│   │   ├── agents/institution_review/  # 制度审核适配器、图、状态和专属节点
+│   │   ├── api/                        # 审核与健康检查路由
+│   │   ├── core/                       # 配置、错误处理和请求日志
+│   │   ├── infrastructure/             # 模型与 RAGFlow 客户端
+│   │   ├── nodes/document/             # DOCX 转 Markdown 节点
+│   │   ├── runtime/                    # 智能体注册与调用运行时
+│   │   ├── schemas/                    # 审核报告共享结构
+│   │   └── services/                   # 审核用例协调
+│   ├── tests/
+│   └── README.md                       # 后端配置、启动和 API 说明
+├── frontend/
+│   ├── src/
+│   │   ├── api/                        # API 客户端
+│   │   ├── features/institution-review/ # 上传和报告界面
+│   │   ├── components/                 # 工作台共享组件
+│   │   ├── router/                     # 页面路由
+│   │   └── views/                      # 首页、广场和工作台
+│   └── README.md                       # 前端配置和启动说明
+├── docs/ai-coding/                     # 项目治理、架构和质量规则
+└── README.md
 ```
 
-## 开始使用
+## 本地启动
 
-后端环境配置、依赖安装、启动方式和接口说明见 [后端 README](backend/README.md)。
+需要 Python 3.12 或 3.13、[uv](https://docs.astral.sh/uv/)，以及 Node.js 20.19+ 或 22.12+ 和 pnpm。先按各自 README 配置后端模型与 RAGFlow 参数，然后在两个终端分别启动：
+
+```powershell
+# 终端一：后端
+cd backend
+Copy-Item .env.example .env
+uv sync
+uv run uvicorn app.main:create_app --factory --reload
+```
+
+```powershell
+# 终端二：前端
+cd frontend
+Copy-Item .env.example .env.local
+pnpm install
+pnpm dev
+```
+
+前端开发服务器默认将 `/api` 代理到 `http://127.0.0.1:8000`。详细配置见 [后端 README](backend/README.md) 和 [前端 README](frontend/README.md)。
+
+## 当前入口
+
+- `GET /health/live`：进程存活检查。
+- `GET /health/ready`：检查模型、RAGFlow 配置及审核运行时是否就绪。
+- `POST /api/v1/reviews`：以 `multipart/form-data` 上传 `file` 字段中的 `.docx` 文件，返回 `text/markdown` 审核报告。
+- 前端 `/`、`/agents`、`/agents/institution-review`：平台首页、智能体广场和制度审核工作台。
+
+## 质量检查
+
+后端在 `backend/` 执行：
+
+```powershell
+uv run ruff check app tests
+uv run pytest
+```
+
+前端在 `frontend/` 执行：
+
+```powershell
+pnpm build
+```
+
+GitHub Actions 会在 Pull Request 和推送到 `main` 时运行后端检查与测试，以及前端生产构建。
 
 ---
 
