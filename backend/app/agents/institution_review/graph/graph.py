@@ -6,9 +6,12 @@ from langgraph.graph import END, START, StateGraph
 from app.agents.institution_review.graph.edges import (
     ASSEMBLE_NODE,
     CLAUSE_REVIEW_NODE,
+    END_NODE_ID,
     REPORT_NODE,
+    REVIEW_GRAPH_EDGE_SPECS,
     REVIEW_NODE_ORDER,
     SPLIT_NODE,
+    START_NODE_ID,
     SUGGESTION_NODE,
     TERMINOLOGY_NODE,
 )
@@ -42,11 +45,8 @@ def build_review_graph(model: BaseChatModel, rag_client: RagFlowClient):
     for name, node in nodes.items():
         graph.add_node(name, node)
 
-    graph.add_edge(START, SPLIT_NODE)
-    graph.add_edge(START, TERMINOLOGY_NODE)
-    graph.add_edge(SPLIT_NODE, CLAUSE_REVIEW_NODE)
-    graph.add_edge([CLAUSE_REVIEW_NODE, TERMINOLOGY_NODE], REPORT_NODE)
-    graph.add_edge(REPORT_NODE, SUGGESTION_NODE)
-    graph.add_edge(SUGGESTION_NODE, ASSEMBLE_NODE)
-    graph.add_edge(ASSEMBLE_NODE, END)
+    for source_ids, target_id in REVIEW_GRAPH_EDGE_SPECS:
+        sources = [START if source_id == START_NODE_ID else source_id for source_id in source_ids]
+        target = END if target_id == END_NODE_ID else target_id
+        graph.add_edge(sources[0] if len(sources) == 1 else sources, target)
     return graph.compile()
