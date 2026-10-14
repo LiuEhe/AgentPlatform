@@ -76,6 +76,7 @@ async function runReview(file: File) {
       <div class="workbench-tags">
         <span class="workbench-tag"><span class="tag-dot"></span> 文档审核</span>
         <span class="workbench-tag">DOCX</span>
+        <RouterLink class="workbench-tag flow-link" :to="`/agents/${agentId}/flow`">查看流程图 <span aria-hidden="true">↗</span></RouterLink>
       </div>
     </section>
 

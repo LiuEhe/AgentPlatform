@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import AgentHomeView from '../views/AgentHomeView.vue'
 import AgentPlazaView from '../views/AgentPlazaView.vue'
 import AgentWorkbenchView from '../views/AgentWorkbenchView.vue'
+import AgentFlowView from '../views/AgentFlowView.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -15,6 +16,11 @@ export const router = createRouter({
       path: '/agents',
       name: 'agent-plaza',
       component: AgentPlazaView,
+    },
+    {
+      path: '/agents/:agentId/flow',
+      name: 'agent-flow',
+      component: AgentFlowView,
     },
     {
       path: '/agents/:agentId',
