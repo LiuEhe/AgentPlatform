@@ -43,6 +43,7 @@ GitHub Actions 会在 Pull Request 和推送到 `main` 时执行后端静态检�
 - `GET /health/live`：进程存活状态。
 - `GET /health/ready`：模型及 RAGFlow 配置就绪状态。
 - `POST /api/v1/reviews`：使用 `multipart/form-data` 上传一个 `.docx` 文件，同步返回 `text/markdown` 报告。
+- `GET /api/v1/agents/institution_review/graph`：返回制度审核智能体的静态流程节点及有向连线；流程图结构查询不要求 AgentRuntime 就绪，不表示实际运行进度。
 
 PowerShell 示例：
 

@@ -27,6 +27,8 @@ flowchart LR
     Browser[浏览器 / Vue 工作台] --> APIClient[前端 API 客户端]
     APIClient --> API[FastAPI 路由]
     API --> ReviewService[ReviewService]
+    API --> AgentGraphService[AgentGraphService]
+    AgentGraphService --> GraphMetadata[制度审核流程图元数据]
     ReviewService --> Docx[DOCX 转 Markdown 节点]
     ReviewService --> Runtime[AgentRuntime]
     Runtime --> Registry[AgentRegistry]
@@ -109,7 +111,8 @@ pnpm dev
 - `GET /health/live`：进程存活检查。
 - `GET /health/ready`：检查模型、RAGFlow 配置及审核运行时是否就绪。
 - `POST /api/v1/reviews`：以 `multipart/form-data` 上传 `file` 字段中的 `.docx` 文件，返回 `text/markdown` 审核报告。
-- 前端 `/`、`/agents`、`/agents/institution-review`：平台首页、智能体广场和制度审核工作台。
+- `GET /api/v1/agents/institution_review/graph`：返回制度审核流程的静态节点和连线结构，不依赖运行时就绪状态，也不包含节点执行进度。
+- 前端 `/`、`/agents`、`/agents/institution-review`、`/agents/institution-review/flow`：平台首页、智能体广场、制度审核工作台和流程结构图。
 
 ## 质量检查
 

@@ -7,8 +7,9 @@
 - `/`：平台首页，介绍平台并提供进入智能体广场的入口。
 - `/agents`：智能体广场，浏览当前可用的制度审核助手。
 - `/agents/institution-review`：制度审核工作台，选择 `.docx` 文件后提交审核，查看 Markdown 报告。
+- `/agents/institution-review/flow`：从工作台进入流程结构图，展示后端提供的静态节点和有向连线。
 - 未识别的智能体路由会展示返回主页的入口。
-- 上传请求只显示请求级状态。后端暂不提供会话、节点级进度、流式消息或审核历史。
+- 流程图只展示结构，不显示节点执行状态或实时进度。上传请求只显示请求级状态；后端暂不提供会话、节点级进度、流式消息或审核历史。
 
 ## 环境准备与启动
 
@@ -58,7 +59,7 @@ src/
 
 ## 接口与错误
 
-工作台调用 `POST /api/v1/reviews`，通过 `FormData` 上传字段 `file`，成功后读取 `text/markdown`。前端校验扩展名和空文件；服务端仍负责文件类型和大小校验。
+工作台调用 `POST /api/v1/reviews`，通过 `FormData` 上传字段 `file`，成功后读取 `text/markdown`。流程图页面调用 `GET /api/v1/agents/institution_review/graph` 获取静态节点与连线。前端校验扩展名和空文件；服务端仍负责文件类型和大小校验。
 
 API 错误按后端的 `{ error: { code, message, request_id, details? } }` 结构转换。`413`、`415` 和 `503` 会显示相应提示；网络不可达或响应内容不是 JSON 时显示通用错误。审核报告使用 `marked` 转为 HTML，并在渲染前由 `DOMPurify` 清理。
 

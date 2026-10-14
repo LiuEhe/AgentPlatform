@@ -9,6 +9,8 @@ flowchart LR
   UI[Vue 页面与制度审核 feature] --> APIClient[frontend/src/api]
   APIClient --> HTTP[FastAPI API]
   HTTP --> ReviewService[ReviewService]
+  HTTP --> AgentGraphService[AgentGraphService]
+  AgentGraphService --> GraphMetadata[制度审核流程图元数据]
   ReviewService --> DocNode[公共 DOCX 转 Markdown 节点]
   ReviewService --> Runtime[AgentRuntime]
   Runtime --> Registry[AgentRegistry]
@@ -28,6 +30,8 @@ flowchart LR
 ```
 
 图中 `Main` 创建模型和 RAG 客户端并将其交给 Agent 构建上下文；`AgentNodes` 调用注入的模型及 RAG 客户端。制度审核图节点目前直接使用 `app.infrastructure.ragflow.client.RagFlowClient`。不要把图理解为已经存在通用的 RAG 节点或服务抽象。
+
+只读流程结构接口 `GET /api/v1/agents/{agent_id}/graph` 由 API 路由委托给 `AgentGraphService`，再读取制度审核 Agent 中定义的静态图元数据。该响应描述节点和连线，不是 LangGraph 运行时状态或节点执行进度。
 
 ## 已有目录职责
 
