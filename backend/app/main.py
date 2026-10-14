@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.agents import build_agent_registry
+from app.api.agents import router as agents_router
 from app.api.health import router as health_router
 from app.api.reviews import router as reviews_router
 from app.core.config import Settings, get_settings
@@ -57,5 +58,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     install_request_logging(app)
     install_error_handlers(app)
     app.include_router(health_router)
+    app.include_router(agents_router, prefix=app_settings.api_prefix)
     app.include_router(reviews_router, prefix=app_settings.api_prefix)
     return app
