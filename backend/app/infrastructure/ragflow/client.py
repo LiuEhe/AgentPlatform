@@ -1,5 +1,6 @@
 """封装 RAGFlow 知识片段检索 API。"""
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -7,6 +8,21 @@ import httpx
 
 from app.core.config import Settings
 from app.core.errors import AppError
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_business_code(value: object) -> str:
+    if type(value) is int:
+        return str(value)
+    if (
+        isinstance(value, str)
+        and len(value) <= 32
+        and value.isascii()
+        and value.replace("_", "").replace("-", "").isalnum()
+    ):
+        return value
+    return f"<{type(value).__name__}>"
 
 
 @dataclass(frozen=True)
@@ -54,11 +70,26 @@ class RagFlowClient:
         except httpx.TimeoutException as exc:
             raise AppError("RAGFLOW_TIMEOUT", "知识检索服务响应超时", 503) from exc
         except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "ragflow_http_error status_code=%s",
+                exc.response.status_code,
+            )
             raise AppError("RAGFLOW_ERROR", "知识检索服务请求失败", 502) from exc
         except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("ragflow_response_unreadable error_type=%s", type(exc).__name__)
             raise AppError("RAGFLOW_ERROR", "无法读取知识检索服务响应", 502) from exc
 
-        if not isinstance(payload, dict) or payload.get("code") != 0:
+        if not isinstance(payload, dict):
+            logger.warning("ragflow_response_invalid payload_type=%s", type(payload).__name__)
+            raise AppError("RAGFLOW_ERROR", "知识检索服务返回错误", 502)
+        code = payload.get("code")
+        if code != 0:
+            logger.warning(
+                "ragflow_business_error upstream_code=%s upstream_code_type=%s data_type=%s",
+                _safe_business_code(code),
+                type(code).__name__,
+                type(payload.get("data")).__name__,
+            )
             raise AppError("RAGFLOW_ERROR", "知识检索服务返回错误", 502)
 
         data = payload.get("data") or {}
@@ -66,6 +97,11 @@ class RagFlowClient:
         if isinstance(raw_chunks, dict):
             raw_chunks = list(raw_chunks.values())
         if not isinstance(raw_chunks, list):
+            logger.warning(
+                "ragflow_chunks_invalid data_type=%s chunks_type=%s",
+                type(data).__name__,
+                type(raw_chunks).__name__,
+            )
             raise AppError("RAGFLOW_ERROR", "知识检索结果格式无效", 502)
 
         chunks: list[RetrievedChunk] = []
