@@ -6,7 +6,7 @@ import { submitReview } from '../api/reviews'
 import ExecutionStatus from '../components/workbench/ExecutionStatus.vue'
 import ReviewReport from '../features/institution-review/ReviewReport.vue'
 import ReviewUpload from '../features/institution-review/ReviewUpload.vue'
-import type { ReviewStatus } from '../features/institution-review/types'
+import type { ReviewStatus, ReviewSubmission } from '../features/institution-review/types'
 
 const route = useRoute()
 const agentId = computed(() => String(route.params.agentId ?? ''))
@@ -21,14 +21,14 @@ watch(agentId, () => {
   report.value = ''
 })
 
-async function runReview(file: File) {
+async function runReview(submission: ReviewSubmission) {
   if (status.value === 'submitting') return
   status.value = 'submitting'
   statusMessage.value = '正在审阅文档中的条款与术语…'
   report.value = ''
 
   try {
-    report.value = await submitReview(file)
+    report.value = await submitReview(submission)
     status.value = 'success'
     statusMessage.value = '审核完成，报告已准备好。'
   } catch (error) {
@@ -91,7 +91,7 @@ async function runReview(file: File) {
         <section class="aside-card about-card">
           <div class="aside-card-kicker">ABOUT THIS AGENT</div>
           <h2>审核更清晰，<br />修订更有据。</h2>
-          <p>智能体会结合制度知识库逐条审阅内容，并将需要关注的依据和建议整理成报告。</p>
+          <p>选择制度知识库或上传标准文档作为依据，逐条审阅草稿，并整理需要关注的问题与建议。</p>
           <div class="aside-divider"></div>
           <div class="aside-fact"><span class="fact-index">01</span><span>DOCX 文档输入</span></div>
           <div class="aside-fact"><span class="fact-index">02</span><span>术语与条款检查</span></div>

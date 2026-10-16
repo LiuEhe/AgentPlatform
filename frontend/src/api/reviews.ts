@@ -1,8 +1,13 @@
 import { ApiError, createApiError, getApiBaseUrl } from './client'
+import type { ReviewSubmission } from '../features/institution-review/types'
 
-export async function submitReview(file: File): Promise<string> {
+export async function submitReview(submission: ReviewSubmission): Promise<string> {
   const body = new FormData()
-  body.append('file', file)
+  body.append('file', submission.file)
+  body.append('review_mode', submission.mode)
+  if (submission.mode === 'standard_document') {
+    body.append('standard_file', submission.standardFile)
+  }
 
   let response: Response
   try {
