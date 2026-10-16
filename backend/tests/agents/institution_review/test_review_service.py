@@ -118,3 +118,72 @@ def test_converts_document_and_returns_agent_report() -> None:
             },
         )
     ]
+
+
+def test_standard_mode_converts_both_documents_and_preserves_roles() -> None:
+    service, runtime = make_service()
+    report = asyncio.run(service.review_document(
+        "同名.docx", make_docx(title="草稿", body="第一条 草稿正文"),
+        review_mode="standard_document", standard_filename="同名.docx",
+        standard_content=make_docx(title="标准", body="必须复核"),
+    ))
+    assert report == "# 审核报告"
+    payload = runtime.calls[0][1]
+    assert payload["content"] == "# 草稿\n\n第一条 草稿正文"
+    assert payload["standard_content"] == "# 标准\n\n必须复核"
+    assert payload["standard_name"] == "同名.docx"
+    assert payload["review_mode"] == "standard_document"
+
+
+@pytest.mark.parametrize("filename,content,expected", [
+    ("standard.pdf", b"x", "UNSUPPORTED_DOCUMENT_TYPE"),
+    ("standard.docx", b"", "EMPTY_DOCUMENT"),
+    ("standard.docx", b"not docx", "INVALID_DOCX"),
+])
+def test_rejects_invalid_standard_before_runtime(filename, content, expected) -> None:
+    service, runtime = make_service()
+    with pytest.raises(AppError) as raised:
+        asyncio.run(service.review_document(
+            "草稿.docx", make_docx(), review_mode="standard_document",
+            standard_filename=filename, standard_content=content,
+        ))
+    assert raised.value.code == expected
+    assert "标准" in raised.value.message
+    assert runtime.calls == []
+
+
+def test_rejects_standard_character_limit_before_runtime() -> None:
+    service, runtime = make_service(max_review_chars=1000)
+    with pytest.raises(AppError) as raised:
+        asyncio.run(service.review_document(
+            "草稿.docx", make_docx(), review_mode="standard_document",
+            standard_filename="标准.docx", standard_content=make_docx(body="标准" * 600),
+        ))
+    assert raised.value.code == "REVIEW_CONTENT_TOO_LONG"
+    assert runtime.calls == []
+
+
+def test_rejects_standard_byte_limit_before_runtime() -> None:
+    draft = make_docx()
+    service, runtime = make_service(max_upload_bytes=len(draft))
+    with pytest.raises(AppError) as raised:
+        asyncio.run(service.review_document(
+            "草稿.docx", draft, review_mode="standard_document",
+            standard_filename="标准.docx", standard_content=b"x" * (len(draft) + 1),
+        ))
+    assert raised.value.code == "UPLOAD_TOO_LARGE"
+    assert runtime.calls == []
+
+
+@pytest.mark.parametrize("kwargs,expected", [
+    ({"review_mode": "standard_document"}, "STANDARD_DOCUMENT_REQUIRED"),
+    ({"standard_filename": "标准.docx", "standard_content": b"x"}, "INVALID_REVIEW_INPUT"),
+    ({"review_mode": "unknown"}, "INVALID_REVIEW_INPUT"),
+])
+def test_rejects_conflicting_mode_inputs_before_runtime(kwargs, expected) -> None:
+    service, runtime = make_service()
+    with pytest.raises(AppError) as raised:
+        asyncio.run(service.review_document("草稿.docx", make_docx(), **kwargs))
+    assert raised.value.code == expected
+    assert raised.value.status_code == 422
+    assert runtime.calls == []
