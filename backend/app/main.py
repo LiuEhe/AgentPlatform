@@ -32,8 +32,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             timeout = httpx.Timeout(60.0, connect=5.0)
             async with httpx.AsyncClient(timeout=timeout) as client:
                 model = create_llm_service(app_settings)
-                rag_client = RagFlowClient(app_settings, client)
-                registry = build_agent_registry(model, rag_client)
+                rag_client = (
+                    RagFlowClient(app_settings, client)
+                    if not app_settings.ragflow_issues() else None
+                )
+                registry = build_agent_registry(
+                    model, rag_client,
+                    institution_review_concurrency=app_settings.institution_review_concurrency,
+                )
                 app.state.agent_runtime = AgentRuntime(registry)
                 yield
                 app.state.agent_runtime = None

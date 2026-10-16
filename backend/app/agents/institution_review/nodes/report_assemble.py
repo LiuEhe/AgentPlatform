@@ -6,7 +6,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 
 from app.agents.institution_review.graph.state import ReviewState
 from app.agents.institution_review.nodes._llm import invoke_markdown, invoke_structured
-from app.agents.institution_review.schemas import ClauseReview, ReviewOverviewOutput
+from app.agents.institution_review.schemas import ClauseReview, ReviewMode, ReviewOverviewOutput
 from app.schemas.review import ReviewReference
 
 
@@ -22,7 +22,9 @@ def extract_reference_names(references: list[ReviewReference]) -> list[str]:
     return names
 
 
-def _report_data(reviews: list[ClauseReview]) -> list[dict[str, object]]:
+def _report_data(
+    reviews: list[ClauseReview], *, max_evidence_chars: int | None = 1200,
+) -> list[dict[str, object]]:
     """整理条款发现项及其真实检索依据。"""
     rows: list[dict[str, object]] = []
     for review in reviews:
@@ -30,7 +32,7 @@ def _report_data(reviews: list[ClauseReview]) -> list[dict[str, object]]:
             evidence = [
                 {
                     "document_name": review.references[index - 1].document_name,
-                    "content": review.references[index - 1].content[:1200],
+                    "content": review.references[index - 1].content[:max_evidence_chars],
                 }
                 for index in finding.reference_indexes
                 if 1 <= index <= len(review.references)
@@ -38,6 +40,8 @@ def _report_data(reviews: list[ClauseReview]) -> list[dict[str, object]]:
             rows.append(
                 {
                     "chapter": review.clause.chapter,
+                    "section": review.clause.section,
+                    "sequence": review.clause.sequence,
                     "article": review.clause.article,
                     "paragraph": review.clause.paragraph,
                     "item": review.clause.item,
@@ -67,8 +71,14 @@ def create_report_sections_node(model: BaseChatModel):
 
     async def generate(state: ReviewState) -> dict[str, str | list[str]]:
         references = state.get("references", [])
+        is_standard = state.get("review_mode") == ReviewMode.STANDARD_DOCUMENT
+        source_label = "上传标准文档" if is_standard else "知识库"
         names = extract_reference_names(references)
-        rows = _report_data(state.get("clause_reviews", []))
+        if is_standard:
+            names = [state["standard_name"]] if state.get("standard_name") else []
+        rows = _report_data(
+            state.get("clause_reviews", []), max_evidence_chars=None if is_standard else 1200,
+        )
         review_data = json.dumps(rows, ensure_ascii=False)
         summary_data = json.dumps(
             [
@@ -96,7 +106,9 @@ def create_report_sections_node(model: BaseChatModel):
             for name in ("冲突", "重复", "术语")
             if name in overview.focus and (name == "术语" or name in actual_categories)
         ]
-        if not references:
+        if is_standard and not rows:
+            summary_text = "本次已完成与上传标准文档的逐条对比，未发现冲突或重复。"
+        elif not references:
             summary_text = "本次未检索到可比对的知识库依据，冲突和重复暂无法核实。"
         elif not rows:
             summary_text = "本次已完成逐条检索，未发现有知识库依据的冲突或重复。"
@@ -108,12 +120,19 @@ def create_report_sections_node(model: BaseChatModel):
             summary_text += "模型未标记其他需要突出的类别。"
         if names:
             source_list = "\n".join(f"- {_escape_markdown_text(name)}" for name in names)
-            source_text = f"引用知识库文件：\n{source_list}"
+            source_title = "上传标准文档" if is_standard else "引用知识库文件"
+            source_text = f"{source_title}：\n{source_list}"
         else:
             source_text = "本次逐条检索未返回可引用的知识库文件，因此冲突和重复无法核实。"
         overview_markdown = f"## 一. 简述\n\n{summary_text}\n\n{source_text}"
 
-        if not references:
+        if not rows and is_standard:
+            conflict = (
+                "| 章/节/条/款/项 | 问题类型 | 问题说明 | 严重程度 | 标准文档依据 |\n"
+                "| --- | --- | --- | --- | --- |\n"
+                "| — | 未发现 | 与上传标准文档对比，未发现冲突或重复。 | — | 已完成逐条对比 |"
+            )
+        elif not references:
             conflict = (
                 "| 章/条/款/项 | 问题类型 | 问题说明 | 严重程度 | 知识库依据 |\n"
                 "| --- | --- | --- | --- | --- |\n"
@@ -129,12 +148,13 @@ def create_report_sections_node(model: BaseChatModel):
         else:
             conflict = await invoke_markdown(
                 model,
-                "将逐条审查结果汇总为 Markdown 表格，列出章/条/款/项、问题类型（冲突或重复）、"
-                "问题说明、严重程度和知识库依据。只能报告输入中已有 findings，"
+                "将逐条审查结果汇总为 Markdown 表格，列出原始章/节/条/款/项及序号、"
+                "问题类型（冲突或重复）、"
+                f"问题说明、严重程度和{source_label}依据。只能报告输入中已有 findings，"
                 "不能从原始条款推断新问题。"
                 "不要输出章节标题。",
                 f"逐条审查结构化结果：\n{review_data}\n"
-                f"知识库实际检索文件名：\n{source_data}",
+                f"{source_label}文件名：\n{source_data}",
             )
         return {
             "reference_names": names,

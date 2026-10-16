@@ -5,7 +5,7 @@
 | 能力 | 当前状态 | 使用方式/限制 |
 | --- | --- | --- |
 | Ruff | `backend/pyproject.toml` 配置了规则并在 `dev` 依赖组声明 Ruff | 在 `backend/` 运行 `uv run ruff check app tests`。 |
-| 后端测试 | `backend/tests/` 使用 pytest 覆盖制度审核服务的输入限制、DOCX 解析、内容长度限制和 Agent 调用 | 在 `backend/` 运行 `uv run pytest`。测试通过假运行时隔离外部模型和 RAGFlow，不发起外部服务调用。 |
+| 后端测试 | `backend/tests/` 使用 pytest 覆盖双文档输入、DOCX 解析、条款分组、跨请求并发额度与取消清理、发现定位、报告、完整审核图和 ASGI 入口及启动就绪 | 在 `backend/` 运行 `uv run pytest`。通过假运行时、假模型和假检索器隔离外部服务，不消耗真实账户额度。 |
 | 前端类型检查与构建 | `frontend/package.json` 的 `build` 脚本运行 `vue-tsc -b && vite build` | 在 `frontend/` 运行 `pnpm build`。当前没有单独 lint 或前端测试脚本。 |
 | 依赖锁定 | `backend/uv.lock`、`frontend/pnpm-lock.yaml` 已跟踪 | 依赖声明变化时检查对应锁文件；不得只改锁文件来掩盖依赖决策。 |
 | CI | `.github/workflows/ci.yml` 在 Pull Request 和推送到 `main` 时运行检查 | 后端覆盖 Python 3.12/3.13；前端执行冻结锁文件安装和生产构建。 |
@@ -20,7 +20,7 @@
 
 ## 当前覆盖范围与后续扩展
 
-当前测试聚焦制度审核应用服务，未覆盖真实模型、RAGFlow 网络调用或完整 ASGI 端到端生命周期。后续只有在需求涉及这些集成边界时，再增加相应集成测试或服务契约测试。
+当前测试覆盖制度审核应用服务、真实编译审核图及 ASGI 生命周期；模型和检索器使用受控替身。未覆盖真实模型准确率、上下文上限、真实 RAGFlow 网络调用、账户额度和生产吞吐，这些事项需在对应服务可用时另行验收。
 
 当前没有前端单元测试、浏览器端到端测试、独立类型检查任务或依赖漏洞扫描。除非实际需求证明它们有价值，否则不额外引入工具。
 

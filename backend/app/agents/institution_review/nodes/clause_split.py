@@ -3,7 +3,7 @@
 import re
 
 from app.agents.institution_review.graph.state import ReviewState
-from app.agents.institution_review.schemas import Clause
+from app.agents.institution_review.schemas import Clause, ReviewChunk, ReviewMode
 
 _CHINESE_NUMBER = "一二三四五六七八九十百千万零〇两0-9"
 _CHAPTER_PATTERN = re.compile(rf"^\s*(第[{_CHINESE_NUMBER}]+章)\s*(.*)$")
@@ -118,6 +118,43 @@ def split_markdown_clauses(markdown: str, title: str | None = None) -> list[Clau
     return clauses
 
 
-def split_clauses(state: ReviewState) -> dict[str, list[Clause]]:
+def group_clauses(clauses: list[Clause], *, max_chunks: int = 30) -> list[ReviewChunk]:
+    """按正文长度尽量均衡地合并相邻条款，不截断单条正文。"""
+    if max_chunks <= 0:
+        raise ValueError("分组上限必须为正整数")
+    group_count = min(max_chunks, len(clauses))
+    remaining_chars = sum(len(clause.content) for clause in clauses)
+    groups: list[ReviewChunk] = []
+    start = 0
+    for index in range(group_count):
+        remaining_groups = group_count - index
+        if remaining_groups == 1:
+            end = len(clauses)
+        else:
+            target = remaining_chars / remaining_groups
+            end = start + 1
+            size = len(clauses[start].content)
+            while end < len(clauses) - (remaining_groups - 1):
+                next_size = size + len(clauses[end].content)
+                if abs(next_size - target) >= abs(size - target):
+                    break
+                size = next_size
+                end += 1
+        group = clauses[start:end]
+        groups.append(ReviewChunk(sequence=index + 1, clauses=group))
+        remaining_chars -= sum(len(clause.content) for clause in group)
+        start = end
+    return groups
+
+
+def split_clauses(state: ReviewState) -> dict[str, list[Clause] | list[ReviewChunk]]:
     """LangGraph 代码节点：将全文 Markdown 拆分为条款块。"""
-    return {"clauses": split_markdown_clauses(state["content"], state.get("title"))}
+    clauses = split_markdown_clauses(
+        state["content"], state.get("document_title") or state.get("title"),
+    )
+    chunks = group_clauses(
+        clauses,
+        max_chunks=30 if state.get("review_mode") == ReviewMode.STANDARD_DOCUMENT
+        else max(1, len(clauses)),
+    )
+    return {"clauses": clauses, "chunks": chunks}

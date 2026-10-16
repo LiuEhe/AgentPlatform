@@ -1,11 +1,13 @@
 """将制度审核工作流适配到平台智能体调用协议。"""
 
 from collections.abc import Mapping
+from typing import Self
 
 from langgraph.graph.state import CompiledStateGraph
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from app.agents.institution_review.graph.state import ReviewState
+from app.agents.institution_review.schemas import ReviewMode
 from app.core.errors import AppError
 from app.runtime.agent_runtime import AgentContext
 
@@ -17,6 +19,20 @@ class InstitutionReviewInput(BaseModel):
 
     title: str = Field(min_length=1)
     content: str = Field(min_length=1)
+    document_title: str | None = None
+    review_mode: ReviewMode = ReviewMode.KNOWLEDGE_BASE
+    standard_name: str | None = None
+    standard_content: str | None = None
+
+    @model_validator(mode="after")
+    def validate_standard(self) -> Self:
+        """拒绝缺少依据或与模式矛盾的标准输入。"""
+        if self.review_mode == ReviewMode.STANDARD_DOCUMENT:
+            if not (self.standard_name or "").strip() or not (self.standard_content or "").strip():
+                raise ValueError("标准文档模式必须提供标准名称和正文")
+        elif self.standard_name is not None or self.standard_content is not None:
+            raise ValueError("知识库模式不能附带标准文档")
+        return self
 
 
 class InstitutionReviewAgent:
@@ -40,7 +56,13 @@ class InstitutionReviewAgent:
             "review_id": context.invocation_id,
             "title": agent_input.title,
             "content": agent_input.content,
+            "review_mode": agent_input.review_mode,
         }
+        if agent_input.document_title is not None:
+            initial_state["document_title"] = agent_input.document_title
+        if agent_input.review_mode == ReviewMode.STANDARD_DOCUMENT:
+            initial_state["standard_name"] = agent_input.standard_name
+            initial_state["standard_content"] = agent_input.standard_content
         result = await self._graph.ainvoke(initial_state)
         report = result.get("report_markdown")
         if not isinstance(report, str) or not report.strip():

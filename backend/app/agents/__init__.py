@@ -7,6 +7,7 @@ from importlib import import_module
 from pkgutil import iter_modules
 from typing import TYPE_CHECKING
 
+from app.core.config import DEFAULT_INSTITUTION_REVIEW_CONCURRENCY
 from app.core.errors import AppError
 from app.runtime.agent_runtime import AgentRegistry
 
@@ -21,16 +22,22 @@ class AgentBuildContext:
     """创建智能体所需的共享服务。"""
 
     model: BaseChatModel
-    rag_client: RagFlowClient
+    rag_client: RagFlowClient | None = None
+    institution_review_concurrency: int = DEFAULT_INSTITUTION_REVIEW_CONCURRENCY
 
 
 def build_agent_registry(
     model: BaseChatModel,
-    rag_client: RagFlowClient,
+    rag_client: RagFlowClient | None = None,
+    *,
+    institution_review_concurrency: int = DEFAULT_INSTITUTION_REVIEW_CONCURRENCY,
 ) -> AgentRegistry:
     """发现子包并调用各自的注册入口。"""
     registry = AgentRegistry()
-    context = AgentBuildContext(model=model, rag_client=rag_client)
+    context = AgentBuildContext(
+        model=model, rag_client=rag_client,
+        institution_review_concurrency=institution_review_concurrency,
+    )
     modules = sorted(iter_modules(__path__), key=lambda module: module.name)
 
     for module_info in modules:

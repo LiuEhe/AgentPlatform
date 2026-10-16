@@ -23,7 +23,15 @@ async def ready(request: Request) -> JSONResponse:
     if not runtime_ready and not issues:
         issues.append("审核运行时尚未初始化")
     status = "ready" if not issues else "not_ready"
+    model_issues = settings.model_issues()
+    kb_issues = model_issues + settings.ragflow_issues()
     return JSONResponse(
         status_code=200 if not issues else 503,
-        content={"status": status, "issues": issues},
+        content={
+            "status": status, "issues": issues,
+            "modes": {
+                "standard_document": {"configured": not model_issues, "issues": model_issues},
+                "knowledge_base": {"configured": not kb_issues, "issues": kb_issues},
+            },
+        },
     )

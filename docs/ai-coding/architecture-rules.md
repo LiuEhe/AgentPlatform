@@ -17,7 +17,8 @@ flowchart LR
   Registry --> Adapter[制度审核 Agent 适配器]
   Adapter --> Graph[LangGraph 制度审核流程]
   Graph --> AgentNodes[制度审核专属节点]
-  AgentNodes --> RagClient[RAGFlow 客户端]
+  AgentNodes --> RagClient[知识库模式 / RAGFlow 客户端]
+  AgentNodes --> Standard[标准模式 / 上传标准全文]
   AgentNodes --> Model[注入的聊天模型]
   Main[应用启动与装配] --> LLMInfra[LLM 基础设施适配]
   LLMInfra --> Model
@@ -29,7 +30,11 @@ flowchart LR
   RagInfra --> Core
 ```
 
-图中 `Main` 创建模型和 RAG 客户端并将其交给 Agent 构建上下文；`AgentNodes` 调用注入的模型及 RAG 客户端。制度审核图节点目前直接使用 `app.infrastructure.ragflow.client.RagFlowClient`。不要把图理解为已经存在通用的 RAG 节点或服务抽象。
+图中 `Main` 创建模型，在 RAGFlow 配置完整时创建可选 RAG 客户端，并将其和制度审核并发配置交给 Agent 构建上下文。聊天模型配置就绪即可初始化运行时。知识库模式调用注入的 `app.infrastructure.ragflow.client.RagFlowClient`；标准模式比较上传标准全文，不调用检索或 embedding。不要把图理解为已经存在通用的 RAG 节点或服务抽象。
+
+制度审核图构建时创建共享异步并发额度，由同进程的制度审核请求共用。原始 `clauses` 和执行 `chunks` 分开保存；仅标准模式将超过 30 个块的相邻条款合并为 30 组。依据来源选择、分组、发现定位和并发规则属于制度审核 Agent，通用 `runtime/` 不承载这些业务规则。就绪接口主状态反映模型配置和运行时，两种模式的配置状态分开报告，不检查外部连通或额度。
+
+显示标题规范化或截断时，另行保留原始文档标题供拆分定位使用，避免标题被当作正文。全文术语分支在调用模型前同样检查可审核内容；它与拆分并行运行，因此独立执行纯文本校验。报告仅携带问题相关依据，标准模式保留已验证摘录的完整内容，不沿用知识库报告片段截断。
 
 只读流程结构接口 `GET /api/v1/agents/{agent_id}/graph` 由 API 路由委托给 `AgentGraphService`，再读取制度审核 Agent 中定义的静态图元数据。该响应描述节点和连线，不是 LangGraph 运行时状态或节点执行进度。
 

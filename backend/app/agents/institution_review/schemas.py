@@ -1,10 +1,18 @@
 """制度审核智能体的专属输入与输出类型。"""
 
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from app.schemas.review import ReviewCategory, ReviewReference, Severity
+
+
+class ReviewMode(StrEnum):
+    """制度审核的依据来源。"""
+
+    KNOWLEDGE_BASE = "knowledge_base"
+    STANDARD_DOCUMENT = "standard_document"
 
 
 class Clause(BaseModel):
@@ -17,6 +25,13 @@ class Clause(BaseModel):
     item: str | None = None
     content: str = Field(min_length=1)
     sequence: int = Field(ge=1)
+
+
+class ReviewChunk(BaseModel):
+    """保持原始条款定位的连续执行组。"""
+
+    sequence: int = Field(ge=1)
+    clauses: list[Clause] = Field(min_length=1)
 
 
 class ClauseReviewFinding(BaseModel):
@@ -38,6 +53,22 @@ class ReviewOverviewOutput(BaseModel):
     """简述模型可选择的受控关注类别。"""
 
     focus: list[Literal["冲突", "重复", "术语"]] = Field(default_factory=list)
+
+
+class StandardClauseFinding(BaseModel):
+    """一个执行组内可定位到原始条款的标准对比发现。"""
+
+    clause_sequence: int = Field(ge=1)
+    category: Literal[ReviewCategory.CONFLICT, ReviewCategory.DUPLICATE]
+    severity: Severity = Severity.MEDIUM
+    description: str
+    standard_excerpt: str
+
+
+class StandardReviewOutput(BaseModel):
+    """标准文档对比的批量结构化输出。"""
+
+    findings: list[StandardClauseFinding] = Field(default_factory=list)
 
 
 class ClauseReview(BaseModel):

@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+DEFAULT_INSTITUTION_REVIEW_CONCURRENCY = 3
+
 
 class Settings(BaseSettings):
     """服务运行所需的环境配置。"""
@@ -24,6 +26,9 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     max_review_chars: int = Field(default=50_000, ge=1_000, le=200_000)
     max_upload_bytes: int = Field(default=20_971_520, ge=1)
+    institution_review_concurrency: int = Field(
+        default=DEFAULT_INSTITUTION_REVIEW_CONCURRENCY, ge=1,
+    )
 
     llm_provider: str = "openai_compatible"
     llm_model: str | None = None
@@ -64,6 +69,10 @@ class Settings(BaseSettings):
 
     def readiness_issues(self) -> list[str]:
         """返回就绪检查中缺失或不受支持的配置项名称。"""
+        return self.model_issues()
+
+    def model_issues(self) -> list[str]:
+        """检查聊天模型配置，不要求知识库可用。"""
         issues: list[str] = []
         if self.llm_provider != "openai_compatible":
             issues.append("LLM_PROVIDER 当前只支持 openai_compatible")
@@ -71,6 +80,11 @@ class Settings(BaseSettings):
             issues.append("缺少 LLM_MODEL")
         if not self.llm_api_key:
             issues.append("缺少 LLM_API_KEY")
+        return issues
+
+    def ragflow_issues(self) -> list[str]:
+        """检查仅知识库审核需要的配置。"""
+        issues: list[str] = []
         if not self.ragflow_base_url:
             issues.append("缺少 RAGFLOW_BASE_URL")
         if not self.ragflow_api_key:
