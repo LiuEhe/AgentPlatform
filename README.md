@@ -16,7 +16,9 @@
 
 AgentPlatform 用分层结构组织智能体应用：前端通过 API 提交任务，后端服务处理文档并调用运行时；具体智能体负责流程编排，外部模型和知识库通过基础设施客户端接入。
 
-目前已实现的业务是制度审核：上传 DOCX 制度草稿后，后端将文档转成 Markdown，按章、节和条拆分，并结合 RAGFlow 知识库和 OpenAI 兼容模型检查条款冲突、重复和术语问题，最终返回 Markdown 报告。前端提供首页、智能体广场和制度审核工作台。
+目前已实现的业务是制度审核：上传 DOCX 制度草稿后，选择知识库审核，或再上传一份 DOCX 标准文档直接对比。后端将文档转成 Markdown，按章、节和条拆分，使用模型检查条款冲突、重复和术语问题，最终返回 Markdown 报告。前端提供首页、智能体广场和制度审核工作台。
+
+标准文档模式不调用 RAGFlow 或 embedding，知识库检索额度不足时仍可使用。草稿超过 30 个条款块时，按原顺序合并相邻条款至 30 组，保留原文和逐条定位。条款任务并发数通过 `INSTITUTION_REVIEW_CONCURRENCY` 配置，默认 3，由同进程的制度审核请求共享；多个工作进程各自计算额度。
 
 当前版本不保存审核结果，不提供登录、审核历史、会话、流式输出或节点级进度；项目没有关系型数据库或 Redis。
 
@@ -35,16 +37,17 @@ flowchart LR
     Registry --> Adapter[制度审核适配器]
     Adapter --> Graph[LangGraph 审核流程]
     Graph --> Split[条款拆分]
-    Graph --> ClauseReview[逐条检索与审查]
+    Graph --> ClauseReview[受控并发条款审查]
     Graph --> Terminology[全文术语检查]
-    ClauseReview --> RAG[RAGFlow]
+    ClauseReview --> RAG[知识库模式 / RAGFlow]
+    ClauseReview --> Standard[标准模式 / 上传标准全文]
     ClauseReview --> Model[OpenAI 兼容模型]
     Terminology --> Model
     Graph --> Report[Markdown 报告]
     Report --> API
 ```
 
-应用启动时创建模型和 RAGFlow 客户端，并将它们注入制度审核流程。流程并行执行逐条知识库审查和全文术语检查，再生成简述、冲突检测、术语检测和修改建议四部分报告。
+应用启动时创建模型，并在知识库配置齐备时注入 RAGFlow 客户端。聊天模型配置完整即可初始化运行时。流程并行执行条款审查和全文术语检查，再生成简述、冲突检测、术语检测和修改建议四部分报告。通过条款不进入后续问题汇总上下文。
 
 ## 技术栈
 
@@ -109,8 +112,8 @@ pnpm dev
 ## 当前入口
 
 - `GET /health/live`：进程存活检查。
-- `GET /health/ready`：检查模型、RAGFlow 配置及审核运行时是否就绪。
-- `POST /api/v1/reviews`：以 `multipart/form-data` 上传 `file` 字段中的 `.docx` 文件，返回 `text/markdown` 审核报告。
+- `GET /health/ready`：检查模型配置与审核运行时，并分别返回两种模式的配置可用性；不探测外部连通或账户额度。
+- `POST /api/v1/reviews`：以 `multipart/form-data` 上传草稿 `file`，以及审核方式 `review_mode`；`standard_document` 模式还需 `standard_file`，返回 `text/markdown` 审核报告。缺省方式为 `knowledge_base`，兼容原有单文件请求。
 - `GET /api/v1/agents/institution_review/graph`：返回制度审核流程的静态节点和连线结构，不依赖运行时就绪状态，也不包含节点执行进度。
 - 前端 `/`、`/agents`、`/agents/institution-review`、`/agents/institution-review/flow`：平台首页、智能体广场、制度审核工作台和流程结构图。
 
