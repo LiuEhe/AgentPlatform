@@ -9,6 +9,8 @@ flowchart LR
   UI[Vue 页面与制度审核 feature] --> APIClient[frontend/src/api]
   APIClient --> HTTP[FastAPI API]
   HTTP --> ReviewService[ReviewService]
+  HTTP --> ExportService[DocumentExportService]
+  ExportService --> Pandoc[Python 包内 Pandoc]
   HTTP --> AgentGraphService[AgentGraphService]
   AgentGraphService --> GraphMetadata[制度审核流程图元数据]
   ReviewService --> DocNode[公共 DOCX 转 Markdown 节点]
@@ -38,6 +40,8 @@ flowchart LR
 
 只读流程结构接口 `GET /api/v1/agents/{agent_id}/graph` 由 API 路由委托给 `AgentGraphService`，再读取制度审核 Agent 中定义的静态图元数据。该响应描述节点和连线，不是 LangGraph 运行时状态或节点执行进度。
 
+独立导出接口 `POST /api/v1/documents/export/docx` 委托 `DocumentExportService` 校验 Markdown、检查 AST 并设置 Word 样式，使用基础设施 `PandocRunner` 调用 pypandoc-binary 包内程序。服务在 lifespan 中独立于模型配置装配，持有同进程共享额度、取消及关闭逻辑。文件通过内存返回，未增加附件存储、MCP 或 Chat 工具，也不把转换放入制度审核图或 AgentRuntime。
+
 ## 已有目录职责
 
 ### 后端 `backend/app/`
@@ -46,13 +50,13 @@ flowchart LR
 | --- | --- |
 | `api/` | FastAPI 路由和 HTTP 输入输出。将业务协调委托给服务层。 |
 | `core/` | 配置、统一错误和日志等应用级基础能力。 |
-| `services/` | 应用用例协调。`ReviewService` 负责文档处理与运行时调用；其他服务当前较薄，不据此扩建同类转发层。 |
+| `services/` | 应用用例协调。`ReviewService` 负责文档处理与运行时调用；`DocumentExportService` 负责纯文档导出、排版及共享额度；其他服务当前较薄，不据此扩建同类转发层。 |
 | `runtime/` | 通用智能体调用上下文、注册表、分发和执行结果。 |
 | `agents/` | 具体智能体及其构建入口。当前由 `agents` 包发现子包并调用 `register_agent`。 |
 | `agents/institution_review/graph/` | 制度审核 LangGraph 状态、图和路由边。 |
 | `agents/institution_review/nodes/` | 制度审核专属节点、提示调用和业务结构。 |
 | `nodes/` | 跨流程可复用节点。目前有 `document/docx_to_markdown.py`。跨流程复用应有实际调用方依据。 |
-| `infrastructure/` | 外部服务适配。目前包含 OpenAI 兼容聊天模型和 RAGFlow HTTP 客户端。 |
+| `infrastructure/` | 外部能力适配。目前包含聊天模型、RAGFlow HTTP 客户端及包内 Pandoc 进程适配。Pandoc 适配只处理程序定位、进程执行与资源回收。 |
 | `schemas/` | 应用级审核响应与引用等共享数据结构。Agent 私有结构保留在 Agent 包内。 |
 
 ### 前端 `frontend/src/`

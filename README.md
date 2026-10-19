@@ -22,6 +22,8 @@ AgentPlatform 用分层结构组织智能体应用：前端通过 API 提交任�
 
 当前版本不保存审核结果，不提供登录、审核历史、会话、流式输出或节点级进度；项目没有关系型数据库或 Redis。
 
+后端另提供独立 Markdown 转 Word 下载接口，使用 Python 依赖自带的 Pandoc 转换、python-docx 统一样式，不依赖模型配置或系统级安装 Pandoc。报告页可点击“下载 Word”保存当前报告；未来 Chat/MCP 接入尚未实现。
+
 ## 架构概览
 
 ```mermaid
@@ -29,6 +31,8 @@ flowchart LR
     Browser[浏览器 / Vue 工作台] --> APIClient[前端 API 客户端]
     APIClient --> API[FastAPI 路由]
     API --> ReviewService[ReviewService]
+    API --> ExportService[DocumentExportService]
+    ExportService --> Pandoc[包内 Pandoc / DOCX 样式]
     API --> AgentGraphService[AgentGraphService]
     AgentGraphService --> GraphMetadata[制度审核流程图元数据]
     ReviewService --> Docx[DOCX 转 Markdown 节点]
@@ -58,6 +62,7 @@ flowchart LR
 | 模型与知识库 | OpenAI 兼容聊天模型、RAGFlow |
 | 前端 | Vue 3、TypeScript、Vue Router、Vite |
 | Markdown 报告 | marked、DOMPurify |
+| Word 导出 | pypandoc-binary、python-docx |
 
 ## 代码结构
 
@@ -115,6 +120,7 @@ pnpm dev
 - `GET /health/ready`：检查模型配置与审核运行时，并分别返回两种模式的配置可用性；不探测外部连通或账户额度。
 - `POST /api/v1/reviews`：以 `multipart/form-data` 上传草稿 `file`，以及审核方式 `review_mode`；`standard_document` 模式还需 `standard_file`，返回 `text/markdown` 审核报告。缺省方式为 `knowledge_base`，兼容原有单文件请求。
 - `GET /api/v1/agents/institution_review/graph`：返回制度审核流程的静态节点和连线结构，不依赖运行时就绪状态，也不包含节点执行进度。
+- `POST /api/v1/documents/export/docx`：JSON 提交 `markdown` 和可选 `title`，返回 DOCX 附件。支持文本、列表、代码及表格，首版拒绝图片与原始 HTML；限制、样式及示例见 [后端 README](backend/README.md#markdown-导出-word)。
 - 前端 `/`、`/agents`、`/agents/institution-review`、`/agents/institution-review/flow`：平台首页、智能体广场、制度审核工作台和流程结构图。
 
 ## 质量检查
