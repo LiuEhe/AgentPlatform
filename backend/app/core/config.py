@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     max_review_chars: int = Field(default=50_000, ge=1_000, le=200_000)
     max_upload_bytes: int = Field(default=20_971_520, ge=1)
+    document_export_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
+    document_export_concurrency: int = Field(default=2, gt=0)
+    document_export_max_chars: int = Field(default=200000, gt=0, le=200000)
+    document_export_max_body_bytes: int = Field(default=1048576, gt=0)
+    document_export_max_output_bytes: int = Field(default=10485760, gt=0)
     institution_review_concurrency: int = Field(
         default=DEFAULT_INSTITUTION_REVIEW_CONCURRENCY, ge=1,
     )
