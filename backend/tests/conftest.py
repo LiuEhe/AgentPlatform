@@ -11,6 +11,9 @@ def isolate_external_settings(monkeypatch):
         "LLM_PROVIDER", "LLM_MODEL", "LLM_API_KEY", "LLM_BASE_URL",
         "RAGFLOW_BASE_URL", "RAGFLOW_API_KEY", "RAGFLOW_DATASET_ID",
         "INSTITUTION_REVIEW_CONCURRENCY",
+        "DOCUMENT_EXPORT_TIMEOUT_SECONDS", "DOCUMENT_EXPORT_CONCURRENCY",
+        "DOCUMENT_EXPORT_MAX_CHARS", "DOCUMENT_EXPORT_MAX_BODY_BYTES",
+        "DOCUMENT_EXPORT_MAX_OUTPUT_BYTES",
     ):
         monkeypatch.delenv(key, raising=False)
 
