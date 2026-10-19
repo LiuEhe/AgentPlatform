@@ -50,7 +50,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
-export async function createApiError(response: Response): Promise<ApiError> {
+export async function createApiError(
+  response: Response,
+  fallbackMessage?: string,
+): Promise<ApiError> {
   let body: ServerError | undefined
   try {
     const parsed: unknown = await response.json()
@@ -64,7 +67,7 @@ export async function createApiError(response: Response): Promise<ApiError> {
   const error = body?.error
   const message = typeof error?.message === 'string' && error.message.trim()
     ? error.message
-    : getStatusMessage(response.status)
+    : fallbackMessage ?? getStatusMessage(response.status)
   const code = typeof error?.code === 'string' ? error.code : undefined
   const requestId = typeof error?.request_id === 'string' ? error.request_id : undefined
   const details = Array.isArray(error?.details)

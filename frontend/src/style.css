@@ -186,7 +186,9 @@ button:focus-visible, a:focus-visible, .dropzone:has(input:focus-visible) {
 .status-error .status-symbol { background: #f7eaea; color: #ae4a51; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .report-panel { margin-top: 15px; }
-.report-heading { align-items: center; padding-bottom: 17px; border-bottom: 1px solid #efedeb; }
+.report-heading { align-items: center; flex-wrap: wrap; padding-bottom: 17px; border-bottom: 1px solid #efedeb; }
+.report-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; }
+.report-download { gap: 7px; }
 .report-ready { display: inline-flex; gap: 7px; align-items: center; padding: 6px 9px; border-radius: 3px; background: #f1f7f1; color: #5a8060; font-size: 9px; }
 .report-ready-dot { width: 5px; height: 5px; box-shadow: none; }
 .markdown-content { padding: 17px 2px 3px; color: #575462; font-size: 12px; line-height: 1.9; overflow-wrap: anywhere; }
