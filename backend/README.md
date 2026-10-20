@@ -1,6 +1,31 @@
 # 智能体平台后端
 
-基于 Python 3.12/3.13、FastAPI、LangChain、LangGraph 和 RAGFlow 的同步制度审核服务。首版接收 DOCX 制度草稿，使用公共 DOCX 转 Markdown 节点解析后，由制度审核流程按章、条代码拆分，输出四部分 Markdown 报告。不保存审核结果，也不依赖 Redis 或关系型数据库。
+基于 Python 3.12/3.13、FastAPI、LangChain、LangGraph 和 RAGFlow 的制度审核与会话服务。独立审核接口同步返回报告；会话助手通过意图识别决定普通回答、追问或调用现有制度审核，异步运行并通过查询接口返回状态与真实输出。不依赖 Redis 或关系型数据库。
+
+## 临时会话助手
+
+上传为可选步骤：无文件直接发消息，也可上传 DOCX 或将正文粘贴为用户消息。普通聊天、制度概念解释和摘要仅调用聊天模型，明确制度审核意图且参数齐全才执行子智能体。缺少审核方式、草稿或标准角色时先追问，用户转移话题时清除待补齐任务。只接入 `institution_review`，不新增工作汇总、报告生成 Agent。
+
+`conversation_assistant/graph/` 使用 LangGraph 表达材料准备、上下文选择、结构化意图识别、参数门控及回复/子调用分支。`ConversationService` 只负责会话用例、任务生命周期和 HTTP 映射；`infrastructure/conversation/in_memory_store.py` 保存中立会话记录。业务图状态与存储分开，未接入 checkpointer。
+
+上传阶段调用 `nodes/document/parse.py` 并复用既有 DOCX 转换器，聊天不重复解析。通用输入预算由 `nodes/llm/context.py` 处理，材料选择策略留在会话 Agent；模型上下文最多 24000 个序列化字符，历史审核结果仅带最多 4000 字符片段，审核始终使用独立保留的完整原文。父子调用通过同一个 `AgentRuntime`，制度审核图在启动时构建并复用。
+
+以下路径沿用 `api_prefix`（默认 `/api/v1`）：
+
+| 方法与路径 | 行为 |
+| --- | --- |
+| `POST /api/v1/conversations` | 创建临时会话，返回 201 |
+| `GET /api/v1/conversations/{id}?after_sequence=0` | 读取消息和文档元数据，支持按消息序号增量获取 |
+| `POST /api/v1/conversations/{id}/documents` | multipart 字段 `file` 上传一份 DOCX，返回文档 ID；不自动触发审核 |
+| `POST /api/v1/conversations/{id}/messages` | JSON `{client_message_id, content, document_ids: []}`，返回 202 及运行 ID |
+| `GET /api/v1/conversations/{id}/runs/{run_id}` | 查询 queued/running/succeeded/failed/cancelled 及结果 |
+| `POST /api/v1/conversations/{id}/runs/{run_id}/cancel` | 停止任务；终态请求幂等 |
+
+相同 `client_message_id` 与相同内容复用原运行；同 ID 异内容返回 409。失败运行仍以 HTTP 200 返回运行资源，并在 `error` 中保存安全错误；只有请求本身无效时使用 HTTP 错误。无模型配置时可管理会话及材料，消息执行返回 503。知识库配置只影响知识库审核。
+
+会话使用单进程内存，空闲默认 7200 秒、最长 28800 秒；轮询不续期，服务重启清空。每会话最多 8 文档/100 消息，用户消息 12000 字符，材料累计 100000 字符，输出单次最多 200000 字符。进程默认 3 个运行、6 个等待，排队 30 秒、运行 600 秒超时。配置为 `CONVERSATION_IDLE_SECONDS`、`CONVERSATION_LIFETIME_SECONDS`、`CONVERSATION_MAX_SESSIONS`（100）、`CONVERSATION_MAX_BYTES`（134217728）、`CONVERSATION_CONCURRENCY`、`CONVERSATION_QUEUE_SIZE`、`CONVERSATION_RUN_TIMEOUT_SECONDS`、`CONVERSATION_QUEUE_TIMEOUT_SECONDS`。字节预算仅限制业务载荷，不等于进程 RSS 上限。
+
+会话任务与 DOCX 解析并发受控，应用关闭先回收任务再关闭外部客户端。原始上传文件不落盘，正文仅保存在会话内。请使用单工作进程；本次没有用户认证、跨进程恢复或多用户权限隔离。
 
 ## 环境准备
 

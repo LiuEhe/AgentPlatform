@@ -26,6 +26,17 @@ flowchart LR
   LLMInfra --> Model
   Main --> RagClient
   HTTP --> Core[配置、错误处理、日志]
+  HTTP --> ConversationService[ConversationService]
+  ConversationService --> SessionStore[内存会话存储基础设施]
+  ConversationService --> ParseNode[公共 DOCX 解析节点]
+  ParseNode --> DocNode
+  ConversationService --> Runtime
+  Registry --> ConversationAdapter[会话 Agent 适配器]
+  ConversationAdapter --> ConversationGraph[会话 LangGraph]
+  ConversationGraph --> ContextNode[公共 LLM 上下文预算节点]
+  ConversationGraph --> Model
+  ConversationGraph --> ReviewTool[会话专属审核适配]
+  ReviewTool --> Runtime
   ReviewService --> Core
   Graph --> Core
   LLMInfra --> Core
@@ -44,19 +55,29 @@ flowchart LR
 
 ## 已有目录职责
 
+会话助手使用完整的 `agents/conversation_assistant/graph/` LangGraph，依次准备材料、构造上下文、识别意图和门控，再进入普通回复、澄清或审核子调用。参数合并、模式校验和目标白名单归 Agent；`ConversationService` 每轮只调用一次会话 Agent，负责后台任务、幂等、容量、超时、取消、上传用例和 HTTP 映射，不再解释意图或审核参数。
+
+`infrastructure/conversation/in_memory_store.py` 保存消息、完整材料、运行记录和不透明续接数据，并管理 TTL、锁和容量计数；中立记录结构位于 `schemas/conversation_session.py`，本轮契约位于 `schemas/conversation_turn.py`。这类应用会话存储与 Agent 的 `graph/state.py` 分开。未启用图检查点，不维护第二份消息历史。
+
+上传时调用 `nodes/document/parse.py` 完成格式及解压校验，并复用 `docx_to_markdown.py`，会话图使用解析结果，不重复解析。通用序列化预算及裁剪归 `nodes/llm/context.py`，会话材料选择归专属 `nodes/context_prepare.py`。模型输入预算为 24000 个序列化字符，历史子结果片段最多 4000 字符；这不是模型 token 上限。子调用按材料 ID 获取完整原文。
+
+会话专属 `tools/institution_review.py` 只适配已接入审核能力；图通过构建上下文注入的调用函数，使用生产环境同一个 `AgentRuntime` 调用原有制度审核 Agent。注册期间不执行调用，全部注册成功后才发布运行时；制度审核图继续在启动时构建并共享额度，没有通用工具中心或自动多智能体执行循环。运行时执行公共契约不变，注册表工厂允许注入注册表及调用函数以完成装配。
+
+DOCX 上传可选，粘贴正文引用当前会话用户消息。消息、结果、待补齐审核参数与材料只留在内存；服务关闭先回收后台任务，再关闭外部客户端。前端 `features/conversation-assistant/` 负责聊天交互，`AgentConversationView.vue` 负责页面组合。当前使用轮询，不提供流式输出、跨进程恢复或用户权限隔离。
+
 ### 后端 `backend/app/`
 
 | 目录 | 当前职责与约束 |
 | --- | --- |
 | `api/` | FastAPI 路由和 HTTP 输入输出。将业务协调委托给服务层。 |
 | `core/` | 配置、统一错误和日志等应用级基础能力。 |
-| `services/` | 应用用例协调。`ReviewService` 负责文档处理与运行时调用；`DocumentExportService` 负责纯文档导出、排版及共享额度；其他服务当前较薄，不据此扩建同类转发层。 |
+| `services/` | 应用用例协调，服务模块使用 `*_service.py`。会话只保留 `conversation_service.py`，不承载 Agent 编排或存储/解析/上下文辅助文件。原独立审核与导出服务仍承担各自用例。 |
 | `runtime/` | 通用智能体调用上下文、注册表、分发和执行结果。 |
 | `agents/` | 具体智能体及其构建入口。当前由 `agents` 包发现子包并调用 `register_agent`。 |
 | `agents/institution_review/graph/` | 制度审核 LangGraph 状态、图和路由边。 |
 | `agents/institution_review/nodes/` | 制度审核专属节点、提示调用和业务结构。 |
-| `nodes/` | 跨流程可复用节点。目前有 `document/docx_to_markdown.py`。跨流程复用应有实际调用方依据。 |
-| `infrastructure/` | 外部能力适配。目前包含聊天模型、RAGFlow HTTP 客户端及包内 Pandoc 进程适配。Pandoc 适配只处理程序定位、进程执行与资源回收。 |
+| `nodes/` | 公共处理能力，包括 DOCX 转换、解析校验和 LLM 输入预算。会话业务材料选择不进入通用 LLM 节点；公共节点也可独立于图调用。 |
+| `infrastructure/` | 外部系统/SDK 适配及具体存储实现，包括聊天模型、RAGFlow、Pandoc 和会话内存存储。存储实现不解释 Agent 业务或返回 HTTP View。 |
 | `schemas/` | 应用级审核响应与引用等共享数据结构。Agent 私有结构保留在 Agent 包内。 |
 
 ### 前端 `frontend/src/`
@@ -75,7 +96,7 @@ flowchart LR
 - 后端 HTTP 路由依赖服务及应用级配置/错误设施；服务协调用例并调用运行时或明确可复用节点。
 - `runtime/` 保持通用调用协议，不放入制度审核领域逻辑。
 - Agent 的图、状态和私有节点属于相应 Agent 包；跨 Agent 复用的能力应先证明有真实复用需求，再评估放入 `nodes/` 或共享 schema。
-- `infrastructure/` 只处理外部系统/SDK 接入细节。业务流程不应绕过已有服务/构建上下文任意新建外部客户端。
+- `infrastructure/` 处理外部系统/SDK 接入与具体存储实现。业务流程不应绕过已有服务/构建上下文任意新建外部客户端；Agent 不导入会话存储或反向依赖 services。
 - 前端页面通过 `api/` 访问后端；业务 UI 细节归属 feature，`views/` 负责页面组合。
 - 不因目录名称推导尚未存在的接口或职责。新增边界、跨层反向依赖或公共契约变化按治理流程请求确认。
 
