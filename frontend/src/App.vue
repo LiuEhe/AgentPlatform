@@ -1,10 +1,14 @@
 <script setup lang="ts">
-import { RouterLink, RouterView } from 'vue-router'
+import { computed } from 'vue'
+import { RouterLink, RouterView, useRoute } from 'vue-router'
+
+const route = useRoute()
+const isConversation = computed(() => route.name === 'agent-conversation')
 </script>
 
 <template>
-  <div class="app-shell">
-    <header class="topbar">
+  <div class="app-shell" :class="{ 'conversation-shell': isConversation }">
+    <header v-if="!isConversation" class="topbar">
       <RouterLink class="brand" to="/" aria-label="AgentPlatform 首页">
         <span class="brand-mark" aria-hidden="true">
           <svg viewBox="0 0 32 32" fill="none">
@@ -30,9 +34,13 @@ import { RouterLink, RouterView } from 'vue-router'
       <RouterView />
     </main>
 
-    <footer class="site-footer">
+    <footer v-if="!isConversation" class="site-footer">
       <span>AgentPlatform · 智能体应用工作空间</span>
       <span class="footer-note"><span class="footer-sparkle">✳</span> 让专业流程，更进一步</span>
     </footer>
   </div>
 </template>
+
+<style scoped>
+.conversation-shell > .main-content { max-width: none; }
+</style>

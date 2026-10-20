@@ -3,6 +3,7 @@ import AgentHomeView from '../views/AgentHomeView.vue'
 import AgentPlazaView from '../views/AgentPlazaView.vue'
 import AgentWorkbenchView from '../views/AgentWorkbenchView.vue'
 import AgentFlowView from '../views/AgentFlowView.vue'
+import AgentConversationView from '../views/AgentConversationView.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -16,6 +17,11 @@ export const router = createRouter({
       path: '/agents',
       name: 'agent-plaza',
       component: AgentPlazaView,
+    },
+    {
+      path: '/agents/conversation-assistant',
+      name: 'agent-conversation',
+      component: AgentConversationView,
     },
     {
       path: '/agents/:agentId/flow',

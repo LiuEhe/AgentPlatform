@@ -3,6 +3,13 @@ import { RouterLink } from 'vue-router'
 
 const agents = [
   {
+    id: 'conversation-assistant',
+    name: '会话助手',
+    category: '智能对话',
+    description: '从一句话开始交流，可选上传 Word 材料，需要时调用专业智能体，在对话中查看结果。',
+    capabilities: ['多轮对话', '可选附件', '意图识别', '智能体协作'],
+  },
+  {
     id: 'institution-review',
     name: '制度审核助手',
     category: '文档审核',
@@ -54,11 +61,11 @@ const agents = [
             <div class="document-art" aria-hidden="true">
               <div class="document-shadow"></div>
               <div class="document-sheet">
-                <span class="document-label">POLICY / REVIEW</span>
+                <span class="document-label">{{ agent.id === 'conversation-assistant' ? 'CHAT / ASSISTANT' : 'POLICY / REVIEW' }}</span>
                 <span class="document-line line-long"></span>
                 <span class="document-line line-mid"></span>
                 <span class="document-line line-short"></span>
-                <span class="document-highlight"><span>§</span> 条款一致性检查</span>
+                <span class="document-highlight"><span>§</span> {{ agent.id === 'conversation-assistant' ? '从一句话开始交流' : '条款一致性检查' }}</span>
                 <span class="document-line line-mid"></span>
                 <span class="document-line line-long"></span>
                 <span class="document-check">✓</span>
@@ -67,7 +74,7 @@ const agents = [
               <span class="document-orbit orbit-right"></span>
               <span class="document-spark">✳</span>
             </div>
-            <span class="plaza-card-index">AGENT / 001</span>
+            <span class="plaza-card-index">{{ agent.id === 'conversation-assistant' ? 'CHAT ASSISTANT' : 'POLICY REVIEW' }}</span>
           </div>
 
           <div class="plaza-card-content">
