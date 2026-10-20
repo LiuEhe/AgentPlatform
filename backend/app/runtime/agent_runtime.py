@@ -1,7 +1,7 @@
 """通过注册表按标识分发智能体调用。"""
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import uuid4
@@ -26,6 +26,9 @@ class AgentExecution:
     invocation_id: str
     agent_id: str
     output: object
+
+
+AgentInvoker = Callable[[str, Mapping[str, object]], Awaitable[AgentExecution]]
 
 
 class AgentAdapter(Protocol):

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from app.core.config import DEFAULT_INSTITUTION_REVIEW_CONCURRENCY
 from app.core.errors import AppError
-from app.runtime.agent_runtime import AgentRegistry
+from app.runtime.agent_runtime import AgentInvoker, AgentRegistry, AgentRuntime
 
 if TYPE_CHECKING:
     from langchain_core.language_models.chat_models import BaseChatModel
@@ -24,6 +24,9 @@ class AgentBuildContext:
     model: BaseChatModel
     rag_client: RagFlowClient | None = None
     institution_review_concurrency: int = DEFAULT_INSTITUTION_REVIEW_CONCURRENCY
+    invoke_agent: AgentInvoker | None = None
+    conversation_max_review_chars: int = 50000
+    conversation_knowledge_base_configured: bool = False
 
 
 def build_agent_registry(
@@ -31,12 +34,26 @@ def build_agent_registry(
     rag_client: RagFlowClient | None = None,
     *,
     institution_review_concurrency: int = DEFAULT_INSTITUTION_REVIEW_CONCURRENCY,
+    registry: AgentRegistry | None = None,
+    invoke_agent: AgentInvoker | None = None,
+    conversation_max_review_chars: int = 50000,
+    conversation_knowledge_base_configured: bool | None = None,
 ) -> AgentRegistry:
     """发现子包并调用各自的注册入口。"""
-    registry = AgentRegistry()
+    registry = registry if registry is not None else AgentRegistry()
+    # 注册阶段只绑定调用能力；全部注册完成后再执行，避免依赖包发现顺序。
+    invoke_agent = invoke_agent if invoke_agent is not None else AgentRuntime(registry).invoke
     context = AgentBuildContext(
-        model=model, rag_client=rag_client,
+        model=model,
+        rag_client=rag_client,
         institution_review_concurrency=institution_review_concurrency,
+        invoke_agent=invoke_agent,
+        conversation_max_review_chars=conversation_max_review_chars,
+        conversation_knowledge_base_configured=(
+            rag_client is not None
+            if conversation_knowledge_base_configured is None
+            else conversation_knowledge_base_configured
+        ),
     )
     modules = sorted(iter_modules(__path__), key=lambda module: module.name)
 

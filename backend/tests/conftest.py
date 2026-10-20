@@ -4,15 +4,29 @@ from types import SimpleNamespace
 import pytest
 from docx import Document
 
+from app.schemas.conversation_turn import ConversationTurnInput, TurnMessage
+
 
 @pytest.fixture(autouse=True)
 def isolate_external_settings(monkeypatch):
+    import os
+
+    for key in tuple(os.environ):
+        if key.startswith("CONVERSATION_"):
+            monkeypatch.delenv(key, raising=False)
     for key in (
-        "LLM_PROVIDER", "LLM_MODEL", "LLM_API_KEY", "LLM_BASE_URL",
-        "RAGFLOW_BASE_URL", "RAGFLOW_API_KEY", "RAGFLOW_DATASET_ID",
+        "LLM_PROVIDER",
+        "LLM_MODEL",
+        "LLM_API_KEY",
+        "LLM_BASE_URL",
+        "RAGFLOW_BASE_URL",
+        "RAGFLOW_API_KEY",
+        "RAGFLOW_DATASET_ID",
         "INSTITUTION_REVIEW_CONCURRENCY",
-        "DOCUMENT_EXPORT_TIMEOUT_SECONDS", "DOCUMENT_EXPORT_CONCURRENCY",
-        "DOCUMENT_EXPORT_MAX_CHARS", "DOCUMENT_EXPORT_MAX_BODY_BYTES",
+        "DOCUMENT_EXPORT_TIMEOUT_SECONDS",
+        "DOCUMENT_EXPORT_CONCURRENCY",
+        "DOCUMENT_EXPORT_MAX_CHARS",
+        "DOCUMENT_EXPORT_MAX_BODY_BYTES",
         "DOCUMENT_EXPORT_MAX_OUTPUT_BYTES",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -34,6 +48,7 @@ def fake_model_factory():
         def with_structured_output(self, schema):
             async def invoke(messages):
                 return await self.call(schema, messages)
+
             return SimpleNamespace(ainvoke=invoke)
 
         async def ainvoke(self, messages):
@@ -52,4 +67,26 @@ def docx_bytes_factory():
         buffer = BytesIO()
         doc.save(buffer)
         return buffer.getvalue()
+
+    return make
+
+
+@pytest.fixture
+def turn_factory():
+    def make(*, role="user", content="你好", documents=(), continuation=None, history=()):
+        return ConversationTurnInput(
+            latest_message_id="m1",
+            messages=(
+                *history,
+                TurnMessage(
+                    id="m1",
+                    role=role,
+                    content=content,
+                    document_ids=tuple(d.id for d in documents),
+                ),
+            ),
+            documents=documents,
+            continuation=continuation,
+        )
+
     return make

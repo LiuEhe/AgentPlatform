@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     institution_review_concurrency: int = Field(
         default=DEFAULT_INSTITUTION_REVIEW_CONCURRENCY, ge=1,
     )
+    conversation_idle_seconds: float = Field(default=7200, gt=0, allow_inf_nan=False)
+    conversation_lifetime_seconds: float = Field(default=28800, gt=0, allow_inf_nan=False)
+    conversation_max_sessions: int = Field(default=100, gt=0)
+    conversation_max_bytes: int = Field(default=134217728, gt=0)
+    conversation_concurrency: int = Field(default=3, gt=0)
+    conversation_queue_size: int = Field(default=6, ge=0)
+    conversation_run_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
+    conversation_queue_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
 
     llm_provider: str = "openai_compatible"
     llm_model: str | None = None
