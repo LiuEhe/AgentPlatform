@@ -1,10 +1,11 @@
 """读取并校验应用环境配置。"""
 
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_INSTITUTION_REVIEW_CONCURRENCY = 3
@@ -24,6 +25,24 @@ class Settings(BaseSettings):
     api_prefix: str = "/api/v1"
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
     log_level: str = "INFO"
+    langfuse_enabled: bool = False
+    langfuse_public_key: SecretStr | None = None
+    langfuse_secret_key: SecretStr | None = None
+    langfuse_base_url: str = "http://127.0.0.1:3000"
+    langfuse_capture_content: bool = False
+    langfuse_sample_rate: float = Field(default=1.0, ge=0, le=1, allow_inf_nan=False)
+    langfuse_timeout_seconds: int = Field(default=2, gt=0)
+    langfuse_prompts_enabled: bool = False
+    langfuse_prompt_label: str = "production"
+    langfuse_prompt_cache_ttl_seconds: int = Field(default=60, ge=0)
+    langfuse_cost_model: str | None = None
+    langfuse_input_cny_per_million: Decimal | None = Field(default=None, ge=0, allow_inf_nan=False)
+    langfuse_output_cny_per_million: Decimal | None = Field(default=None, ge=0, allow_inf_nan=False)
+    langfuse_cached_input_cny_per_million: Decimal | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+    )
     max_review_chars: int = Field(default=50_000, ge=1_000, le=200_000)
     max_upload_bytes: int = Field(default=20_971_520, ge=1)
     document_export_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
@@ -32,7 +51,8 @@ class Settings(BaseSettings):
     document_export_max_body_bytes: int = Field(default=1048576, gt=0)
     document_export_max_output_bytes: int = Field(default=10485760, gt=0)
     institution_review_concurrency: int = Field(
-        default=DEFAULT_INSTITUTION_REVIEW_CONCURRENCY, ge=1,
+        default=DEFAULT_INSTITUTION_REVIEW_CONCURRENCY,
+        ge=1,
     )
     conversation_idle_seconds: float = Field(default=7200, gt=0, allow_inf_nan=False)
     conversation_lifetime_seconds: float = Field(default=28800, gt=0, allow_inf_nan=False)
@@ -69,7 +89,7 @@ class Settings(BaseSettings):
             raise ValueError("LOG_LEVEL 必须是 DEBUG、INFO、WARNING、ERROR 或 CRITICAL")
         return normalized
 
-    @field_validator("llm_base_url", "ragflow_base_url")
+    @field_validator("llm_base_url", "ragflow_base_url", "langfuse_base_url")
     @classmethod
     def validate_optional_http_url(cls, value: str | None) -> str | None:
         """配置了服务地址时校验 HTTP 协议和主机名。"""

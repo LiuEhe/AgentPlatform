@@ -16,9 +16,13 @@ from app.api.reviews import router as reviews_router
 from app.core.config import Settings, get_settings
 from app.core.errors import install_error_handlers
 from app.core.logging import configure_logging, install_request_logging
+from app.core.observability import NullObserver
 from app.infrastructure.conversation.in_memory_store import InMemoryConversationStore
+from app.infrastructure.langfuse.client import create_observer, shutdown_observer
+from app.infrastructure.langfuse.prompts import LangfusePromptResolver
 from app.infrastructure.pandoc import PandocRunner
 from app.infrastructure.ragflow.client import RagFlowClient
+from app.nodes.llm.prompts import PromptResolver
 from app.runtime.agent_runtime import AgentRegistry, AgentRuntime
 from app.services.conversation_service import ConversationService
 from app.services.document_export_service import DocumentExportService
@@ -34,13 +38,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.settings = app_settings
         app.state.agent_runtime = None
+        observer = create_observer(app_settings)
+        app.state.observer = observer
+        resolver = (
+            LangfusePromptResolver(
+                observer.client,
+                label=app_settings.langfuse_prompt_label,
+                cache_ttl_seconds=app_settings.langfuse_prompt_cache_ttl_seconds,
+            )
+            if app_settings.langfuse_prompts_enabled and hasattr(observer, "client")
+            else PromptResolver()
+        )
+
+        @asynccontextmanager
+        async def execution_scope(context):
+            async with resolver.session():
+                yield
+
         conversation_store = InMemoryConversationStore(
             idle_seconds=app_settings.conversation_idle_seconds,
             lifetime_seconds=app_settings.conversation_lifetime_seconds,
             max_sessions=app_settings.conversation_max_sessions,
             max_bytes=app_settings.conversation_max_bytes,
         )
-        conversation_service = ConversationService(app_settings, None, store=conversation_store)
+        conversation_service = ConversationService(
+            app_settings,
+            None,
+            store=conversation_store,
+            observer=observer,
+        )
         app.state.conversation_service = conversation_service
         export_service = DocumentExportService(app_settings, PandocRunner(app_settings))
         app.state.document_export_service = export_service
@@ -51,12 +77,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     model = create_llm_service(app_settings)
                     rag_client = (
-                        RagFlowClient(app_settings, client)
+                        RagFlowClient(app_settings, client, observer=observer)
                         if not app_settings.ragflow_issues()
                         else None
                     )
                     registry = AgentRegistry()
-                    runtime = AgentRuntime(registry)
+                    runtime = AgentRuntime(
+                        registry,
+                        observer=observer,
+                        execution_scope_factory=execution_scope,
+                    )
                     build_agent_registry(
                         model,
                         rag_client,
@@ -65,6 +95,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         invoke_agent=runtime.invoke,
                         conversation_max_review_chars=app_settings.max_review_chars,
                         conversation_knowledge_base_configured=not app_settings.ragflow_issues(),
+                        observer=observer,
+                        graph_config_factory=getattr(observer, "graph_config", None),
                     )
                     app.state.agent_runtime = runtime
                     conversation_service.runtime = app.state.agent_runtime
@@ -76,6 +108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 yield
         finally:
             await conversation_service.aclose()
+            await shutdown_observer(observer)
             app.state.conversation_service = None
             app.state.agent_runtime = None
             try:
@@ -93,6 +126,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.agent_runtime = None
     app.state.document_export_service = None
     app.state.conversation_service = None
+    app.state.observer = NullObserver()
     app.add_middleware(
         CORSMiddleware,
         allow_origins=app_settings.cors_origins,

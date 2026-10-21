@@ -19,4 +19,11 @@ def register_agent(registry: AgentRegistry, context: AgentBuildContext) -> None:
             max_review_chars=context.conversation_max_review_chars,
         ),
     )
-    registry.register("conversation_assistant", ConversationAssistantAgent(graph))
+    registry.register(
+        "conversation_assistant",
+        ConversationAssistantAgent(
+            graph,
+            graph_config_factory=context.graph_config_factory,
+            evaluation_sink=context.evaluation_sink,
+        ),
+    )

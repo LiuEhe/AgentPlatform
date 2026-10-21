@@ -28,6 +28,7 @@ class SessionSubmission:
 class SessionRun:
     id: str
     request: SessionSubmission
+    request_id: str | None = None
     status: SessionRunStatus = "queued"
     stage: str = "等待处理"
     message: SessionMessage | None = None

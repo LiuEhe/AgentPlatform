@@ -6,6 +6,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 
 from app.agents.institution_review.graph.state import ReviewState
 from app.agents.institution_review.nodes._llm import invoke_markdown, invoke_structured
+from app.agents.institution_review.prompts import REVIEW_PROMPTS
 from app.agents.institution_review.schemas import ClauseReview, ReviewMode, ReviewOverviewOutput
 from app.schemas.review import ReviewReference
 
@@ -23,7 +24,9 @@ def extract_reference_names(references: list[ReviewReference]) -> list[str]:
 
 
 def _report_data(
-    reviews: list[ClauseReview], *, max_evidence_chars: int | None = 1200,
+    reviews: list[ClauseReview],
+    *,
+    max_evidence_chars: int | None = 1200,
 ) -> list[dict[str, object]]:
     """整理条款发现项及其真实检索依据。"""
     rows: list[dict[str, object]] = []
@@ -77,14 +80,12 @@ def create_report_sections_node(model: BaseChatModel):
         if is_standard:
             names = [state["standard_name"]] if state.get("standard_name") else []
         rows = _report_data(
-            state.get("clause_reviews", []), max_evidence_chars=None if is_standard else 1200,
+            state.get("clause_reviews", []),
+            max_evidence_chars=None if is_standard else 1200,
         )
         review_data = json.dumps(rows, ensure_ascii=False)
         summary_data = json.dumps(
-            [
-                {key: value for key, value in row.items() if key != "evidence"}
-                for row in rows
-            ],
+            [{key: value for key, value in row.items() if key != "evidence"} for row in rows],
             ensure_ascii=False,
         )
         source_data = json.dumps(names, ensure_ascii=False)
@@ -92,8 +93,7 @@ def create_report_sections_node(model: BaseChatModel):
         overview = await invoke_structured(
             model,
             ReviewOverviewOutput,
-            "为制度审查选择简述中的关注类别，不增加新的发现，"
-            "只从冲突、重复、术语三个固定类别中选择关注项；不得输出自由文本、文件名或来源名称。",
+            REVIEW_PROMPTS["overview"],
             f"制度标题：{state['title']}\n"
             f"已拆分并审核条款数：{len(state.get('clauses', []))}\n"
             f"逐条审查摘要：\n{summary_data}\n"
@@ -148,13 +148,9 @@ def create_report_sections_node(model: BaseChatModel):
         else:
             conflict = await invoke_markdown(
                 model,
-                "将逐条审查结果汇总为 Markdown 表格，列出原始章/节/条/款/项及序号、"
-                "问题类型（冲突或重复）、"
-                f"问题说明、严重程度和{source_label}依据。只能报告输入中已有 findings，"
-                "不能从原始条款推断新问题。"
-                "不要输出章节标题。",
-                f"逐条审查结构化结果：\n{review_data}\n"
-                f"{source_label}文件名：\n{source_data}",
+                REVIEW_PROMPTS["conflicts"],
+                f"逐条审查结构化结果：\n{review_data}\n{source_label}文件名：\n{source_data}",
+                source_label=source_label,
             )
         return {
             "reference_names": names,

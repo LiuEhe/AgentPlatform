@@ -8,6 +8,7 @@ import httpx
 
 from app.core.config import Settings
 from app.core.errors import AppError
+from app.core.observability import NullObserver
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +41,18 @@ class RetrievedChunk:
 class RagFlowClient:
     """通过 RAGFlow REST API 检索指定知识库。"""
 
-    def __init__(self, settings: Settings, client: httpx.AsyncClient) -> None:
+    def __init__(self, settings: Settings, client: httpx.AsyncClient, *, observer=None) -> None:
         self._settings = settings
         self._client = client
+        self._observer = observer or NullObserver()
 
     async def retrieve(self, query: str, *, top_k: int = 8) -> list[RetrievedChunk]:
+        with self._observer.scope("ragflow.retrieve", kind="retriever") as span:
+            chunks = await self._retrieve(query, top_k=top_k)
+            span.update(attributes={"count": len(chunks)})
+            return chunks
+
+    async def _retrieve(self, query: str, *, top_k: int = 8) -> list[RetrievedChunk]:
         """检索知识片段并兼容 RAGFlow 字典或列表格式的 chunks。"""
         if not self._settings.ragflow_base_url or not self._settings.ragflow_api_key:
             raise AppError("RAGFLOW_NOT_CONFIGURED", "RAGFlow 配置不完整", 503)

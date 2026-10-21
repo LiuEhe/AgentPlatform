@@ -36,6 +36,7 @@ def build_review_graph(
     rag_client: RagFlowClient | None,
     *,
     concurrency: int = DEFAULT_INSTITUTION_REVIEW_CONCURRENCY,
+    observer=None,
 ):
     """组装并行全文术语检查、逐条 RAG 审查和 Markdown 报告节点。"""
     if concurrency < 1:
@@ -43,7 +44,12 @@ def build_review_graph(
     semaphore = asyncio.Semaphore(concurrency)
     nodes = {
         SPLIT_NODE: split_clauses,
-        CLAUSE_REVIEW_NODE: create_clause_review_node(model, rag_client, semaphore=semaphore),
+        CLAUSE_REVIEW_NODE: create_clause_review_node(
+            model,
+            rag_client,
+            semaphore=semaphore,
+            observer=observer,
+        ),
         TERMINOLOGY_NODE: create_terminology_check(model),
         REPORT_NODE: create_report_sections_node(model),
         SUGGESTION_NODE: create_suggestion_node(model),

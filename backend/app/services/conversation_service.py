@@ -7,6 +7,11 @@ from uuid import uuid4
 
 from app.core.config import Settings
 from app.core.errors import AppError
+from app.core.observability import (
+    NullObserver,
+    bind_observation_attributes,
+    observation_attributes,
+)
 from app.infrastructure.conversation.in_memory_store import InMemoryConversationStore
 from app.nodes.document.parse import DocumentParseError, parse_docx
 from app.runtime.agent_runtime import AgentRuntime
@@ -45,10 +50,12 @@ class ConversationService:
         runtime: AgentRuntime | None,
         *,
         store: InMemoryConversationStore,
+        observer=None,
     ):
         self.settings = settings
         self.runtime = runtime
         self._store = store
+        self._observer = observer or NullObserver()
         self._slots = asyncio.Semaphore(settings.conversation_concurrency)
         self._parse_slots = asyncio.Semaphore(2)
         self._tasks: dict[str, asyncio.Task] = {}
@@ -214,10 +221,14 @@ class ConversationService:
             )
             if chars + len(payload.content) > 1000000:
                 raise AppError("CONVERSATION_CAPACITY", "会话文字容量已满", 413)
-            amount = len(payload.content.encode("utf-8")) + 1024
+            amount = len(payload.content.encode("utf-8")) + 1088
             self._store.reserve(amount)
             record.bytes_used += amount
-            run = SessionRun(id=str(uuid4()), request=request)
+            run = SessionRun(
+                id=str(uuid4()),
+                request=request,
+                request_id=observation_attributes.get().get("request_id"),
+            )
             record.messages.append(
                 SessionMessage(
                     id=str(uuid4()),
@@ -312,6 +323,16 @@ class ConversationService:
         )
 
     async def _execute(self, id: str, run_id: str) -> None:
+        run = self._store.record(id).runs[run_id]
+        attrs = {"session_id": id, "run_id": run_id, "request_id": run.request_id or ""}
+        with bind_observation_attributes(attrs):
+            with self._observer.scope("conversation.run", attributes=attrs, detached=True) as span:
+                try:
+                    await self._execute_run(id, run_id)
+                finally:
+                    span.update(attributes={"status": run.status})
+
+    async def _execute_run(self, id: str, run_id: str) -> None:
         acquired = False
         try:
             async with asyncio.timeout(self.settings.conversation_queue_timeout_seconds):

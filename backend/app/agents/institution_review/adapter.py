@@ -6,6 +6,7 @@ from typing import Self
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
+from app.agents.institution_review.evaluation import project_evaluation
 from app.agents.institution_review.graph.state import ReviewState
 from app.agents.institution_review.schemas import ReviewMode
 from app.core.errors import AppError
@@ -38,8 +39,12 @@ class InstitutionReviewInput(BaseModel):
 class InstitutionReviewAgent:
     """调用制度审核图并校验其 Markdown 输出。"""
 
-    def __init__(self, graph: CompiledStateGraph) -> None:
+    def __init__(
+        self, graph: CompiledStateGraph, *, graph_config_factory=None, evaluation_sink=None
+    ):
         self._graph = graph
+        self._graph_config_factory = graph_config_factory
+        self._evaluation_sink = evaluation_sink
 
     async def invoke(
         self,
@@ -63,7 +68,12 @@ class InstitutionReviewAgent:
         if agent_input.review_mode == ReviewMode.STANDARD_DOCUMENT:
             initial_state["standard_name"] = agent_input.standard_name
             initial_state["standard_content"] = agent_input.standard_content
-        result = await self._graph.ainvoke(initial_state)
+        config = self._graph_config_factory(context) if self._graph_config_factory else None
+        result = await self._graph.ainvoke(initial_state, config=config)
+        if self._evaluation_sink is not None:
+            self._evaluation_sink(
+                context.agent_id, context.invocation_id, project_evaluation(result)
+            )
         report = result.get("report_markdown")
         if not isinstance(report, str) or not report.strip():
             raise AppError("AGENT_OUTPUT_INVALID", "制度审核未生成完整报告", 502)

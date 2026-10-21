@@ -8,6 +8,7 @@ from app.agents.institution_review.adapter import INSTITUTION_REVIEW_AGENT_ID
 from app.agents.institution_review.schemas import ReviewMode
 from app.core.config import Settings
 from app.core.errors import AppError
+from app.core.observability import NullObserver
 from app.nodes.document.docx_to_markdown import DocumentReadError, convert_docx_to_markdown
 from app.runtime.agent_runtime import AgentRuntime
 
@@ -19,9 +20,10 @@ _STRUCTURAL_HEADING_PATTERN = re.compile(r"^第[一二三四五六七八九十�
 class ReviewService:
     """执行上传制度的读取、校验和同步审核。"""
 
-    def __init__(self, settings: Settings, runtime: AgentRuntime) -> None:
+    def __init__(self, settings: Settings, runtime: AgentRuntime, *, observer=None) -> None:
         self._settings = settings
         self._runtime = runtime
+        self._observer = observer or NullObserver()
 
     def _read_document(self, filename: str, content: bytes, *, label: str) -> str:
         """对草稿和标准分别应用同样的文件及正文限制。"""
@@ -33,7 +35,8 @@ class ReviewService:
             raise AppError("UPLOAD_TOO_LARGE", f"{label}超过大小限制", 413)
 
         try:
-            markdown = convert_docx_to_markdown(content)
+            with self._observer.scope("document.parse"):
+                markdown = convert_docx_to_markdown(content)
         except DocumentReadError as exc:
             raise AppError("INVALID_DOCX", f"{label}无法读取或不包含可审核文本", 422) from exc
 
@@ -46,7 +49,10 @@ class ReviewService:
         return markdown
 
     async def review_document(
-        self, filename: str, content: bytes, *,
+        self,
+        filename: str,
+        content: bytes,
+        *,
         review_mode: ReviewMode = ReviewMode.KNOWLEDGE_BASE,
         standard_filename: str | None = None,
         standard_content: bytes | None = None,
@@ -66,7 +72,9 @@ class ReviewService:
         payload: dict[str, object] = {}
         if mode == ReviewMode.STANDARD_DOCUMENT:
             standard_markdown = self._read_document(
-                standard_filename, standard_content, label="标准文档",
+                standard_filename,
+                standard_content,
+                label="标准文档",
             )
             payload.update(
                 review_mode=mode.value,

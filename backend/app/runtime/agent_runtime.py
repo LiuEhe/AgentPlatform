@@ -2,11 +2,13 @@
 
 import logging
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import uuid4
 
 from app.core.errors import AppError
+from app.core.observability import NullObserver
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +68,10 @@ class AgentRegistry:
 class AgentRuntime:
     """统一负责智能体分发、调用标识和执行日志。"""
 
-    def __init__(self, registry: AgentRegistry) -> None:
+    def __init__(self, registry: AgentRegistry, *, observer=None, execution_scope_factory=None):
         self._registry = registry
+        self._observer = observer or NullObserver()
+        self._execution_scope_factory = execution_scope_factory
 
     async def invoke(
         self,
@@ -79,7 +83,22 @@ class AgentRuntime:
         context = AgentContext(invocation_id=invocation_id, agent_id=agent_id)
         try:
             agent = self._registry.resolve(agent_id)
-            output = await agent.invoke(payload, context)
+            with self._observer.scope(
+                agent_id,
+                kind="agent",
+                attributes={
+                    "agent_id": agent_id,
+                    "invocation_id": invocation_id,
+                },
+            ) as observation:
+                scope = (
+                    self._execution_scope_factory(context)
+                    if self._execution_scope_factory
+                    else nullcontext()
+                )
+                async with scope:
+                    output = await agent.invoke(payload, context)
+                observation.update(attributes={"status": "succeeded"})
         except AppError as exc:
             logger.warning(
                 "agent_invoke_failed invocation_id=%s agent_id=%s code=%s",

@@ -2,18 +2,16 @@
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
-from app.agents.conversation_assistant.prompts import CHAT_PROMPT
+from app.agents.conversation_assistant.prompts import CONVERSATION_PROMPTS
 from app.agents.conversation_assistant.schemas import ConversationInput, PreparedAction
 from app.core.errors import AppError
+from app.nodes.llm.prompts import invoke_prompt
 
 
 async def generate_reply(model: BaseChatModel, payload: ConversationInput) -> str:
     try:
-        result = await model.ainvoke(
-            [
-                ("system", CHAT_PROMPT),
-                ("human", payload.model_dump_json()),
-            ]
+        result = await invoke_prompt(
+            model, CONVERSATION_PROMPTS["chat"], {"content": payload.model_dump_json()}
         )
         content = getattr(result, "content", result)
         if isinstance(content, list):

@@ -27,6 +27,9 @@ class AgentBuildContext:
     invoke_agent: AgentInvoker | None = None
     conversation_max_review_chars: int = 50000
     conversation_knowledge_base_configured: bool = False
+    observer: object | None = None
+    graph_config_factory: object | None = None
+    evaluation_sink: object | None = None
 
 
 def build_agent_registry(
@@ -38,6 +41,9 @@ def build_agent_registry(
     invoke_agent: AgentInvoker | None = None,
     conversation_max_review_chars: int = 50000,
     conversation_knowledge_base_configured: bool | None = None,
+    observer=None,
+    graph_config_factory=None,
+    evaluation_sink=None,
 ) -> AgentRegistry:
     """发现子包并调用各自的注册入口。"""
     registry = registry if registry is not None else AgentRegistry()
@@ -45,6 +51,9 @@ def build_agent_registry(
     invoke_agent = invoke_agent if invoke_agent is not None else AgentRuntime(registry).invoke
     context = AgentBuildContext(
         model=model,
+        observer=observer,
+        graph_config_factory=graph_config_factory,
+        evaluation_sink=evaluation_sink,
         rag_client=rag_client,
         institution_review_concurrency=institution_review_concurrency,
         invoke_agent=invoke_agent,

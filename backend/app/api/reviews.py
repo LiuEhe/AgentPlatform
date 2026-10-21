@@ -45,9 +45,13 @@ async def create_review(
         standard_content = None
         if standard_file is not None:
             standard_content = await standard_file.read(settings.max_upload_bytes + 1)
-        service = ReviewService(settings, runtime)
+        service = ReviewService(
+            settings, runtime, observer=getattr(request.app.state, "observer", None)
+        )
         report = await service.review_document(
-            file.filename or "", content, review_mode=review_mode,
+            file.filename or "",
+            content,
+            review_mode=review_mode,
             standard_filename=standard_file.filename if standard_file is not None else None,
             standard_content=standard_content,
         )
