@@ -27,7 +27,41 @@
 
 会话任务与 DOCX 解析并发受控，应用关闭先回收任务再关闭外部客户端。原始上传文件不落盘，正文仅保存在会话内。请使用单工作进程；本次没有用户认证、跨进程恢复或多用户权限隔离。
 
-## 环境准备
+## Langfuse 追踪、Prompt 与实验
+
+后端支持自托管 Langfuse 4.59.0+，当前锁定 Python SDK 5.0.2。凭据仅填写后端 `.env`；示例字段见 `.env.example`。开启 `LANGFUSE_ENABLED=true` 后，业务 POST 请求、后台会话运行、父子 Agent、图节点、模型调用及 RAGFlow 检索关联到同一执行上下文；会话每轮使用独立追踪，同会话以 session_id 分组。健康检查和 GET 轮询仅保留本地请求日志。
+
+`LANGFUSE_CAPTURE_CONTENT` 默认 false：远端只保存层级、标识、状态、用量及白名单元数据。显式设为 true 会将模型输入输出和图状态持久写入 Langfuse，区别于原有临时内存会话；凭据仍过滤。最终 OTel 导出过滤也清除自动异常事件和资源属性，避免绕过开关。SDK 异步批量上报，关闭应用先回收任务再发送剩余数据；上报故障不改变业务就绪或结果。
+
+Token 来自供应商真实 usage，输入、输出和缓存桶分别统计，不使用字符预算代替。费用由 Langfuse 根据匹配的模型价格推算；缺少价格或用量时是未知值。自定义模型名称、私有价格和币种须在 Langfuse 模型设置中核对，系统不会自动改价，也不统计 RAGFlow 内部不可见模型的费用。
+
+Langfuse 原生 `cost_details` 的单位是美元。人民币模型可通过 `LANGFUSE_COST_MODEL`（精确名称）及 `LANGFUSE_INPUT_CNY_PER_MILLION`、`LANGFUSE_OUTPUT_CNY_PER_MILLION`、`LANGFUSE_CACHED_INPUT_CNY_PER_MILLION` 配置在线文本单价。每个 generation 的 metadata 包含 `estimated_cost_cny`、`cost_currency=CNY`、`cost_basis=online-token-estimate`，供核对人民币估算；缺少用量、价格或出现未配置的计量桶时不生成估算。当前本机按用户提供的 0.8/2.7/0.1 元每百万 Token 配置，未使用 Batch 或显式缓存创建价。
+
+2026-10-21 按用户指定的固定记账汇率 **1 USD = 6.8 CNY**，已在当前 Langfuse 项目创建 `qwen3.8-flash` 自定义模型价表（精确匹配名称）。输入、输出、缓存命中分别为 **0.117647058824 / 0.397058823529 / 0.014705882353 USD 每百万 Token**；API 实际按每 Token 价格保存，即人民币每百万价格 ÷ 6.8 ÷ 1000000，未使用上述显示值截断计价。缓存桶覆盖 `input_cache_read` 及对应别名，独立 reasoning 输出桶按相同输出价计费；不对 `total` 重复计费。该汇率不自动跟随市场变化，后续原本以美元计价的模型直接配置其美元价格。业务代码不会自动同步或覆盖远端价表，更换项目或重建 Langfuse 后须重新配置。模型价表仅作用于生效后的新记录，历史费用不会自动补算；实际费用仍以完整的供应商输入、输出及缓存用量为前提。[官方计费说明](https://langfuse.com/docs/observability/features/token-and-cost-tracking)。
+
+Prompt 共 8 个，覆盖会话意图/回答与审核的知识库条款、标准条款、术语、简述、冲突报告及建议。开启 `LANGFUSE_PROMPTS_ENABLED=true` 后按 `LANGFUSE_PROMPT_LABEL`（默认 production）读取；当前轮同名模板版本固定，跨轮可刷新。两开关任一关闭时使用本地模板。远端读取失败或变量不匹配时日常请求兜底，固定版本实验明确失败。
+
+在 `backend/` 运行：
+
+```powershell
+# 检查远端模板差异；仅创建缺失模板，不覆盖冲突或移动已有标签
+uv run python -m scripts.sync_langfuse_prompts --dry-run
+uv run python -m scripts.sync_langfuse_prompts --apply --initial-label development
+
+# 离线校验样例及版本文件，不调用模型或远端
+uv run python -m scripts.run_langfuse_experiments --dataset tests/fixtures/langfuse/conversation_cases.json --prompt-versions tests/fixtures/langfuse/prompt_versions.example.json --run-name conversation-v1 --dry-run
+
+# 显式运行会消耗已配置模型额度并写入 Langfuse；--sync-dataset 仅补建缺失合成项
+uv run python -m scripts.run_langfuse_experiments --dataset tests/fixtures/langfuse/standard_review_cases.json --prompt-versions tests/fixtures/langfuse/prompt_versions.example.json --run-name standard-v1 --dataset-name agent-platform/acceptance-standard --execute --sync-dataset
+```
+
+版本文件示例中的 1 仅是样例，执行前应替换为项目中真实存在的版本。已有数据集异内容项会报错，不覆盖或删除。实验执行真实注册表/图，在同一个事件循环复用运行时和并发额度；SDK runner 在工作线程桥接，不逐项创建事件循环。默认并发 1，输出包含成功/失败总数、确定性规则分数及全部样例结果；失败不能从评分分母中消失。合成数据与真实会话隔离，不自动把用户文档加入数据集。
+
+发布/回滚通过 Langfuse 标签指向进行；初始同步不会移动既有 production 标签。当前本机开发配置使用 development。关闭两个开关可恢复本地模板及原业务执行，已写入 Langfuse 的数据仍保留。没有接入图检查点、断点或恢复执行，也未增加前端监控页面。
+
+相关检查：`uv run ruff check app tests scripts`、`uv run pytest`。测试使用受控模型及 SDK 内存导出，核对父子图并发隔离、generation 不重复、用量不被过滤、正文开关、取消、Prompt 固定与兜底及实验失败计数；真实模型准确率、网关计量和模型价格仍需独立验收。
+
+## 模型与 RAGFlow 配置
 
 需要 Python 3.12 或 3.13。
 

@@ -127,6 +127,8 @@ pnpm dev
 
 ## 质量检查
 
+后端已接入可选的本地 Langfuse：记录 Agent/图/模型/检索调用链、供应商 Token，关联 Prompt 版本并执行合成数据集实验。费用需要匹配模型价格，正文采集默认关闭。配置、初始化、实验及回退方法见 [后端 Langfuse 说明](backend/README.md#langfuse-追踪prompt-与实验)。凭据只保存在后端本地环境配置。
+
 后端在 `backend/` 执行：
 
 ```powershell
