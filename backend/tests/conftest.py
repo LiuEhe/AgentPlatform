@@ -12,8 +12,10 @@ def isolate_external_settings(monkeypatch):
     import os
 
     for key in tuple(os.environ):
-        if key.startswith("CONVERSATION_"):
+        if key.startswith(("CONVERSATION_", "LANGFUSE_")):
             monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("LANGFUSE_ENABLED", "false")
+    monkeypatch.setenv("LANGFUSE_PROMPTS_ENABLED", "false")
     for key in (
         "LLM_PROVIDER",
         "LLM_MODEL",

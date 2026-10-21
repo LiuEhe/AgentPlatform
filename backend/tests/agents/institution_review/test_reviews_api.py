@@ -87,7 +87,9 @@ def test_draft_only_legacy_request_works(monkeypatch, fake_model_factory, docx_b
     async def retrieve(*args, **kwargs):
         return []
     monkeypatch.setattr("app.main.create_llm_service", lambda _: fake_model_factory())
-    monkeypatch.setattr("app.main.RagFlowClient", lambda *_: SimpleNamespace(retrieve=retrieve))
+    monkeypatch.setattr(
+        "app.main.RagFlowClient", lambda *_, **__: SimpleNamespace(retrieve=retrieve)
+    )
     with TestClient(create_app(settings(
         ragflow_base_url="http://ragflow.test", ragflow_api_key="test", ragflow_dataset_id="test",
     ))) as client:

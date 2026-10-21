@@ -1,0 +1,134 @@
+[
+  {
+    "id": "chat",
+    "agent_id": "conversation_assistant",
+    "input": {
+      "latest_message_id": "m-last",
+      "messages": [
+        {
+          "id": "m-last",
+          "role": "user",
+          "content": "你好，聊聊今天的天气。",
+          "document_ids": []
+        }
+      ],
+      "documents": []
+    },
+    "expected": {
+      "child_called": false,
+      "needs_clarification": false
+    }
+  },
+  {
+    "id": "qa",
+    "agent_id": "conversation_assistant",
+    "input": {
+      "latest_message_id": "m-last",
+      "messages": [
+        {
+          "id": "m-last",
+          "role": "user",
+          "content": "制度审核通常关注哪些问题？",
+          "document_ids": []
+        }
+      ],
+      "documents": []
+    },
+    "expected": {
+      "child_called": false,
+      "needs_clarification": false
+    }
+  },
+  {
+    "id": "missing",
+    "agent_id": "conversation_assistant",
+    "input": {
+      "latest_message_id": "m-last",
+      "messages": [
+        {
+          "id": "m-last",
+          "role": "user",
+          "content": "请帮我审核这份制度。",
+          "document_ids": []
+        }
+      ],
+      "documents": []
+    },
+    "expected": {
+      "child_called": false,
+      "needs_clarification": true
+    }
+  },
+  {
+    "id": "ambiguous",
+    "agent_id": "conversation_assistant",
+    "input": {
+      "latest_message_id": "m-last",
+      "messages": [
+        {
+          "id": "m-last",
+          "role": "user",
+          "content": "帮我处理一下。",
+          "document_ids": []
+        }
+      ],
+      "documents": []
+    },
+    "expected": {
+      "child_called": false,
+      "needs_clarification": true
+    }
+  },
+  {
+    "id": "change-topic",
+    "agent_id": "conversation_assistant",
+    "input": {
+      "latest_message_id": "m-last",
+      "messages": [
+        {
+          "id": "m-last",
+          "role": "user",
+          "content": "先不审核了，给我写一句生日祝福。",
+          "document_ids": []
+        }
+      ],
+      "documents": []
+    },
+    "expected": {
+      "child_called": false,
+      "needs_clarification": false
+    }
+  },
+  {
+    "id": "review",
+    "agent_id": "conversation_assistant",
+    "input": {
+      "latest_message_id": "m-last",
+      "messages": [
+        {
+          "id": "draft",
+          "role": "user",
+          "content": "第一条 付款无需审批。",
+          "document_ids": []
+        },
+        {
+          "id": "standard",
+          "role": "user",
+          "content": "第一条 所有付款必须审批。",
+          "document_ids": []
+        },
+        {
+          "id": "m-last",
+          "role": "user",
+          "content": "以上第一段是草稿，第二段是标准，请按标准文档对比审核草稿。",
+          "document_ids": []
+        }
+      ],
+      "documents": []
+    },
+    "expected": {
+      "child_called": true,
+      "needs_clarification": false
+    }
+  }
+]

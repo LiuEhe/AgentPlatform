@@ -1,0 +1,78 @@
+[
+  {
+    "id": "conflict",
+    "agent_id": "institution_review",
+    "input": {
+      "title": "合成验收样例",
+      "content": "第一条 付款无需审批。",
+      "review_mode": "standard_document",
+      "standard_name": "合成标准",
+      "standard_content": "第一条 所有付款必须审批。"
+    },
+    "expected": {
+      "finding_count": 1,
+      "categories": [
+        "conflict"
+      ],
+      "sequences": [
+        1
+      ],
+      "unsupported_findings": 0,
+      "sections_complete": true
+    }
+  },
+  {
+    "id": "duplicate",
+    "agent_id": "institution_review",
+    "input": {
+      "title": "合成验收样例",
+      "content": "第一条 付款必须审批。",
+      "review_mode": "standard_document",
+      "standard_name": "合成标准",
+      "standard_content": "第一条 付款必须审批。"
+    },
+    "expected": {
+      "finding_count": 1,
+      "categories": [
+        "duplicate"
+      ],
+      "sequences": [
+        1
+      ],
+      "unsupported_findings": 0,
+      "sections_complete": true
+    }
+  },
+  {
+    "id": "clean",
+    "agent_id": "institution_review",
+    "input": {
+      "title": "合成验收样例",
+      "content": "第一条 档案保存十年。",
+      "review_mode": "standard_document",
+      "standard_name": "合成标准",
+      "standard_content": "第一条 付款必须审批。"
+    },
+    "expected": {
+      "finding_count": 0,
+      "unsupported_findings": 0,
+      "sections_complete": true
+    }
+  },
+  {
+    "id": "insufficient",
+    "agent_id": "institution_review",
+    "input": {
+      "title": "合成验收样例",
+      "content": "第一条 执行相关规定。",
+      "review_mode": "standard_document",
+      "standard_name": "合成标准",
+      "standard_content": "第一条 付款必须审批。"
+    },
+    "expected": {
+      "finding_count": 0,
+      "unsupported_findings": 0,
+      "sections_complete": true
+    }
+  }
+]

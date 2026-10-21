@@ -1,0 +1,10 @@
+{
+  "conversation/intent": 1,
+  "conversation/chat": 1,
+  "institution-review/knowledge-base-clause": 1,
+  "institution-review/standard-clause": 1,
+  "institution-review/terminology": 1,
+  "institution-review/overview": 1,
+  "institution-review/conflicts": 1,
+  "institution-review/suggestions": 1
+}

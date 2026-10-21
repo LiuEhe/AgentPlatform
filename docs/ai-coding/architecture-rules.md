@@ -100,6 +100,16 @@ DOCX 上传可选，粘贴正文引用当前会话用户消息。消息、结果
 - 前端页面通过 `api/` 访问后端；业务 UI 细节归属 feature，`views/` 负责页面组合。
 - 不因目录名称推导尚未存在的接口或职责。新增边界、跨层反向依赖或公共契约变化按治理流程请求确认。
 
+### Langfuse 可观测性与 Prompt 边界
+
+`core/observability.py` 定义中立观测接口和关联上下文，`infrastructure/langfuse/` 负责 SDK 客户端、回调、导出过滤和远端 Prompt 读取。`main.py` 装配并注入运行时、应用服务和 Agent 适配器；runtime 不导入供应商 SDK。异步会话 run 在后台入口建立独立追踪，以 request_id 关联提交请求，以 session_id 聚合会话，父子 Agent 及并发条款继承当前追踪。轮询不创建远端请求追踪。
+
+公共 Prompt 契约和解析会话位于 `nodes/llm/prompts.py`，完整任务模板留在各 Agent 的 prompts.py。runtime 的可选异步执行作用域负责绑定解析器，独立节点调用默认使用本地模板。每轮同名 Prompt 固定首次选择的版本，远端日常故障可兜底；固定版本实验不兜底。模型输出 schema、材料角色和动作门控仍由 Agent 代码确定。
+
+默认导出不保存输入输出、图状态或异常正文；显式启用正文采集后，Langfuse 的持久记录独立于会话内存 TTL，不用于恢复会话。Token 仅覆盖当前进程实际可见的模型调用，RAGFlow 内部计量仍由其自身提供。
+
+`backend/scripts/` 提供显式 Prompt 同步与实验命令，发布及数据集写入需显式参数。实验复用现有 runtime/图，Agent 专属 evaluation.py 产生受控投影；不修改 HTTP 响应或会话存储，不自动采集真实文档作为数据集。评估器不进入通用 runtime。
+
 ## 复用、新模块与目录创建
 
 1. 搜索相关符号、API、组件和调用方，再决定新增或复用。
