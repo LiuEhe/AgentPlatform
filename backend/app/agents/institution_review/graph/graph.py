@@ -5,6 +5,7 @@ import asyncio
 from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.graph import END, START, StateGraph
 
+from app.agents.institution_review.graph.chunk_review import build_chunk_review_graph
 from app.agents.institution_review.graph.edges import (
     ASSEMBLE_NODE,
     CLAUSE_REVIEW_NODE,
@@ -18,7 +19,6 @@ from app.agents.institution_review.graph.edges import (
     TERMINOLOGY_NODE,
 )
 from app.agents.institution_review.graph.state import ReviewState
-from app.agents.institution_review.nodes.clause_review import create_clause_review_node
 from app.agents.institution_review.nodes.clause_split import split_clauses
 from app.agents.institution_review.nodes.report_assemble import (
     assemble_report,
@@ -44,7 +44,7 @@ def build_review_graph(
     semaphore = asyncio.Semaphore(concurrency)
     nodes = {
         SPLIT_NODE: split_clauses,
-        CLAUSE_REVIEW_NODE: create_clause_review_node(
+        CLAUSE_REVIEW_NODE: build_chunk_review_graph(
             model,
             rag_client,
             semaphore=semaphore,

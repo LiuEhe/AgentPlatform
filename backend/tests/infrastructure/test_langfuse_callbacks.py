@@ -1,13 +1,15 @@
 import json
 from uuid import uuid4
 
+import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from app.core.config import Settings
 from app.infrastructure.langfuse.client import create_observer
 
 
-def test_nested_compiled_graph_has_one_generation_per_model_request():
+@pytest.mark.parametrize("mixed", [False, True])
+def test_nested_compiled_graph_has_one_generation_per_model_request(mixed):
     import asyncio
     import json
 
@@ -86,15 +88,33 @@ def test_nested_compiled_graph_has_one_generation_per_model_request():
             graph_config_factory=observer.graph_config,
             observer=observer,
         )
+        draft = "第一条 草稿。\n第二条 草稿。" if mixed else "第一条 草稿。"
         turn = {
             "latest_message_id": "last",
             "messages": [
-                {"id": "d", "role": "user", "content": "第一条 草稿。"},
+                {"id": "d", "role": "user", "content": draft},
                 {"id": "s", "role": "user", "content": "第一条 标准。"},
                 {"id": "last", "role": "user", "content": "按标准审核草稿"},
             ],
         }
-        await asyncio.gather(*(runtime.invoke("conversation_assistant", turn) for _ in range(2)))
+        if mixed:
+            await asyncio.gather(
+                runtime.invoke("conversation_assistant", turn),
+                runtime.invoke(
+                    "institution_review",
+                    {
+                        "title": "独立审核",
+                        "content": draft,
+                        "review_mode": "standard_document",
+                        "standard_name": "标准",
+                        "standard_content": "第一条 标准。",
+                    },
+                ),
+            )
+        else:
+            await asyncio.gather(
+                *(runtime.invoke("conversation_assistant", turn) for _ in range(2))
+            )
 
     asyncio.run(run())
     observer.client.flush()
@@ -102,10 +122,32 @@ def test_nested_compiled_graph_has_one_generation_per_model_request():
     generations = [
         s for s in spans if s.attributes.get("langfuse.observation.type") == "generation"
     ]
-    assert len(generations) == model.calls == 10
+    assert len(generations) == model.calls == (11 if mixed else 10)
     assert len({s.context.trace_id for s in generations}) == 2
     assert all(s.parent is not None for s in generations)
-    assert "第一条" not in json.dumps([dict(s.attributes) for s in spans], ensure_ascii=False)
+    assert sorted(
+        sum(s.context.trace_id == trace for s in generations)
+        for trace in {s.context.trace_id for s in generations}
+    ) == ([5, 6] if mixed else [5, 5])
+    chunks = [s for s in spans if s.name == "review.chunk"]
+    assert len(chunks) == (4 if mixed else 2)
+    assert sum(s.name == "collect_chunk_reviews" for s in spans) == 2
+    usage = [
+        json.loads(v)
+        for s in generations
+        for k, v in s.attributes.items()
+        if k.endswith("usage_details")
+    ]
+    assert len(usage) == len(generations)
+    assert all(u["input"] == 10 and u["output"] == 2 and u["total"] == 12 for u in usage)
+    exported = json.dumps(
+        [
+            {"attributes": dict(s.attributes), "events": [dict(e.attributes) for e in s.events]}
+            for s in spans
+        ],
+        ensure_ascii=False,
+    )
+    assert "第一条" not in exported
     observer.shutdown()
 
 
@@ -188,9 +230,16 @@ def test_callback_setup_failure_degrades_observability_only(monkeypatch):
 
 def test_sample_rate_zero_exports_nothing():
     exporter = InMemorySpanExporter()
-    observer = create_observer(Settings(_env_file=None, langfuse_enabled=True,
-        langfuse_sample_rate=0, langfuse_public_key=f"pk-test-{uuid4()}",
-        langfuse_secret_key="sk-test"), exporter=exporter)
+    observer = create_observer(
+        Settings(
+            _env_file=None,
+            langfuse_enabled=True,
+            langfuse_sample_rate=0,
+            langfuse_public_key=f"pk-test-{uuid4()}",
+            langfuse_secret_key="sk-test",
+        ),
+        exporter=exporter,
+    )
     with observer.scope("sampled-out"):
         pass
     observer.client.flush()
@@ -200,8 +249,16 @@ def test_sample_rate_zero_exports_nothing():
 
 def test_session_and_environment_survive_final_export():
     exporter = InMemorySpanExporter()
-    observer = create_observer(Settings(_env_file=None, app_env="test-env", langfuse_enabled=True,
-        langfuse_public_key=f"pk-test-{uuid4()}", langfuse_secret_key="sk-test"), exporter=exporter)
+    observer = create_observer(
+        Settings(
+            _env_file=None,
+            app_env="test-env",
+            langfuse_enabled=True,
+            langfuse_public_key=f"pk-test-{uuid4()}",
+            langfuse_secret_key="sk-test",
+        ),
+        exporter=exporter,
+    )
     with observer.scope("root", attributes={"session_id": "session-1"}):
         with observer.scope("child"):
             pass
@@ -221,11 +278,21 @@ def test_content_disabled_never_queues_automatic_media(monkeypatch):
     monkeypatch.setattr(MediaManager, "_process_media", lambda *a, **kw: processed.append(kw))
     before = os.environ.get("LANGFUSE_MEDIA_UPLOAD_ENABLED")
     exporter = InMemorySpanExporter()
-    observer = create_observer(Settings(_env_file=None, langfuse_enabled=True,
-        langfuse_public_key=f"pk-test-{uuid4()}", langfuse_secret_key="sk-test"), exporter=exporter)
-    with observer.client.start_as_current_observation(name="media", input={
-        "messages": [{"content": "data:text/plain;base64,UFJJVkFURV9ET0NVTUVOVA=="}],
-    }):
+    observer = create_observer(
+        Settings(
+            _env_file=None,
+            langfuse_enabled=True,
+            langfuse_public_key=f"pk-test-{uuid4()}",
+            langfuse_secret_key="sk-test",
+        ),
+        exporter=exporter,
+    )
+    with observer.client.start_as_current_observation(
+        name="media",
+        input={
+            "messages": [{"content": "data:text/plain;base64,UFJJVkFURV9ET0NVTUVOVA=="}],
+        },
+    ):
         pass
     observer.client.flush()
     assert processed == []

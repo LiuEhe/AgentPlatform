@@ -153,3 +153,104 @@ def test_plain_text_review_without_file_upload(monkeypatch, fake_model_factory):
         result = send(client, id, "以上分别为草稿和标准，请进行制度审核", 3)
         assert "一. 简述" in result["message"]["agent_call"]["output"]
         assert client.get(f"/api/v1/conversations/{id}").json()["documents"] == []
+
+
+def test_cancel_conversation_waits_for_review_chunk_cleanup(
+    monkeypatch,
+    fake_model_factory,
+    docx_bytes_factory,
+):
+    import asyncio
+
+    model = install_model(monkeypatch, fake_model_factory, ["documents"] * 3)
+    original_handler = model.handler
+    controls = None
+    active = {key: 0 for key in ("FIRST", "OTHER", "NEXT")}
+    peaks = dict(active)
+
+    async def handler(schema, messages):
+        prompt = messages[-1][1]
+        if schema and schema.__name__ == "StandardReviewOutput":
+            key = next(key for key in active if key in prompt)
+            active[key] += 1
+            peaks[key] = max(peaks[key], active[key])
+            controls["entered"][key].put_nowait(key)
+            try:
+                await controls[key].wait()
+            finally:
+                active[key] -= 1
+            return schema()
+        if schema is None and "检查全文" in prompt and "OTHER" in prompt:
+            controls["other_terminology"].set()
+        return await original_handler(schema, messages)
+
+    model.handler = handler
+    with TestClient(app()) as client:
+
+        async def make_controls():
+            return {
+                "entered": {key: asyncio.Queue() for key in active},
+                "other_terminology": asyncio.Event(),
+                **{key: asyncio.Event() for key in active},
+            }
+
+        controls = client.portal.call(make_controls)
+        sessions = {}
+        for key in active:
+            id = client.post("/api/v1/conversations").json()["id"]
+            ids = []
+            for filename in ("draft.docx", "standard.docx"):
+                body = "\n".join(f"第{i}条 {key}原文" for i in range(1, 5))
+                response = client.post(
+                    f"/api/v1/conversations/{id}/documents",
+                    files={"file": (filename, docx_bytes_factory(title=filename, body=body))},
+                )
+                assert response.status_code == 201
+                ids.append(response.json()["id"])
+            sessions[key] = (id, ids)
+
+        def submit(key):
+            id, ids = sessions[key]
+            response = client.post(
+                f"/api/v1/conversations/{id}/messages",
+                json={"client_message_id": key, "content": "按标准审核", "document_ids": ids},
+            )
+            assert response.status_code == 202
+            return response.json()["id"]
+
+        async def wait_entered(key):
+            async with asyncio.timeout(5):
+                for _ in range(3):
+                    assert await controls["entered"][key].get() == key
+
+        async def release_and_wait(key, run_id):
+            task = client.app.state.conversation_service._tasks.get(run_id)
+            controls[key].set()
+            if task:
+                await asyncio.wait_for(task, 5)
+
+        first_id = submit("FIRST")
+        client.portal.call(wait_entered, "FIRST")
+        other_id = submit("OTHER")
+        client.portal.call(asyncio.wait_for, controls["other_terminology"].wait(), 5)
+        id = sessions["FIRST"][0]
+        response = client.post(f"/api/v1/conversations/{id}/runs/{first_id}/cancel")
+        assert response.status_code == 202
+        assert response.json()["status"] == "cancelled"
+        assert client.portal.call(lambda: active["FIRST"]) == 0
+        messages = client.get(f"/api/v1/conversations/{id}").json()["messages"]
+        assert all(not m.get("agent_call") for m in messages)
+
+        client.portal.call(wait_entered, "OTHER")
+        client.portal.call(release_and_wait, "OTHER", other_id)
+        other_session = sessions["OTHER"][0]
+        assert (
+            client.get(f"/api/v1/conversations/{other_session}/runs/{other_id}").json()["status"]
+            == "succeeded"
+        )
+        next_id = submit("NEXT")
+        client.portal.call(wait_entered, "NEXT")
+        assert client.portal.call(lambda: active["NEXT"]) == 3
+        client.portal.call(release_and_wait, "NEXT", next_id)
+        assert client.portal.call(lambda: dict(peaks)) == {"FIRST": 3, "OTHER": 3, "NEXT": 3}
+        assert client.portal.call(lambda: dict(active)) == {"FIRST": 0, "OTHER": 0, "NEXT": 0}

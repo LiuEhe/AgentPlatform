@@ -77,3 +77,10 @@ class ClauseReview(BaseModel):
     clause: Clause
     findings: list[ClauseReviewFinding] = Field(default_factory=list)
     references: list[ReviewReference] = Field(default_factory=list)
+
+
+class ChunkReviewResult(BaseModel):
+    """一个图任务返回的原条款审核结果，不作为模型输出 schema。"""
+
+    chunk_sequence: int = Field(ge=1)
+    reviews: list[ClauseReview]
