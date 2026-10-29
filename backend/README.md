@@ -1,6 +1,6 @@
 # 智能体平台后端
 
-基于 Python 3.12/3.13、FastAPI、LangChain、LangGraph 和 RAGFlow 的制度审核与会话服务。独立审核接口同步返回报告；会话助手通过意图识别决定普通回答、追问或调用现有制度审核，异步运行并通过查询接口返回状态与真实输出。不依赖 Redis 或关系型数据库。
+基于 Python 3.12/3.13、FastAPI、LangChain、LangGraph 和 RAGFlow 的制度审核与会话服务。独立审核接口同步返回报告；会话助手通过意图识别决定普通回答、追问或调用现有制度审核，异步运行并通过 SSE 推送普通回答增量、真实阶段与最终结果。不依赖 Redis 或关系型数据库。
 
 ## 临时会话助手
 
@@ -19,17 +19,22 @@
 | `POST /api/v1/conversations/{id}/documents` | multipart 字段 `file` 上传一份 DOCX，返回文档 ID；不自动触发审核 |
 | `POST /api/v1/conversations/{id}/messages` | JSON `{client_message_id, content, document_ids: []}`，返回 202 及运行 ID |
 | `GET /api/v1/conversations/{id}/runs/{run_id}` | 查询 queued/running/succeeded/failed/cancelled 及结果 |
+| `GET /api/v1/conversations/{id}/runs/{run_id}/events` | SSE 订阅同一运行：snapshot、delta、state、done |
 | `POST /api/v1/conversations/{id}/runs/{run_id}/cancel` | 停止任务；终态请求幂等 |
 
 相同 `client_message_id` 与相同内容复用原运行；同 ID 异内容返回 409。失败运行仍以 HTTP 200 返回运行资源，并在 `error` 中保存安全错误；只有请求本身无效时使用 HTTP 错误。无模型配置时可管理会话及材料，消息执行返回 503。知识库配置只影响知识库审核。
 
-会话使用单进程内存，空闲默认 7200 秒、最长 28800 秒；轮询不续期，服务重启清空。每会话最多 8 文档/100 消息，用户消息 12000 字符，材料累计 100000 字符，输出单次最多 200000 字符。进程默认 3 个运行、6 个等待，排队 30 秒、运行 600 秒超时。配置为 `CONVERSATION_IDLE_SECONDS`、`CONVERSATION_LIFETIME_SECONDS`、`CONVERSATION_MAX_SESSIONS`（100）、`CONVERSATION_MAX_BYTES`（134217728）、`CONVERSATION_CONCURRENCY`、`CONVERSATION_QUEUE_SIZE`、`CONVERSATION_RUN_TIMEOUT_SECONDS`、`CONVERSATION_QUEUE_TIMEOUT_SECONDS`。字节预算仅限制业务载荷，不等于进程 RSS 上限。
+SSE 使用已锁定 FastAPI 0.141.1 的官方 `EventSourceResponse` 与 `ServerSentEvent`，不增加依赖。首个 `snapshot` 数据为 `{event, run, text}`，包含当前状态及累计临时回答；`delta` 的 `text` 为新文本，`state` 和 `done` 的 `run` 为 RunView，终态包含正式消息。事件分帧、JSON 编码、空闲约 15 秒的注释心跳及防缓存/防代理缓冲响应头均由框架负责，不保留手写实现；`ServerSentEvent(retry=3000)` 指定浏览器重连间隔。目标通过 FastAPI 依赖在响应开始前校验，不存在时仍返回标准 JSON 404。代理部署需保持长连接并及时转发事件。[官方 SSE 文档](https://fastapi.tiangolo.com/tutorial/server-sent-events/) 与本地 `fastapi/sse.py`、`fastapi/routing.py` 已核对；会话快照、容量管理和取消属于应用策略，仍由既有服务与存储负责。
+
+每次订阅只读取现有运行，不调用模型；断开不取消任务，重连先获取累计快照，不提供持久事件日志或跨进程重放。官方 LangGraph `astream` 只将 `reply_chat` 的模型文本对外发送；结构化意图、思考内容和子审核中间输出不外发。审核只推送顶层真实阶段及最终完整结果。累计临时文本属于内存会话存储，计入现有容量；慢读者按偏移获取合并增量，不创建无界队列。成功、失败、取消、超时或到期时通知订阅，临时文本占用被回收，正式消息仍执行原容量检查。
+
+会话使用单进程内存，空闲默认 7200 秒、最长 28800 秒；状态查询及 SSE 订阅不续期，服务重启清空。每会话最多 8 文档/100 消息，用户消息 12000 字符，材料累计 100000 字符，输出单次最多 200000 字符。进程默认 3 个运行、6 个等待，排队 30 秒、运行 600 秒超时。配置为 `CONVERSATION_IDLE_SECONDS`、`CONVERSATION_LIFETIME_SECONDS`、`CONVERSATION_MAX_SESSIONS`（100）、`CONVERSATION_MAX_BYTES`（134217728）、`CONVERSATION_CONCURRENCY`、`CONVERSATION_QUEUE_SIZE`、`CONVERSATION_RUN_TIMEOUT_SECONDS`、`CONVERSATION_QUEUE_TIMEOUT_SECONDS`。字节预算仅限制业务载荷，不等于进程 RSS 上限。
 
 会话任务与 DOCX 解析并发受控，应用关闭先回收任务再关闭外部客户端。原始上传文件不落盘，正文仅保存在会话内。请使用单工作进程；本次没有用户认证、跨进程恢复或多用户权限隔离。
 
 ## Langfuse 追踪、Prompt 与实验
 
-后端支持自托管 Langfuse 4.59.0+，当前锁定 Python SDK 5.0.2。凭据仅填写后端 `.env`；示例字段见 `.env.example`。开启 `LANGFUSE_ENABLED=true` 后，业务 POST 请求、后台会话运行、父子 Agent、图节点、模型调用及 RAGFlow 检索关联到同一执行上下文；会话每轮使用独立追踪，同会话以 session_id 分组。健康检查和 GET 轮询仅保留本地请求日志。
+后端支持自托管 Langfuse 4.59.0+，当前锁定 Python SDK 5.0.2。凭据仅填写后端 `.env`；示例字段见 `.env.example`。开启 `LANGFUSE_ENABLED=true` 后，业务 POST 请求、后台会话运行、父子 Agent、图节点、模型调用及 RAGFlow 检索关联到同一执行上下文；会话每轮使用独立追踪，同会话以 session_id 分组。健康检查、GET 状态读取和 SSE 订阅仅保留本地请求日志，不重复生成模型调用追踪。
 
 `LANGFUSE_CAPTURE_CONTENT` 默认 false：远端只保存层级、标识、状态、用量及白名单元数据。显式设为 true 会将模型输入输出和图状态持久写入 Langfuse，区别于原有临时内存会话；凭据仍过滤。最终 OTel 导出过滤也清除自动异常事件和资源属性，避免绕过开关。SDK 异步批量上报，关闭应用先回收任务再发送剩余数据；上报故障不改变业务就绪或结果。
 

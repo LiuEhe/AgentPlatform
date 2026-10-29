@@ -65,11 +65,13 @@ flowchart LR
 
 上传时调用 `nodes/document/parse.py` 完成格式及解压校验，并复用 `docx_to_markdown.py`，会话图使用解析结果，不重复解析。通用序列化预算及裁剪归 `nodes/llm/context.py`，会话材料选择归专属 `nodes/context_prepare.py`。模型输入预算为 24000 个序列化字符，历史子结果片段最多 4000 字符；这不是模型 token 上限。子调用按材料 ID 获取完整原文。
 
-会话专属 `tools/institution_review.py` 只适配已接入审核能力；图通过构建上下文注入的调用函数，使用生产环境同一个 `AgentRuntime` 调用原有制度审核 Agent。注册期间不执行调用，全部注册成功后才发布运行时；制度审核图继续在启动时构建并共享额度，没有通用工具中心或自动多智能体执行循环。运行时执行公共契约不变，注册表工厂允许注入注册表及调用函数以完成装配。
+会话专属 `tools/institution_review.py` 只适配已接入审核能力；图通过构建上下文注入的调用函数，使用生产环境同一个 `AgentRuntime` 调用原有制度审核 Agent。注册期间不执行调用，全部注册成功后才发布运行时；制度审核图继续在启动时构建并共享额度，没有通用工具中心或自动多智能体执行循环。运行时结果契约不变，invoke 增加可选通用事件回调，通过 AgentContext 交给适配器，不引入 HTTP、存储或具体审核规则；注册表工厂允许注入注册表及调用函数以完成装配。
 
-DOCX 上传可选，粘贴正文引用当前会话用户消息。消息、结果、待补齐审核参数与材料只留在内存；服务关闭先回收后台任务，再关闭外部客户端。前端 `features/conversation-assistant/` 负责聊天交互，`AgentConversationView.vue` 负责页面组合。当前使用轮询，不提供流式输出、跨进程恢复或用户权限隔离。
+DOCX 上传可选，粘贴正文引用当前会话用户消息。消息、结果、待补齐审核参数与材料只留在内存；服务关闭先回收后台任务，再关闭外部客户端。前端 `features/conversation-assistant/` 负责聊天交互，`AgentConversationView.vue` 负责页面组合。当前使用 SSE，普通回答流式，审核推送真实阶段和完整结果；不提供跨进程恢复或用户权限隔离。
 
-前端导航为宣传首页 → 智能体目录 → 独立智能体页面。App 使用 Vue KeepAlive 保留助手页面；会话 feature 在页面内存中持有已访问会话的消息、材料元数据、草稿、附件选择与失败重试快照，左栏展示会话记录。激活后查询后端状态，停用时中止客户端请求与轮询，不取消后端任务；响应代次和会话/运行 ID 防止迟到结果串入新会话。现有 sessionStorage 仅保存当前会话和客户端消息 ID，不写入正文，不构成持久会话存储或新的全局状态管理层。
+会话适配器使用官方 LangGraph astream 单次驱动图，白名单输出 reply_chat 的文本，保留最终状态的校验和评估投影。应用服务接收文本/阶段事件，临时累计文本、变更通知与容量归现有会话存储，不放入 Agent 业务状态。SSE 订阅从同一运行读取 snapshot/delta/state/done，不重新调用模型，不建立事件日志或无界队列；终态回收临时文本占用。API 使用 FastAPI 官方 EventSourceResponse 与 ServerSentEvent；框架处理协议编码、心跳及响应头，应用服务只等待业务状态变化。依赖在开始流响应前校验运行，断开时通过标准库 aclosing 关闭订阅迭代器，不取消后台任务。
+
+前端导航为宣传首页 → 智能体目录 → 独立智能体页面。App 使用 Vue KeepAlive 保留助手页面；会话 feature 在页面内存中持有已访问会话的消息、材料元数据、草稿、附件选择与失败重试快照，左栏展示会话记录。激活后读取会话并订阅活动任务，停用时中止客户端请求与 SSE，不取消后端任务；响应代次、会话/运行 ID 和订阅实例防止迟到事件串入新会话。原生 EventSource 限定错误重连，失败可进行一次状态读取并提示手动恢复，不回退周期轮询。现有 sessionStorage 仅保存当前会话和客户端消息 ID，不写入正文，不构成持久会话存储或新的全局状态管理层。
 
 助手上传文件在输入框中预览，发送后随对应消息展示，不设右侧材料模块。独立审核仍走同步接口，停止等待仅使用 AbortSignal 中止客户端等待；报告以完整 Markdown 为真源，用 marked Renderer 生成章节定位，经 DOMPurify 清理后呈现，复制与 Word 导出使用原始完整内容。
 
@@ -111,7 +113,7 @@ DOCX 上传可选，粘贴正文引用当前会话用户消息。消息、结果
 
 ### Langfuse 可观测性与 Prompt 边界
 
-`core/observability.py` 定义中立观测接口和关联上下文，`infrastructure/langfuse/` 负责 SDK 客户端、回调、导出过滤和远端 Prompt 读取。`main.py` 装配并注入运行时、应用服务和 Agent 适配器；runtime 不导入供应商 SDK。异步会话 run 在后台入口建立独立追踪，以 request_id 关联提交请求，以 session_id 聚合会话，父子 Agent 及并发条款继承当前追踪。轮询不创建远端请求追踪。
+`core/observability.py` 定义中立观测接口和关联上下文，`infrastructure/langfuse/` 负责 SDK 客户端、回调、导出过滤和远端 Prompt 读取。`main.py` 装配并注入运行时、应用服务和 Agent 适配器；runtime 不导入供应商 SDK。异步会话 run 在后台入口建立独立追踪，以 request_id 关联提交请求，以 session_id 聚合会话，父子 Agent 及并发条款继承当前追踪。状态查询和 SSE 订阅不创建远端请求追踪。
 
 公共 Prompt 契约和解析会话位于 `nodes/llm/prompts.py`，完整任务模板留在各 Agent 的 prompts.py。runtime 的可选异步执行作用域负责绑定解析器，独立节点调用默认使用本地模板。每轮同名 Prompt 固定首次选择的版本，远端日常故障可兜底；固定版本实验不兜底。模型输出 schema、材料角色和动作门控仍由 Agent 代码确定。
 
