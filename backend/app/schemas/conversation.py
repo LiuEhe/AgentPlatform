@@ -77,3 +77,9 @@ class ConversationView(BaseModel):
     documents: list[DocumentView]
     active_run_id: str | None
     last_sequence: int
+
+
+class RunEvent(BaseModel):
+    event: Literal["snapshot", "delta", "state", "done"]
+    run: RunView | None = None
+    text: str = ""

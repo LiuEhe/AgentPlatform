@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from pathlib import PurePath
 from uuid import uuid4
 
@@ -14,7 +15,7 @@ from app.core.observability import (
 )
 from app.infrastructure.conversation.in_memory_store import InMemoryConversationStore
 from app.nodes.document.parse import DocumentParseError, parse_docx
-from app.runtime.agent_runtime import AgentRuntime
+from app.runtime.agent_runtime import AgentEvent, AgentRuntime
 from app.schemas.conversation import (
     TERMINAL_STATUSES,
     AgentCallView,
@@ -22,6 +23,7 @@ from app.schemas.conversation import (
     DocumentView,
     MessageCreate,
     MessageView,
+    RunEvent,
     RunView,
     SafeError,
 )
@@ -251,6 +253,45 @@ class ConversationService:
             raise AppError("RUN_NOT_FOUND", "会话运行不存在", 404)
         return self._run_view(run)
 
+    def stream_run(self, id: str, run_id: str) -> AsyncIterator[RunEvent]:
+        # 在返回 HTTP 流之前校验；捕获本次记录，TTL 清理后仍能送出它的终态。
+        run = self._store.record(id).runs.get(run_id)
+        if run is None:
+            raise AppError("RUN_NOT_FOUND", "会话运行不存在", 404)
+
+        async def events():
+            offset = len(run.stream_text)
+            state = (run.status, run.stage)
+            yield RunEvent(event="snapshot", run=self._run_view(run), text=run.stream_text)
+            while True:
+                run.stream_changed.clear()
+                revision = run.stream_revision
+                if run.status in TERMINAL_STATUSES:
+                    yield RunEvent(event="done", run=self._run_view(run))
+                    return
+                if state != (run.status, run.stage):
+                    state = (run.status, run.stage)
+                    yield RunEvent(event="state", run=self._run_view(run))
+                text = run.stream_text[offset:]
+                offset += len(text)
+                if text:
+                    yield RunEvent(event="delta", text=text)
+                # yield 期间生产者可能已更新；先检查版本再等待，避免慢读者丢唤醒。
+                if run.stream_revision != revision:
+                    continue
+                await run.stream_changed.wait()
+
+        return events()
+
+    def _receive_event(self, id: str, run_id: str, event: AgentEvent) -> None:
+        if event.kind == "text_delta":
+            self._store.append_run_text(id, run_id, event.text)
+        elif event.kind == "stage":
+            run = self._store.record(id).runs[run_id]
+            if run.status not in TERMINAL_STATUSES and run.stage != event.text:
+                run.stage = event.text
+                self._store.notify_run(run)
+
     async def cancel(self, id: str, run_id: str) -> RunView:
         run = await self.read_run(id, run_id)
         if run.status not in TERMINAL_STATUSES:
@@ -279,6 +320,7 @@ class ConversationService:
         run = record.runs[run_id]
         if run.status in TERMINAL_STATUSES:
             return
+        self._store.clear_run_text(record, run)
         amount = len(text.encode("utf-8")) + (len(call.output.encode("utf-8")) if call else 0)
         total_chars = (
             sum(
@@ -321,6 +363,7 @@ class ConversationService:
             if continuation
             else None
         )
+        self._store.notify_run(run)
 
     async def _execute(self, id: str, run_id: str) -> None:
         run = self._store.record(id).runs[run_id]
@@ -342,6 +385,7 @@ class ConversationService:
                 record = self._store.record(id)
                 run = record.runs[run_id]
                 run.status, run.stage = "running", "正在处理你的请求"
+                self._store.notify_run(run)
                 snapshot = self._store.snapshot(record)
                 turn = ConversationTurnInput(
                     latest_message_id=snapshot.latest_message_id,
@@ -359,7 +403,11 @@ class ConversationService:
                     ),
                     continuation=snapshot.continuation,
                 )
-                execution = await self.runtime.invoke("conversation_assistant", turn.model_dump())
+                execution = await self.runtime.invoke(
+                    "conversation_assistant",
+                    turn.model_dump(),
+                    on_event=lambda event: self._receive_event(id, run_id, event),
+                )
                 if asyncio.current_task().cancelling():
                     raise asyncio.CancelledError
                 result = ConversationTurnResult.model_validate(execution.output)
@@ -427,6 +475,9 @@ class ConversationService:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        # 尚未首次调度的 task 被取消时不会进入 _execute_run，必须显式发布终态。
+        for id, run_id in self._store.active_runs():
+            self._finish(id, run_id, "cancelled", "服务已关闭。")
         if self._reaper:
             await self._reaper
         self._tasks.clear()

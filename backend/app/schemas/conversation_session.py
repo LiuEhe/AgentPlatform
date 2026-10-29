@@ -1,5 +1,6 @@
 """临时会话记录，独立于 HTTP 展示和 Agent 的业务状态。"""
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -34,6 +35,10 @@ class SessionRun:
     message: SessionMessage | None = None
     error_code: str | None = None
     error_message: str | None = None
+    stream_text: str = ""
+    stream_bytes: int = 0
+    stream_revision: int = 0
+    stream_changed: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 @dataclass

@@ -8,7 +8,7 @@ from time import monotonic
 from uuid import uuid4
 
 from app.core.errors import AppError
-from app.schemas.conversation_session import ConversationSession, SessionSnapshot
+from app.schemas.conversation_session import ConversationSession, SessionRun, SessionSnapshot
 
 
 class InMemoryConversationStore:
@@ -70,8 +70,41 @@ class InMemoryConversationStore:
         """仅供生命周期收尾；允许取得尚未释放的过期记录。"""
         return self._records.get(id)
 
+    def active_runs(self) -> list[tuple[str, str]]:
+        """关闭时取得尚待应用服务终结的运行，包括尚未调度的任务。"""
+        return [
+            (record.id, record.active_run_id)
+            for record in self._records.values()
+            if record.active_run_id is not None
+        ]
+
     def touch(self, id: str) -> None:
         self.record(id).interacted = self._clock()
+
+    @staticmethod
+    def notify_run(run: SessionRun) -> None:
+        run.stream_revision += 1
+        run.stream_changed.set()
+
+    def append_run_text(self, id: str, run_id: str, text: str) -> None:
+        record = self.record(id)
+        run = record.runs[run_id]
+        if not text or run.status in {"succeeded", "failed", "cancelled"}:
+            return
+        if len(run.stream_text) + len(text) > 200000:
+            raise AppError("CONVERSATION_CAPACITY", "会话回答超过长度限制", 413)
+        amount = len(text.encode("utf-8"))
+        self.reserve(amount)
+        record.bytes_used += amount
+        run.stream_bytes += amount
+        run.stream_text += text
+        self.notify_run(run)
+
+    def clear_run_text(self, record: ConversationSession, run: SessionRun) -> None:
+        self.release(run.stream_bytes)
+        record.bytes_used -= run.stream_bytes
+        run.stream_text = ""
+        run.stream_bytes = 0
 
     def remaining_seconds(self, id: str) -> int:
         record = self.record(id)

@@ -1,7 +1,12 @@
 """会话、可选材料与异步运行接口。"""
 
-from fastapi import APIRouter, File, Query, Request, UploadFile
+from collections.abc import AsyncIterator
+from contextlib import aclosing
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
+from fastapi.sse import EventSourceResponse, ServerSentEvent
 from pydantic import ValidationError
 
 from app.core.errors import AppError
@@ -10,6 +15,7 @@ from app.schemas.conversation import (
     ConversationView,
     DocumentView,
     MessageCreate,
+    RunEvent,
     RunView,
 )
 from app.services.conversation_service import ConversationService
@@ -77,3 +83,18 @@ async def cancel_run(id: str, run_id: str, request: Request) -> JSONResponse:
         status_code=200 if previous.status in TERMINAL_STATUSES else 202,
         content=result.model_dump(mode="json"),
     )
+
+
+async def _run_events(id: str, run_id: str, request: Request) -> AsyncIterator[RunEvent]:
+    # 依赖在响应头发出前运行，保留不存在时的标准 JSON 404。
+    return service(request).stream_run(id, run_id)
+
+
+@router.get("/{id}/runs/{run_id}/events", response_class=EventSourceResponse)
+async def stream_run(
+    events: Annotated[AsyncIterator[RunEvent], Depends(_run_events)],
+) -> AsyncIterator[ServerSentEvent]:
+    async with aclosing(events):
+        yield ServerSentEvent(retry=3000)
+        async for event in events:
+            yield ServerSentEvent(event=event.event, data=event)

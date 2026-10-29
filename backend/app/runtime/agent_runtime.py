@@ -4,7 +4,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import uuid4
 
 from app.core.errors import AppError
@@ -14,11 +14,23 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+class AgentEvent:
+    """执行期间可公开的文本增量或阶段，不携带传输层或业务存储。"""
+
+    kind: Literal["text_delta", "stage"]
+    text: str
+
+
+AgentEventSink = Callable[[AgentEvent], None]
+
+
+@dataclass(frozen=True)
 class AgentContext:
     """一次智能体调用的通用上下文。"""
 
     invocation_id: str
     agent_id: str
+    on_event: AgentEventSink | None = None
 
 
 @dataclass(frozen=True)
@@ -77,10 +89,12 @@ class AgentRuntime:
         self,
         agent_id: str,
         payload: Mapping[str, object],
+        *,
+        on_event: AgentEventSink | None = None,
     ) -> AgentExecution:
         """按智能体标识执行一次调用。"""
         invocation_id = str(uuid4())
-        context = AgentContext(invocation_id=invocation_id, agent_id=agent_id)
+        context = AgentContext(invocation_id=invocation_id, agent_id=agent_id, on_event=on_event)
         try:
             agent = self._registry.resolve(agent_id)
             with self._observer.scope(
