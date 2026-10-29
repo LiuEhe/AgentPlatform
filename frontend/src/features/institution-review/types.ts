@@ -6,6 +6,8 @@ export type ReviewSubmission =
   | { mode: 'knowledge_base'; file: File }
   | { mode: 'standard_document'; file: File; standardFile: File }
 
+export interface ReviewSource { draft: string; standard?: string; mode: ReviewMode }
+
 export interface AgentGraphNode {
   id: string
   label: string

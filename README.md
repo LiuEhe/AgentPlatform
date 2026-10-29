@@ -16,11 +16,13 @@
 
 AgentPlatform 用分层结构组织智能体应用：前端通过 API 提交任务，后端服务处理文档并调用运行时；具体智能体负责流程编排，外部模型和知识库通过基础设施客户端接入。
 
-目前已实现的业务是制度审核：上传 DOCX 制度草稿后，选择知识库审核，或再上传一份 DOCX 标准文档直接对比。后端将文档转成 Markdown，按章、节和条拆分，使用模型检查条款冲突、重复和术语问题，最终返回 Markdown 报告。前端提供首页、智能体广场和制度审核工作台。
+目前已实现的业务是制度审核：上传 DOCX 制度草稿后，选择知识库审核，或再上传一份 DOCX 标准文档直接对比。后端将文档转成 Markdown，按章、节和条拆分，使用模型检查条款冲突、重复和术语问题，最终返回 Markdown 报告。前端采用暖白与陶土色界面，提供宣传首页、智能体目录，以及会话助手和制度审核两个独立工作页面；图标统一使用 Lucide。
 
 标准文档模式不调用 RAGFlow 或 embedding，知识库检索额度不足时仍可使用。草稿超过 30 个条款块时，按原顺序合并相邻条款至 30 组，保留原文和逐条定位。条款任务并发数通过 `INSTITUTION_REVIEW_CONCURRENCY` 配置，默认 3，由同进程的制度审核请求共享；多个工作进程各自计算额度。
 
 当前增加会话助手：可直接聊天、可选上传 DOCX 或粘贴正文；先识别意图，普通聊天、制度知识问答和摘要不调用审核，明确制度审核且参数齐全时才调用已有智能体，并原样展示结果。入口为 `/agents/conversation-assistant`。
+
+助手左侧管理当前页面内的会话记录，上传文件在输入框预览并随所属消息展示。切换会话保留草稿与文件选择，离开后返回会查询真实任务状态；内存记录不等于永久历史。制度审核报告保留完整 Markdown，并提供章节导航、复制、独立 Word 下载和明确的停止等待操作。
 
 会话及结果仅保存在单个后端进程内存中，空闲 2 小时或最长 8 小时后失效，重启清空。当前不提供登录、长期审核历史、逐字流式输出或节点级进度；项目没有关系型数据库或 Redis。临时会话不支持多工作进程共享，也不提供用户权限隔离。
 
@@ -125,7 +127,7 @@ pnpm dev
 - `POST /api/v1/reviews`：以 `multipart/form-data` 上传草稿 `file`，以及审核方式 `review_mode`；`standard_document` 模式还需 `standard_file`，返回 `text/markdown` 审核报告。缺省方式为 `knowledge_base`，兼容原有单文件请求。
 - `GET /api/v1/agents/institution_review/graph`：返回制度审核流程的静态节点和连线结构，不依赖运行时就绪状态，也不包含节点执行进度。
 - `POST /api/v1/documents/export/docx`：JSON 提交 `markdown` 和可选 `title`，返回 DOCX 附件。支持文本、列表、代码及表格，首版拒绝图片与原始 HTML；限制、样式及示例见 [后端 README](backend/README.md#markdown-导出-word)。
-- 前端 `/`、`/agents`、`/agents/institution-review`、`/agents/institution-review/flow`：平台首页、智能体广场、制度审核工作台和流程结构图。
+- 前端 `/`、`/agents`、`/agents/conversation-assistant`、`/agents/institution-review`、`/agents/institution-review/flow`：宣传首页、智能体目录、会话助手、制度审核工作台和静态流程结构图。
 
 ## 质量检查
 

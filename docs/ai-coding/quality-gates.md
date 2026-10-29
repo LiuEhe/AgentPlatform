@@ -24,7 +24,9 @@
 
 文档导出测试另覆盖输入与大小边界、内容和样式结构、跨请求共享并发、取消及进程回收、流式 JSON 和无模型配置的独立入口。`tests/test_document_export_integration.py` 使用已声明 Python 依赖的真实包内 Pandoc，不消耗模型额度；发布验收必须实际运行，不能用缺依赖跳过代替通过。Word/WPS 的实际分页、字体替代和复杂表格布局仍须单独进行目视验收，结构测试通过不表示版式已验收。
 
-前端会话状态另有 Node 内置回归测试：在 `frontend/` 运行 `node --test src/features/conversation-assistant/useConversation.test.cjs`，复用现有 Vue/TypeScript，覆盖网络响应丢失、5xx 幂等标识、初始连接及切换失败恢复，不依赖新增测试框架。当前没有通用前端测试框架、浏览器端到端测试、独立类型检查任务或依赖漏洞扫描。
+前端会话状态另有 Node 内置回归测试：在 `frontend/` 运行 `node --test src/features/conversation-assistant/useConversation.test.cjs`，复用现有 Vue/TypeScript，覆盖网络响应丢失、5xx 幂等标识、会话记录切换、草稿和附件隔离、停用后的迟到响应、切换期间停止的竞态及每会话失败重试目标，不依赖新增测试框架。当前没有通用前端测试框架、已纳入仓库的浏览器端到端测试、独立类型检查任务或依赖漏洞扫描。
+
+前端视觉与交互改版可使用独立浏览器和受控 HTTP 响应检查真实 Vue 页面、请求结构、响应恢复、完整 Markdown 与导出失败重试；这类检查不证明真实模型、后端 DOCX 解析、知识库连通或 Word 转换已联调通过。截图验收应区分已确认的独立设计预览与正式前端页面。
 
 ## 变更范围审查
 

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
+import { ArrowUpRight, CircleAlert, CircleQuestionMark } from '@lucide/vue'
 import { ApiError } from '../api/client'
 import { getAgentGraph } from '../api/agents'
 import type { AgentGraph, AgentGraphEdge, AgentGraphNode } from '../features/institution-review/types'
@@ -67,7 +68,7 @@ const renderedEdges = computed(() => (graph.value?.edges ?? []).flatMap((edge, e
     sourceId,
     target: edge.target,
     d: edgePath(edge, sourceId),
-    branch: sourceId === 'check_terminology' ? 'sage' : 'violet',
+    branch: sourceId === 'check_terminology' ? 'sage' : 'clay',
   })),
 ))
 
@@ -88,11 +89,11 @@ function edgeDescription(edge: AgentGraphEdge) {
 
 <template>
   <div v-if="!isKnownAgent" class="not-found-panel">
-    <span class="not-found-mark" aria-hidden="true">?</span>
+    <CircleQuestionMark :size="42" aria-hidden="true" />
     <div class="eyebrow"><span class="eyebrow-line"></span> AGENT NOT FOUND</div>
     <h1>暂时找不到这位智能体</h1>
     <p>这个入口可能已调整，回到智能体主页看看当前可用的能力。</p>
-    <RouterLink class="button button-primary" to="/">返回智能体主页 <span class="button-arrow" aria-hidden="true">↗</span></RouterLink>
+    <RouterLink class="button button-primary" to="/">返回智能体主页 <ArrowUpRight :size="17" aria-hidden="true" /></RouterLink>
   </div>
 
   <div v-else class="flow-page">
@@ -108,7 +109,7 @@ function edgeDescription(edge: AgentGraphEdge) {
         <h1>{{ graph?.name ?? '制度审核助手' }}<span class="heading-period">.</span></h1>
         <p>查看流程节点与连接关系，了解文档如何经过条款与术语检查并汇总为报告。</p>
       </div>
-      <RouterLink class="button button-quiet" :to="`/agents/${agentId}`">返回工作台 <span aria-hidden="true">↗</span></RouterLink>
+      <RouterLink class="button button-quiet" :to="`/agents/${agentId}`">返回工作台 <ArrowUpRight :size="17" aria-hidden="true" /></RouterLink>
     </header>
 
     <section class="flow-card" aria-labelledby="flow-structure-title">
@@ -122,7 +123,7 @@ function edgeDescription(edge: AgentGraphEdge) {
 
       <div v-if="loading" class="flow-message" role="status">正在读取流程结构…</div>
       <div v-else-if="errorMessage" class="flow-message flow-error" role="alert">
-        <span class="flow-error-mark" aria-hidden="true">!</span>
+        <CircleAlert class="flow-error-mark" :size="30" aria-hidden="true" />
         <div><strong>流程图暂时无法显示</strong><p>{{ errorMessage }}</p></div>
         <button class="button button-quiet" type="button" @click="$router.go(0)">重试</button>
       </div>
@@ -131,7 +132,7 @@ function edgeDescription(edge: AgentGraphEdge) {
         <svg class="flow-diagram" viewBox="0 0 960 950" role="img" :aria-label="`${graph.name}流程图`" aria-describedby="flow-diagram-description">
           <defs>
             <marker id="flow-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-              <path d="M 0 0 L 10 5 L 0 10 z" fill="#aaa3bd" />
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--muted)" />
             </marker>
           </defs>
           <g class="edge-layer" aria-hidden="true">
@@ -156,7 +157,7 @@ function edgeDescription(edge: AgentGraphEdge) {
       </div>
 
       <div v-if="graph" class="flow-legend">
-        <span><i class="legend-dot legend-dot-violet"></i>条款审查</span>
+        <span><i class="legend-dot legend-dot-clay"></i>条款审查</span>
         <span><i class="legend-dot legend-dot-sage"></i>术语检查</span>
         <span class="legend-note">连线表示流程关系，不代表实时执行进度</span>
       </div>
@@ -166,42 +167,42 @@ function edgeDescription(edge: AgentGraphEdge) {
 
 <style scoped>
 .flow-page { padding: 30px max(5.4vw, calc((100vw - 1240px) / 2)) 76px; }
-.flow-heading { display: flex; justify-content: space-between; gap: 24px; align-items: end; padding: 32px 0 29px; border-bottom: 1px solid var(--line); }
-.flow-heading h1 { margin: 9px 0 7px; color: #292638; font-size: clamp(27px, 4vw, 36px); font-weight: 500; letter-spacing: -1px; }
-.flow-heading p { max-width: 610px; margin: 0; color: #827f8b; font-size: 12px; line-height: 1.8; }
-.flow-card { margin-top: 24px; overflow: hidden; border: 1px solid #e8e5e0; border-radius: 7px; background: #fff; box-shadow: 0 4px 15px rgba(39, 35, 54, .025); }
-.flow-card-heading { display: flex; justify-content: space-between; align-items: center; padding: 22px 25px 16px; border-bottom: 1px solid #f0eeeb; }
-.flow-card-heading h2 { margin: 7px 0 0; color: #302d3d; font-size: 18px; font-weight: 500; }
-.aside-card-kicker { color: #9b96a5; font-family: var(--mono); font-size: 9px; letter-spacing: 1.1px; }
-.flow-count { display: flex; gap: 9px; align-items: center; color: #85818d; font-size: 10px; }
+.flow-heading { display: flex; justify-content: space-between; gap: 24px; align-items: end; padding: 32px 0 29px; border-bottom: 1px solid var(--border); }
+.flow-heading h1 { margin: 9px 0 7px; color: var(--ink); font-size: clamp(27px, 4vw, 36px); font-weight: 500; letter-spacing: -1px; }
+.flow-heading p { max-width: 610px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.8; }
+.flow-card { margin-top: 24px; overflow: hidden; border: 1px solid var(--border); border-radius: 7px; background: #fff; box-shadow: 0 4px 15px rgba(70, 58, 36, .025); }
+.flow-card-heading { display: flex; justify-content: space-between; align-items: center; padding: 22px 25px 16px; border-bottom: 1px solid var(--border); }
+.flow-card-heading h2 { margin: 7px 0 0; color: var(--ink); font-size: 18px; font-weight: 500; }
+.aside-card-kicker { color: var(--muted); font-family: var(--mono); font-size: 9px; letter-spacing: 1.1px; }
+.flow-count { display: flex; gap: 9px; align-items: center; color: var(--muted); font-size: 10px; }
 .flow-count i { width: 3px; height: 3px; border-radius: 50%; background: #bbb6c4; }
 .diagram-scroll { overflow-x: auto; padding: 12px 22px 4px; overscroll-behavior-x: contain; }
-.diagram-scroll:focus-visible { outline: 3px solid rgba(115, 86, 206, .34); outline-offset: -3px; }
+.diagram-scroll:focus-visible { outline: 3px solid rgba(181, 84, 55, .34); outline-offset: -3px; }
 .flow-diagram { display: block; width: min(100%, 900px); min-width: 680px; height: auto; margin: 0 auto; overflow: visible; }
-.flow-edge { fill: none; stroke: #c1bbcf; stroke-width: 1.7; }
-.flow-edge-violet { stroke: #ab9bd4; }
-.flow-edge-sage { stroke: #a8c0aa; }
-.flow-node rect { fill: #fff; stroke: #e5e1eb; stroke-width: 1.2; filter: drop-shadow(0 4px 8px rgba(45, 38, 70, .045)); }
-.flow-node circle { fill: #9b86cf; }
-.flow-node text { fill: #4c4858; font-size: 13px; font-family: inherit; }
-.flow-node-sage circle { fill: #87a98d; }
-.flow-node-terminal rect { fill: #f7f4fc; stroke: #ddd5ef; }
-.flow-node-terminal text { fill: #67568f; font-size: 12px; }
-.join-note rect { fill: #f7f6f2; stroke: #e8e4ec; }
+.flow-edge { fill: none; stroke: var(--border); stroke-width: 1.7; }
+.flow-edge-clay { stroke: var(--accent); }
+.flow-edge-sage { stroke: var(--success); }
+.flow-node rect { fill: #fff; stroke: var(--border); stroke-width: 1.2; filter: drop-shadow(0 4px 8px rgba(70, 58, 36, .045)); }
+.flow-node circle { fill: var(--accent); }
+.flow-node text { fill: var(--ink); font-size: 13px; font-family: inherit; }
+.flow-node-sage circle { fill: var(--success); }
+.flow-node-terminal rect { fill: var(--accent-soft); stroke: var(--border); }
+.flow-node-terminal text { fill: var(--accent); font-size: 12px; }
+.join-note rect { fill: var(--canvas); stroke: var(--border); }
 .join-note text { fill: #797484; font-size: 10px; font-family: inherit; }
-.flow-legend { display: flex; flex-wrap: wrap; gap: 17px; align-items: center; padding: 14px 25px 17px; border-top: 1px solid #f0eeeb; color: #7d7987; font-size: 10px; }
+.flow-legend { display: flex; flex-wrap: wrap; gap: 17px; align-items: center; padding: 14px 25px 17px; border-top: 1px solid var(--border); color: var(--muted); font-size: 10px; }
 .flow-legend > span:not(.legend-note) { display: inline-flex; gap: 7px; align-items: center; }
-.legend-dot { width: 7px; height: 7px; border-radius: 50%; background: #9b86cf; }
-.legend-dot-sage { background: #87a98d; }
-.legend-note { margin-left: auto; color: #a09da6; }
-.flow-message { min-height: 290px; display: flex; justify-content: center; align-items: center; gap: 13px; padding: 30px; color: #777381; font-size: 12px; }
-.flow-error { color: #746f7d; }
-.flow-error-mark { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; color: #a64b55; background: #fbefef; font-weight: 600; }
-.flow-error strong { color: #454151; font-size: 13px; font-weight: 500; }
-.flow-error p { margin: 6px 0 0; color: #898592; }
+.legend-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.legend-dot-sage { background: var(--success); }
+.legend-note { margin-left: auto; color: var(--muted); }
+.flow-message { min-height: 290px; display: flex; justify-content: center; align-items: center; gap: 13px; padding: 30px; color: var(--muted); font-size: 12px; }
+.flow-error { color: var(--muted); }
+.flow-error-mark { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; color: var(--error); background: var(--error-soft); font-weight: 600; }
+.flow-error strong { color: var(--ink); font-size: 13px; font-weight: 500; }
+.flow-error p { margin: 6px 0 0; color: var(--muted); }
 .flow-error .button { margin-left: 12px; }
-.flow-link { text-decoration: none; color: #655092; }
-.flow-link:hover { border-color: #d6cdea; background: #faf8ff; }
+.flow-link { text-decoration: none; color: var(--accent); }
+.flow-link:hover { border-color: var(--border); background: var(--accent-soft); }
 @media (max-width: 680px) {
   .flow-page { padding: 20px 5vw 48px; }
   .flow-heading { align-items: start; flex-direction: column; padding: 25px 0 22px; }

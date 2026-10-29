@@ -1,7 +1,7 @@
 import { ApiError, createApiError, getApiBaseUrl } from './client'
 import type { ReviewSubmission } from '../features/institution-review/types'
 
-export async function submitReview(submission: ReviewSubmission): Promise<string> {
+export async function submitReview(submission: ReviewSubmission, signal?: AbortSignal): Promise<string> {
   const body = new FormData()
   body.append('file', submission.file)
   body.append('review_mode', submission.mode)
@@ -15,8 +15,10 @@ export async function submitReview(submission: ReviewSubmission): Promise<string
       method: 'POST',
       body,
       headers: { Accept: 'text/markdown' },
+      signal,
     })
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw error
     throw new ApiError({
       status: 0,
       message: '无法连接审核服务，请确认服务已启动后重试。',

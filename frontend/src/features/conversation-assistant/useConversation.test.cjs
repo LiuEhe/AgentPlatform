@@ -19,14 +19,18 @@ function fixture(overrides = {}) {
   const completed = id => ({ id, status: 'succeeded', stage: 'done', message: null, error: null })
   const calls = []
   const api = {
-    createConversation: async () => ({ ...view }),
-    getConversation: async () => ({ ...view }),
+    createConversation: async () => structuredClone(view),
+    getConversation: async () => structuredClone(view),
     sendConversationMessage: async (_id, payload) => {
       calls.push({ ...payload })
       return completed(`r${calls.length}`)
     },
     getConversationRun: async (_id, id) => completed(id),
-    uploadConversationDocument: async () => ({ id: 'd1', filename: 'draft.docx', chars: 10 }),
+    uploadConversationDocument: async () => {
+      const document = { id: 'd1', filename: 'draft.docx', chars: 10 }
+      view.documents.push(document)
+      return document
+    },
     ...overrides,
   }
   const cleanup = []
@@ -118,6 +122,162 @@ test('failed new conversation creation releases an aborted upload flag', async (
     await uploading
     assert.equal(f.hook.uploading.value, false)
     assert.equal(f.hook.busy.value, false)
+    assert.equal(f.hook.conversationId.value, 'c1')
+  } finally { f.cleanup() }
+})
+
+test('conversation switching restores its messages, draft and selected documents', async () => {
+  let created = 0
+  const views = {
+    c1: { id: 'c1', messages: [{ id: 'm1', sequence: 1, role: 'user', content: 'first conversation', document_ids: [] }], documents: [], active_run_id: null, last_sequence: 1 },
+    c2: { id: 'c2', messages: [], documents: [], active_run_id: null, last_sequence: 0 },
+  }
+  const f = fixture({ createConversation: async () => views[++created === 1 ? 'c1' : 'c2'], getConversation: async id => views[id] })
+  try {
+    await f.hook.initialize()
+    await f.hook.upload({ name: 'draft.docx' })
+    f.hook.draft.value = 'unsent draft'
+    await f.hook.newConversation()
+    assert.equal(f.hook.messages.value.length, 0)
+    assert.equal(f.hook.draft.value, '')
+    await f.hook.switchConversation('c1')
+    assert.equal(f.hook.messages.value[0].content, 'first conversation')
+    assert.equal(f.hook.draft.value, 'unsent draft')
+    assert.deepEqual([...f.hook.selectedDocumentIds.value], ['d1'])
+    assert.equal(f.hook.conversations.value.length, 2)
+  } finally { f.cleanup() }
+})
+
+test('accepted attachments leave the composer and are not sent again on the next turn', async () => {
+  const f = fixture()
+  try {
+    await f.hook.initialize()
+    await f.hook.upload({ name: 'draft.docx' })
+    f.hook.draft.value = 'use this file'
+    await f.hook.send(); await flush()
+    assert.deepEqual([...f.hook.selectedDocumentIds.value], [])
+    assert.equal(f.hook.documents.value.some(d => d.id === 'd1'), true)
+    f.hook.draft.value = 'continue without attaching again'
+    await f.hook.send(); await flush()
+    assert.deepEqual(f.calls[0].document_ids, ['d1'])
+    assert.deepEqual(f.calls[1].document_ids, [])
+  } finally { f.cleanup() }
+})
+
+test('switching away after an ambiguous response preserves the original idempotency key', async () => {
+  let created = 0
+  const view = id => ({ id, messages: [], documents: [], active_run_id: null, last_sequence: 0 })
+  const f = fixture({ createConversation: async () => view(++created === 1 ? 'c1' : 'c2'), getConversation: async id => view(id) })
+  try {
+    await f.hook.initialize()
+    let lost = true
+    f.api.sendConversationMessage = async (_id, payload) => {
+      f.calls.push({ ...payload })
+      if (lost) { lost = false; throw new ApiError(502) }
+      return { ...f.completed('r1'), client_message_id: payload.client_message_id }
+    }
+    f.hook.draft.value = 'possibly accepted'
+    await f.hook.send()
+    await f.hook.newConversation()
+    await f.hook.switchConversation('c1')
+    await f.hook.retry(); await flush()
+    assert.equal(f.calls.length, 2)
+    assert.equal(f.calls[0].client_message_id, f.calls[1].client_message_id)
+    assert.equal(f.calls[1].content, 'possibly accepted')
+  } finally { f.cleanup() }
+})
+
+test('a failed switch keeps the current conversation and draft', async () => {
+  const f = fixture({ getConversation: async id => {
+    if (id === 'missing') throw new ApiError(404)
+    return { id, messages: [], documents: [], active_run_id: null, last_sequence: 0 }
+  } })
+  try {
+    await f.hook.initialize()
+    f.hook.draft.value = 'keep this draft'
+    await f.hook.switchConversation('missing')
+    assert.equal(f.hook.conversationId.value, 'c1')
+    assert.equal(f.hook.draft.value, 'keep this draft')
+    assert.equal(f.storage.get('agent-platform-conversation'), 'c1')
+    assert.equal(f.hook.busy.value, false)
+  } finally { f.cleanup() }
+})
+
+test('deactivated requests cannot append a late upload to the active conversation', async () => {
+  let finishUpload
+  const f = fixture({ uploadConversationDocument: () => new Promise(resolve => { finishUpload = resolve }) })
+  try {
+    await f.hook.initialize()
+    f.hook.draft.value = 'keep on return'
+    const request = f.hook.upload({ name: 'draft.docx' })
+    f.hook.suspend()
+    finishUpload({ id: 'late', filename: 'late.docx', chars: 20 })
+    await request
+    assert.equal(f.hook.documents.value.length, 0)
+    assert.equal(f.hook.uploading.value, false)
+    await f.hook.initialize()
+    assert.equal(f.hook.draft.value, 'keep on return')
+  } finally { f.cleanup() }
+})
+
+test('an attachment can be sent without inventing an empty backend message', async () => {
+  const f = fixture()
+  try {
+    await f.hook.initialize()
+    await f.hook.upload({ name: 'draft.docx' })
+    await f.hook.send(); await flush()
+    assert.equal(f.calls.length, 1)
+    assert.equal(f.calls[0].content, '请查看我上传的文件。')
+    assert.deepEqual(f.calls[0].document_ids, ['d1'])
+  } finally { f.cleanup() }
+})
+
+test('stopping during a pending conversation switch cannot write the old run into the new conversation', async () => {
+  const view = id => ({ id, messages: [], documents: [], active_run_id: id === 'c1' ? 'r1' : null, last_sequence: 0 })
+  const running = { id: 'r1', client_message_id: 'client-1', status: 'running', stage: 'working', message: null, error: null }
+  let finishSwitch, finishCancel, cancelCalls = 0
+  const cancellation = new Promise(resolve => { finishCancel = resolve })
+  const f = fixture({
+    createConversation: async () => view('c1'),
+    getConversation: async id => id === 'c2' ? new Promise(resolve => { finishSwitch = resolve }) : view(id),
+    getConversationRun: async () => running,
+    cancelConversationRun: async () => { cancelCalls++; return cancellation },
+  })
+  try {
+    await f.hook.initialize()
+    const switching = f.hook.switchConversation('c2')
+    const stopping = f.hook.stop()
+    finishSwitch(view('c2'))
+    await switching
+    finishCancel({ ...running, status: 'cancelled', message: { id: 'old-reply', sequence: 1, role: 'assistant', content: 'old conversation reply', document_ids: [] } })
+    await stopping
+    assert.equal(f.hook.conversationId.value, 'c2')
+    assert.equal(f.hook.activeRun.value, null)
+    assert.equal(f.hook.messages.value.length, 0)
+    assert.equal(cancelCalls, 0)
+  } finally { f.cleanup() }
+})
+
+test('a failed switch retry belongs to its own conversation snapshot', async () => {
+  let created = 0
+  const failures = new Set()
+  const requested = []
+  const view = id => ({ id, messages: [], documents: [], active_run_id: null, last_sequence: 0 })
+  const f = fixture({
+    createConversation: async () => view('c' + (++created)),
+    getConversation: async id => { requested.push(id); if (failures.has(id)) throw new ApiError(503); return view(id) },
+  })
+  try {
+    await f.hook.initialize()
+    await f.hook.newConversation(); await f.hook.newConversation(); await f.hook.newConversation()
+    await f.hook.switchConversation('c1')
+    failures.add('c2'); failures.add('c4')
+    await f.hook.switchConversation('c2')
+    await f.hook.switchConversation('c3')
+    await f.hook.switchConversation('c4')
+    await f.hook.switchConversation('c1')
+    await f.hook.retry()
+    assert.equal(requested.at(-1), 'c2')
     assert.equal(f.hook.conversationId.value, 'c1')
   } finally { f.cleanup() }
 })

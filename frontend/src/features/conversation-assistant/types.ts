@@ -41,4 +41,5 @@ export interface ConversationView {
   active_run_id: string | null
   last_sequence: number
 }
+export interface ConversationSummary { id: string; title: string }
 export const isTerminal = (status: RunStatus) => ['succeeded', 'failed', 'cancelled'].includes(status)

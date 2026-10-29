@@ -1,46 +1,43 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, KeepAlive } from 'vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
+import { ArrowLeft, ArrowUpRight } from '@lucide/vue'
+import PlatformBrand from './components/PlatformBrand.vue'
 
 const route = useRoute()
 const isConversation = computed(() => route.name === 'agent-conversation')
+const isPublic = computed(() => ['agent-home', 'agent-plaza'].includes(String(route.name)))
 </script>
 
 <template>
   <div class="app-shell" :class="{ 'conversation-shell': isConversation }">
-    <header v-if="!isConversation" class="topbar">
-      <RouterLink class="brand" to="/" aria-label="AgentPlatform 首页">
-        <span class="brand-mark" aria-hidden="true">
-          <svg viewBox="0 0 32 32" fill="none">
-            <path d="M16 3.5 27 9.75v12.5L16 28.5 5 22.25V9.75L16 3.5Z" />
-            <path d="M11 18.5 16 10l5 8.5M12.8 15.5h6.4M12.5 21h7" />
-          </svg>
-        </span>
-        <span class="brand-name">Agent<span>Platform</span></span>
-      </RouterLink>
-
-      <nav class="top-nav" aria-label="主导航">
-        <RouterLink to="/" class="nav-link" exact-active-class="nav-link-active">首页</RouterLink>
-        <RouterLink to="/agents" class="nav-link" active-class="nav-link-active">智能体广场</RouterLink>
+    <header v-if="!isConversation" class="platform-header" :class="{ 'tool-header': !isPublic }">
+      <PlatformBrand />
+      <nav v-if="isPublic" class="site-nav" aria-label="网站导航">
+        <RouterLink to="/" exact-active-class="active">首页</RouterLink>
+        <RouterLink to="/agents" active-class="active">智能体</RouterLink>
       </nav>
-
-      <div class="topbar-meta">
-        <span class="status-dot" aria-hidden="true"></span>
-        <span>专业能力 · 即刻可用</span>
-      </div>
+      <RouterLink v-else class="back-link" to="/agents">
+        <ArrowLeft :size="16" aria-hidden="true" />智能体目录
+      </RouterLink>
+      <RouterLink v-if="isPublic" class="button header-cta" :class="{ 'button-primary': route.name === 'agent-home' }" to="/agents">
+        探索智能体 <ArrowUpRight :size="17" aria-hidden="true" />
+      </RouterLink>
+      <span v-else class="badge">独立工作空间</span>
     </header>
 
     <main class="main-content">
-      <RouterView />
+      <RouterView v-slot="{ Component }">
+        <KeepAlive include="AgentConversationView">
+          <component :is="Component" />
+        </KeepAlive>
+      </RouterView>
     </main>
 
-    <footer v-if="!isConversation" class="site-footer">
-      <span>AgentPlatform · 智能体应用工作空间</span>
-      <span class="footer-note"><span class="footer-sparkle">✳</span> 让专业流程，更进一步</span>
+    <footer v-if="isPublic" class="site-footer">
+      <PlatformBrand />
+      <p>让每一项工作，找到合适的智能体。</p>
+      <RouterLink to="/agents">探索智能体 <ArrowUpRight :size="15" aria-hidden="true" /></RouterLink>
     </footer>
   </div>
 </template>
-
-<style scoped>
-.conversation-shell > .main-content { max-width: none; }
-</style>

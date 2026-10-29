@@ -1,53 +1,63 @@
 <script setup lang="ts">
 import { RouterLink } from 'vue-router'
+import { ArrowRight, ArrowUp, ArrowUpRight, BookOpen, FileText, MessagesSquare, PanelsTopLeft, ShieldCheck } from '@lucide/vue'
+
+const values = [
+  { icon: MessagesSquare, title: '先聊清楚，再往前走', description: '一个问题、一段文字，都能成为开始。会话助手与你持续交流，把模糊的想法说具体。' },
+  { icon: FileText, title: '让材料留在讨论里', description: '文件与消息放在一起，提问与上下文相邻，让每次补充都能接得上。' },
+  { icon: ShieldCheck, title: '把专业任务交给专业智能体', description: '制度审核拥有独立的材料、依据与报告界面，让每一步都有清晰的目的。' },
+]
+
+function showDetails() {
+  document.getElementById('platform-details')?.scrollIntoView({
+    behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
+  })
+}
 </script>
 
 <template>
   <div class="landing-page">
     <section class="landing-hero">
-      <div class="landing-copy">
-        <div class="eyebrow"><span class="eyebrow-line"></span> INTELLIGENCE, AT WORK</div>
-        <h1 class="landing-title">让AI<br /><span>走入工作</span></h1>
-        <p class="landing-description">
-          一个面向真实任务的智能体平台，把专业能力组织成清晰的流程。
-        </p>
-        <RouterLink class="landing-cta" to="/agents">
-          <span>进入智能体广场</span>
-          <span class="landing-cta-arrow" aria-hidden="true">↗</span>
-        </RouterLink>
-        <div class="landing-caption"><span class="caption-rule"></span> 发挥你的创意 </div>
+      <div class="hero-copy">
+        <div class="eyebrow"><span class="eyebrow-rule"></span>为日常工作，打开更多可能</div>
+        <h1>把日常工作，<br />交给合适的<span>智能体。</span></h1>
+        <p>从一个问题，到一份有依据的审核报告。<br />让对话、材料与结果，在同一个平台有序展开。</p>
+        <div class="hero-actions">
+          <RouterLink class="button button-primary" to="/agents">探索智能体 <ArrowUpRight :size="18" aria-hidden="true" /></RouterLink>
+          <button class="text-button" type="button" @click="showDetails">了解 AgentPlatform <ArrowRight :size="17" aria-hidden="true" /></button>
+        </div>
+        <div class="hero-caption"><span>自然对话</span><span>材料理解</span><span>专业审核</span></div>
       </div>
-
-      <div class="agent-word-art" role="img" aria-label="Agent platform">
-        <span class="word-art-orbit word-art-orbit-wide" aria-hidden="true"></span>
-        <span class="word-art-orbit word-art-orbit-small" aria-hidden="true"></span>
-        <span class="word-art-spark" aria-hidden="true">✳</span>
-        <span class="word-art-label">AGENT / PLATFORM</span>
-        <span class="word-art-name" aria-hidden="true">Agent</span>
-        <span class="word-art-baseline"><i></i> INTELLIGENCE, AT WORK</span>
-      </div>
-
-      <div class="landing-index"><span>01</span><span class="index-divider"></span><span>PLATFORM</span></div>
-    </section>
-
-    <section class="landing-principles" aria-label="平台特点">
-      <div class="principle-intro">
-        <span class="principle-kicker">A CLEARER WAY TO WORK</span>
-        <p>能力不止于回答，<br />更在于把事情做好。</p>
-      </div>
-      <div class="principle-item">
-        <span class="principle-glyph">↗</span>
-        <div><strong>从任务出发</strong><span>为具体工作找到合适的智能体</span></div>
-      </div>
-      <div class="principle-item">
-        <span class="principle-glyph">⌁</span>
-        <div><strong>让过程清楚</strong><span>沿着明确的步骤处理复杂事项</span></div>
-      </div>
-      <div class="principle-item">
-        <span class="principle-glyph">⌗</span>
-        <div><strong>交付可读结果</strong><span>把分析整理成便于使用的成果</span></div>
+      <div class="hero-art" aria-hidden="true">
+        <div class="art-orbit"></div>
+        <div class="art-small-note">从想法，走向结果。<span>YOUR EVERYDAY WORKSPACE</span></div>
+        <div class="art-sheet sheet-back">
+          <div class="art-sheet-label"><ShieldCheck :size="20" />制度审核</div>
+          <div class="art-line long"></div><div class="art-line"></div><div class="art-line short"></div>
+          <div class="art-proof"><BookOpen :size="17" />让结论，有据可循。</div>
+        </div>
+        <div class="art-sheet sheet-front">
+          <div class="art-sheet-label"><MessagesSquare :size="20" />会话助手</div>
+          <div class="art-question">“想法有点多，<br />一起理一理？”</div>
+          <div class="art-answer">当然。我们从最重要的事开始。</div>
+          <div class="art-compose"><span>从一个问题开始…</span><ArrowUp :size="22" /></div>
+        </div>
+        <div class="art-tag"><PanelsTopLeft :size="16" />合适的助手，清晰的工作。</div>
       </div>
     </section>
-
+    <section id="platform-details" class="landing-values">
+      <span class="section-kicker">更自然地开始，更清楚地完成</span>
+      <h2>让工具，顺着你的工作方式。</h2>
+      <div class="value-grid">
+        <article v-for="value in values" :key="value.title">
+          <component :is="value.icon" :size="25" :stroke-width="1.75" aria-hidden="true" />
+          <h3>{{ value.title }}</h3><p>{{ value.description }}</p>
+        </article>
+      </div>
+    </section>
+    <section class="landing-invitation">
+      <div><span class="section-kicker">开始使用 AGENTPLATFORM</span><h2>下一件事，交给谁一起完成？</h2><p>到智能体目录里，找到适合当前任务的伙伴。</p></div>
+      <RouterLink class="button button-primary" to="/agents">浏览智能体 <ArrowUpRight :size="18" aria-hidden="true" /></RouterLink>
+    </section>
   </div>
 </template>

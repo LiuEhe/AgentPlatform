@@ -7,3 +7,4 @@ __pycache__/
 agent_platform_backend.egg-info/
 docs/superpowers
 docs/document
+.pnpm-store/
