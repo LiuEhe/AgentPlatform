@@ -1,10 +1,13 @@
+import asyncio
+from types import SimpleNamespace
+
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.core.config import Settings
 from app.main import create_app
-from app.schemas.conversation import MessageCreate
+from app.schemas.conversation import MessageCreate, RunEvent, RunView
 
 
 def settings(**updates):
@@ -46,6 +49,100 @@ def test_no_model_allows_session_but_not_execution():
         )
         assert response.status_code == 503
         assert client.get("/api/v1/conversations/missing").status_code == 404
+
+
+def test_sse_uses_standard_events_and_prevalidates_unknown_runs(monkeypatch, fake_model_factory):
+    import json
+
+    async def handler(schema, messages):
+        return {"intent": "general_chat", "action": "answer"} if schema else "你好\n第二行"
+
+    monkeypatch.setattr("app.main.create_llm_service", lambda _: fake_model_factory(handler))
+    with TestClient(create_app(settings())) as client:
+        assert client.get("/api/v1/conversations/missing/runs/missing/events").status_code == 404
+        id = client.post("/api/v1/conversations").json()["id"]
+        assert client.get(f"/api/v1/conversations/{id}/runs/missing/events").status_code == 404
+        run = client.post(
+            f"/api/v1/conversations/{id}/messages",
+            json={"client_message_id": "sse", "content": "你好"},
+        ).json()
+        with client.stream(
+            "GET", f"/api/v1/conversations/{id}/runs/{run['id']}/events"
+        ) as response:
+            assert response.status_code == 200
+            assert response.headers["content-type"].startswith("text/event-stream")
+            assert response.headers["x-accel-buffering"] == "no"
+            assert response.headers["cache-control"] == "no-cache"
+            lines = list(response.iter_lines())
+        assert "retry: 3000" in lines
+        assert "event: snapshot" in lines and "event: done" in lines
+        payloads = [json.loads(line[6:]) for line in lines if line.startswith("data: ")]
+        assert payloads[-1]["run"]["message"]["content"] == "你好\n第二行"
+
+
+@pytest.mark.parametrize("ending", ["done", "disconnect"])
+def test_sse_idle_ping_keeps_iterator_alive_and_closes_on_end_or_disconnect(monkeypatch, ending):
+    # 缩短框架的测试时钟；业务流等待实际收到 ping 后才结束，不靠固定 sleep。
+    monkeypatch.setattr("fastapi.routing._PING_INTERVAL", 0.01)
+
+    async def scenario():
+        ping_received = asyncio.Event()
+        disconnected = asyncio.Event()
+        closed = False
+        run = RunView(id="run", client_message_id="m1", status="running", stage="正在回答")
+
+        async def events():
+            nonlocal closed
+            try:
+                yield RunEvent(event="snapshot", run=run)
+                await ping_received.wait()
+                if ending == "disconnect":
+                    await asyncio.Event().wait()
+                yield RunEvent(event="done", run=run.model_copy(update={"status": "succeeded"}))
+            finally:
+                closed = True
+
+        app = create_app(Settings(_env_file=None, llm_model=None, llm_api_key=None))
+        app.state.conversation_service = SimpleNamespace(stream_run=lambda *args: events())
+        bodies = []
+
+        async def send(message):
+            if message["type"] == "http.response.body":
+                body = message.get("body", b"")
+                bodies.append(body)
+                if b": ping\n\n" in body:
+                    ping_received.set()
+                    if ending == "disconnect":
+                        disconnected.set()
+
+        async def receive():
+            await disconnected.wait()
+            return {"type": "http.disconnect"}
+
+        await asyncio.wait_for(
+            app(
+                {
+                    "type": "http",
+                    "asgi": {"version": "3.0", "spec_version": "2.0"},
+                    "http_version": "1.1",
+                    "method": "GET",
+                    "scheme": "http",
+                    "path": "/api/v1/conversations/session/runs/run/events",
+                    "query_string": b"",
+                    "headers": [],
+                    "server": ("test", 80),
+                    "client": ("test", 1234),
+                },
+                receive,
+                send,
+            ),
+            timeout=1,
+        )
+        assert ping_received.is_set() and closed
+        if ending == "done":
+            assert b"event: done\n" in b"".join(bodies)
+
+    asyncio.run(scenario())
 
 
 def test_upload_and_input_boundaries(docx_bytes_factory):

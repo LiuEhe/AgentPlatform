@@ -93,9 +93,9 @@ def test_chat_then_standard_review_through_registered_agents(
     original_invoke = AgentRuntime.invoke
     original_build = review_package.build_review_graph
 
-    async def traced_invoke(runtime, agent_id, payload):
+    async def traced_invoke(runtime, agent_id, payload, *, on_event=None):
         calls.append((runtime, agent_id))
-        return await original_invoke(runtime, agent_id, payload)
+        return await original_invoke(runtime, agent_id, payload, on_event=on_event)
 
     def counted_build(*args, **kwargs):
         builds.append(1)

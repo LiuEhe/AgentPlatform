@@ -12,7 +12,7 @@ from app.services.conversation_service import ConversationService
 
 def build_service():
     class Runtime:
-        async def invoke(self, agent_id, payload):
+        async def invoke(self, agent_id, payload, *, on_event=None):
             return SimpleNamespace(output={"reply": "ok"})
 
     store = InMemoryConversationStore(

@@ -6,7 +6,7 @@ import pytest
 from app.core.config import Settings
 from app.core.errors import AppError
 from app.infrastructure.conversation.in_memory_store import InMemoryConversationStore
-from app.runtime.agent_runtime import AgentExecution
+from app.runtime.agent_runtime import AgentEvent, AgentExecution
 from app.schemas.conversation import MessageCreate
 from app.schemas.conversation_turn import (
     ChildAgentResult,
@@ -23,7 +23,7 @@ class Runtime:
         self.gate = gate
         self.entered = asyncio.Event()
 
-    async def invoke(self, agent_id, payload):
+    async def invoke(self, agent_id, payload, *, on_event=None):
         self.calls.append((agent_id, payload))
         self.entered.set()
         if self.gate:
@@ -33,6 +33,161 @@ class Runtime:
             agent_id,
             self.results.pop(0) if self.results else ConversationTurnResult(reply="你好"),
         )
+
+
+def test_stream_snapshot_delta_reconnect_and_multiple_readers_share_one_task():
+    async def scenario():
+        first, finish = asyncio.Event(), asyncio.Event()
+
+        class StreamingRuntime(Runtime):
+            async def invoke(self, agent_id, payload, *, on_event=None):
+                self.calls.append((agent_id, payload))
+                on_event(AgentEvent("stage", "正在生成回答"))
+                on_event(AgentEvent("text_delta", "你"))
+                first.set()
+                await finish.wait()
+                on_event(AgentEvent("text_delta", "好"))
+                return AgentExecution("stream", agent_id, ConversationTurnResult(reply="你好"))
+
+        runtime = StreamingRuntime()
+        service = make_service(runtime)
+        session = await service.create()
+        run = await service.submit(
+            session.id, MessageCreate(client_message_id="s1", content="你好")
+        )
+        await asyncio.wait_for(first.wait(), 1)
+        reader = service.stream_run(session.id, run.id)
+        snapshot = await anext(reader)
+        assert snapshot.event == "snapshot" and snapshot.text == "你"
+        assert snapshot.run.status == "running"
+        assert service._store.record(session.id).runs[run.id].stream_bytes == len("你".encode())
+        second = service.stream_run(session.id, run.id)
+        assert (await anext(second)).text == "你"
+        # 关闭一个订阅不会取消任务；新订阅直接取得累计文本，不重跑模型。
+        await second.aclose()
+        reconnect = service.stream_run(session.id, run.id)
+        assert (await anext(reconnect)).text == "你"
+        finish.set()
+        events = [event async for event in reader]
+        assert events[-1].event == "done" and events[-1].run.message.content == "你好"
+        assert (await anext(reconnect)).event == "done"
+        assert len(runtime.calls) == 1
+        stored = service._store.record(session.id)
+        assert stored.runs[run.id].stream_text == "" and stored.runs[run.id].stream_bytes == 0
+        assert service._store.used_bytes == stored.bytes_used
+        await reconnect.aclose()
+        await service.aclose()
+        assert service._store.used_bytes == 0
+
+    asyncio.run(scenario())
+
+
+def test_stream_delta_arrives_before_completion_and_cancel_wakes_reader():
+    async def scenario():
+        emitted, finish = asyncio.Event(), asyncio.Event()
+
+        class StreamingRuntime(Runtime):
+            async def invoke(self, agent_id, payload, *, on_event=None):
+                await emitted.wait()
+                on_event(AgentEvent("text_delta", "第一段"))
+                await finish.wait()
+
+        service = make_service(StreamingRuntime())
+        session = await service.create()
+        run = await service.submit(
+            session.id, MessageCreate(client_message_id="s1", content="你好")
+        )
+        reader = service.stream_run(session.id, run.id)
+        assert (await anext(reader)).event == "snapshot"
+        emitted.set()
+        delta = None
+        while delta is None:
+            event = await asyncio.wait_for(anext(reader), 1)
+            if event.event == "delta":
+                delta = event
+        assert delta.text == "第一段" and not service._tasks[run.id].done()
+        await service.cancel(session.id, run.id)
+        done = await asyncio.wait_for(anext(reader), 1)
+        assert done.event == "done" and done.run.status == "cancelled"
+        assert "第一段" not in done.run.message.content
+        await reader.aclose()
+        await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_stream_capacity_failure_releases_partial_text_and_wakes_subscriber():
+    async def scenario():
+        class OverflowRuntime(Runtime):
+            async def invoke(self, agent_id, payload, *, on_event=None):
+                on_event(AgentEvent("text_delta", "x" * 30))
+                on_event(AgentEvent("text_delta", "x" * 100))
+
+        service = make_service(
+            OverflowRuntime(), settings=Settings(_env_file=None, conversation_max_bytes=1140)
+        )
+        session = await service.create()
+        run = await service.submit(session.id, MessageCreate(client_message_id="s1", content="hi"))
+        result = await complete(service, session, run)
+        assert result.status == "failed" and result.error.code == "CONVERSATION_CAPACITY"
+        record = service._store.record(session.id)
+        assert record.runs[run.id].stream_text == "" and record.runs[run.id].stream_bytes == 0
+        assert record.bytes_used == service._store.used_bytes <= 1140
+        reader = service.stream_run(session.id, run.id)
+        assert (await anext(reader)).event == "snapshot"
+        assert (await anext(reader)).event == "done"
+        await reader.aclose()
+        await service.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("ending", ["expiry", "shutdown"])
+def test_stream_lifecycle_wakes_waiters_after_record_cleanup(ending):
+    async def scenario():
+        clock = [0.0]
+        runtime = Runtime(gate=asyncio.Event())
+        service = make_service(
+            runtime,
+            clock=lambda: clock[0],
+            settings=Settings(_env_file=None, conversation_lifetime_seconds=1),
+        )
+        session = await service.create()
+        run = await service.submit(session.id, MessageCreate(client_message_id="m1", content="hi"))
+        await runtime.entered.wait()
+        reader = service.stream_run(session.id, run.id)
+        assert (await anext(reader)).event == "snapshot"
+        waiting = asyncio.create_task(anext(reader))
+        await asyncio.sleep(0)
+        if ending == "expiry":
+            clock[0] = 2
+            await service._expire_sessions()
+        else:
+            await service.aclose()
+        event = await asyncio.wait_for(waiting, 1)
+        assert event.event == "done" and event.run.status == "cancelled"
+        assert service._store.used_bytes == 0
+        await reader.aclose()
+        await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_publishes_terminal_event_for_a_task_not_scheduled_yet():
+    async def scenario():
+        service = make_service(Runtime(gate=asyncio.Event()))
+        session = await service.create()
+        run = await service.submit(session.id, MessageCreate(client_message_id="m1", content="hi"))
+        reader = service.stream_run(session.id, run.id)
+        assert (await anext(reader)).run.status == "queued"
+        # 没有让 _execute 获得调度；取消未启动的 task 不会执行它的 finally。
+        await service.aclose()
+        done = await asyncio.wait_for(anext(reader), 0.1)
+        assert done.event == "done" and done.run.status == "cancelled"
+        assert service._store.used_bytes == 0
+        await reader.aclose()
+
+    asyncio.run(scenario())
 
 
 def make_service(runtime=None, *, settings=None, clock=lambda: 0.0):
