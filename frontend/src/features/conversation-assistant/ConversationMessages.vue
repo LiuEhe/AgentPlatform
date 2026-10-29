@@ -6,7 +6,7 @@ import DOMPurify from 'dompurify'
 import AgentCallResult from './AgentCallResult.vue'
 import ConversationAttachments from './ConversationAttachments.vue'
 import type { DocumentView, MessageView } from './types'
-const props = defineProps<{ messages: MessageView[]; documents: DocumentView[]; busy: boolean; stage: string }>()
+const props = defineProps<{ messages: MessageView[]; documents: DocumentView[]; busy: boolean; stage: string; streamingText: string }>()
 const viewport = ref<HTMLElement>()
 let follow = true
 const html = (text: string) => DOMPurify.sanitize(marked.parse(text, { async: false }))
@@ -15,7 +15,7 @@ function onScroll() {
   if (el) follow = el.scrollHeight - el.scrollTop - el.clientHeight < 90
 }
 watch(() => props.messages[0]?.id, () => { follow = true })
-watch(() => [props.messages, props.busy], async () => {
+watch(() => [props.messages, props.busy, props.streamingText], async () => {
   await nextTick()
   if (follow && viewport.value) viewport.value.scrollTop = viewport.value.scrollHeight
 }, { immediate: true, flush: 'post' })
@@ -31,6 +31,10 @@ watch(() => [props.messages, props.busy], async () => {
         <div v-else class="markdown-content assistant-text" v-html="html(message.content)"></div>
         <AgentCallResult v-if="message.agent_call" :call="message.agent_call" />
       </div>
+    </article>
+    <article v-if="streamingText" class="message assistant" aria-label="正在生成的回答" aria-busy="true">
+      <div class="assistant-label"><MessagesSquare :size="20" aria-hidden="true" /><span>会话助手</span></div>
+      <div class="message-main"><div class="markdown-content assistant-text" v-html="html(streamingText)"></div></div>
     </article>
     <div v-if="busy" class="working" role="status"><LoaderCircle class="spin" :size="18" aria-hidden="true" />{{ stage || '正在处理…' }}</div>
   </div>

@@ -6,7 +6,7 @@ import type { ConversationSummary, ConversationView, DocumentView, MessageCreate
 
 const SESSION_KEY = 'agent-platform-conversation'
 const PENDING_KEY = 'agent-platform-conversation-pending-id'
-type RetryAction = 'initialize' | 'create' | 'send' | 'poll' | 'switch' | null
+type RetryAction = 'initialize' | 'create' | 'send' | 'stream' | 'refresh' | 'switch' | null
 interface ConversationSnapshot {
   messages: MessageView[]
   documents: DocumentView[]
@@ -17,6 +17,7 @@ interface ConversationSnapshot {
   retryAction: RetryAction
   retryTarget: string | null
   error: string
+  streamingText: string
 }
 
 export function useConversation() {
@@ -27,6 +28,7 @@ export function useConversation() {
   const selectedDocumentIds = ref<string[]>([])
   const draft = ref('')
   const activeRun = ref<RunView | null>(null)
+  const streamingText = ref('')
   const error = ref('')
   const initializing = ref(false)
   const sending = ref(false)
@@ -38,7 +40,8 @@ export function useConversation() {
   const snapshots = new Map<string, ConversationSnapshot>()
   let generation = 0
   let controller = new AbortController()
-  let timer: ReturnType<typeof setTimeout> | undefined
+  let unsubscribe: (() => void) | undefined
+  let subscriptionVersion = 0
   const busy = computed(() => initializing.value || sending.value || uploading.value ||
     Boolean(activeRun.value && !isTerminal(activeRun.value.status)))
 
@@ -49,6 +52,7 @@ export function useConversation() {
       messages: [...messages.value], documents: [...documents.value],
       selectedIds: [...selectedDocumentIds.value], draft: draft.value, run: activeRun.value,
       pending, retryAction: retryAction ?? (pending ? 'send' : null), retryTarget, error: error.value,
+      streamingText: streamingText.value,
     })
     const title = messages.value.find(message => message.role === 'user')?.content.slice(0, 24) || '新对话'
     const existing = conversations.value.find(item => item.id === id)
@@ -68,11 +72,13 @@ export function useConversation() {
     retryAction = snapshot?.retryAction ?? null
     retryTarget = snapshot?.retryTarget ?? null
     retryable.value = retryAction !== null
+    streamingText.value = snapshot?.streamingText ?? ''
   }
   async function resume(view: ConversationView, current: number) {
-    if (view.active_run_id) await poll(view.id, view.active_run_id, current)
+    if (view.active_run_id) watchRun(view.id, view.active_run_id, current)
     else {
       activeRun.value = null
+      streamingText.value = ''
       if (pending) {
         retryable.value = true
         retryAction = 'send'
@@ -109,8 +115,7 @@ export function useConversation() {
     generation += 1
     controller.abort()
     controller = new AbortController()
-    if (timer) clearTimeout(timer)
-    timer = undefined
+    closeStream()
     sending.value = false
     uploading.value = false
     retryable.value = false
@@ -118,34 +123,90 @@ export function useConversation() {
     retryTarget = null
     return generation
   }
-  async function poll(id: string, runId: string, current: number) {
+  function closeStream() {
+    subscriptionVersion += 1
+    unsubscribe?.()
+    unsubscribe = undefined
+  }
+  function acceptRun(run: RunView) {
+    activeRun.value = run
+    if (pending?.client_message_id === run.client_message_id) {
+      pending = null
+      draft.value = ''
+      selectedDocumentIds.value = []
+      remember(PENDING_KEY, null)
+    }
+    if (run.message) merge([run.message])
+  }
+  async function refreshCompleted(id: string, runId: string, current: number, version: number) {
+    const valid = () => current === generation && version === subscriptionVersion &&
+      id === conversationId.value && activeRun.value?.id === runId
     try {
-      const run = await api.getConversationRun(id, runId, controller.signal)
-      if (current !== generation) return
-      activeRun.value = run
-      if (pending?.client_message_id === run.client_message_id) {
-        pending = null
-        draft.value = ''
-        selectedDocumentIds.value = []
-        remember(PENDING_KEY, null)
-      }
-      if (run.message) merge([run.message])
-      if (isTerminal(run.status)) {
-        if (run.error) error.value = run.error.message
-        const view = await api.getConversation(id, 0, controller.signal)
-        if (current !== generation) return
-        receive(view)
-        retryable.value = false
-        retryAction = null
-        return
-      }
-      timer = setTimeout(() => void poll(id, runId, current), 5000)
+      const view = await api.getConversation(id, 0, controller.signal)
+      if (!valid()) return
+      receive(view)
     } catch (reason) {
-      if (current !== generation || controller.signal.aborted) return
+      if (!valid() || controller.signal.aborted) return
       fail(reason)
       retryable.value = !(reason instanceof ApiError && reason.status === 404)
-      retryAction = retryable.value ? 'poll' : null
+      retryAction = retryable.value ? 'refresh' : null
     }
+  }
+  function finishRun(id: string, run: RunView, current: number) {
+    closeStream()
+    acceptRun(run)
+    streamingText.value = ''
+    error.value = run.error?.message ?? ''
+    retryable.value = false; retryAction = null
+    void refreshCompleted(id, run.id, current, subscriptionVersion)
+  }
+  function watchRun(id: string, runId: string, current: number) {
+    closeStream()
+    const version = subscriptionVersion
+    let reconnecting = false
+    if (activeRun.value?.id !== runId) {
+      streamingText.value = ''
+      activeRun.value = { id: runId, client_message_id: '', status: 'running', stage: '正在连接任务…', message: null, error: null }
+    }
+    const valid = () => current === generation && version === subscriptionVersion &&
+      id === conversationId.value && activeRun.value?.id === runId
+    async function disconnected(reason: unknown) {
+      if (!valid()) return
+      closeStream()
+      const recoveryVersion = subscriptionVersion
+      const recoveryValid = () => current === generation && recoveryVersion === subscriptionVersion && id === conversationId.value && activeRun.value?.id === runId
+      try {
+        // 只查询一次以识别终态/失效；手动重试重新订阅，不回退到定时查询。
+        const run = await api.getConversationRun(id, runId, controller.signal)
+        if (!recoveryValid()) return
+        if (isTerminal(run.status)) { finishRun(id, run, current); return }
+        acceptRun(run)
+        fail(reason); retryable.value = true; retryAction = 'stream'
+      } catch (failure) {
+        if (!recoveryValid() || controller.signal.aborted) return
+        fail(failure)
+        const expired = failure instanceof ApiError && failure.status === 404
+        if (expired) { activeRun.value = null; streamingText.value = '' }
+        retryable.value = !expired; retryAction = expired ? null : 'stream'
+      }
+    }
+    try {
+      unsubscribe = api.subscribeConversationRun(id, runId, {
+        onEvent(event) {
+          if (!valid()) return
+          if (reconnecting) { error.value = ''; reconnecting = false }
+          if (event.event === 'delta') { streamingText.value += event.text; return }
+          acceptRun(event.run)
+          if (event.event === 'snapshot') streamingText.value = event.text
+          if (isTerminal(event.run.status)) finishRun(id, event.run, current)
+        },
+        onReconnecting() {
+          if (!valid()) return
+          reconnecting = true; error.value = '连接中断，正在重新连接…'
+        },
+        onError: reason => { void disconnected(reason) },
+      }, controller.signal)
+    } catch (reason) { void disconnected(reason) }
   }
   async function initialize() {
     saveCurrent()
@@ -194,8 +255,7 @@ export function useConversation() {
           const previous = await api.getConversation(previousId, 0, controller.signal)
           if (current !== generation) return
           receive(previous)
-          activeRun.value = null
-          if (previous.active_run_id) void poll(previousId, previous.active_run_id, current)
+          await resume(previous, current)
         } catch { /* 保留创建失败提示，仍可再次新建 */ }
       }
     }
@@ -224,7 +284,7 @@ export function useConversation() {
       retryAction = retryable.value ? 'switch' : null
       retryTarget = id
       if (previousId && activeRun.value && !isTerminal(activeRun.value.status)) {
-        void poll(previousId, activeRun.value.id, current)
+        watchRun(previousId, activeRun.value.id, current)
       }
     } finally { if (current === generation) initializing.value = false }
   }
@@ -251,7 +311,7 @@ export function useConversation() {
       const view = await api.getConversation(id, 0, controller.signal)
       if (current !== generation) return
       receive(view)
-      void poll(id, run.id, current)
+      watchRun(id, run.id, current)
     } catch (reason) {
       if (current !== generation || controller.signal.aborted) return
       fail(reason)
@@ -259,7 +319,7 @@ export function useConversation() {
         pending = null; remember(PENDING_KEY, null)
       }
       retryable.value = true
-      retryAction = activeRun.value?.client_message_id === submittedId ? 'poll' : 'send'
+      retryAction = activeRun.value?.client_message_id === submittedId ? 'stream' : 'send'
     } finally { if (current === generation) sending.value = false }
   }
   async function upload(file: File) {
@@ -281,10 +341,11 @@ export function useConversation() {
     try {
       const result = await api.cancelConversationRun(id, run.id)
       if (current !== generation || id !== conversationId.value || run.id !== activeRun.value?.id) return
-      if (timer) clearTimeout(timer)
-      activeRun.value = result
-      if (result.message) merge([result.message])
-      if (!isTerminal(result.status)) void poll(id, run.id, current)
+      if (isTerminal(result.status)) finishRun(id, result, current)
+      else {
+        acceptRun(result)
+        if (!unsubscribe) watchRun(id, run.id, current)
+      }
     } catch (reason) { if (current === generation) fail(reason) }
   }
   async function retry() {
@@ -294,8 +355,10 @@ export function useConversation() {
     if (action === 'create') await newConversation()
     else if (action === 'initialize') await initialize()
     else if (action === 'switch' && retryTarget) await switchConversation(retryTarget)
+    else if (action === 'stream' && activeRun.value && conversationId.value) watchRun(conversationId.value, activeRun.value.id, generation)
+    else if (action === 'refresh' && activeRun.value && conversationId.value) await refreshCompleted(conversationId.value, activeRun.value.id, generation, subscriptionVersion)
     else if (action === 'send' || pending) await send()
-    else if (activeRun.value && conversationId.value) await poll(conversationId.value, activeRun.value.id, generation)
+    else if (activeRun.value && conversationId.value) watchRun(conversationId.value, activeRun.value.id, generation)
   }
   function suspend() {
     saveCurrent()
@@ -303,6 +366,6 @@ export function useConversation() {
     initializing.value = false
   }
   onBeforeUnmount(suspend)
-  return { conversationId, conversations, messages, documents, selectedDocumentIds, draft, activeRun, busy,
+  return { conversationId, conversations, messages, documents, selectedDocumentIds, draft, activeRun, streamingText, busy,
     initializing, uploading, error, retryable, initialize, send, upload, stop, newConversation, switchConversation, suspend, retry }
 }

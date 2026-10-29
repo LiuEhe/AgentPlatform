@@ -34,6 +34,20 @@ function fixture(overrides = {}) {
     ...overrides,
   }
   const cleanup = []
+  const subscriptions = []
+  api.subscribeConversationRun ??= (id, runId, handlers, signal) => {
+    const subscription = { id, runId, handlers, closed: false }
+    subscriptions.push(subscription)
+    const close = () => { subscription.closed = true }
+    signal?.addEventListener('abort', close, { once: true })
+    queueMicrotask(async () => {
+      try {
+        const run = await api.getConversationRun(id, runId, signal)
+        if (!subscription.closed) handlers.onEvent({ event: 'snapshot', run, text: '' })
+      } catch (reason) { if (!subscription.closed) handlers.onError(reason) }
+    })
+    return close
+  }
   const filename = path.join(__dirname, 'useConversation.ts')
   const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -49,9 +63,174 @@ function fixture(overrides = {}) {
     return require(id)
   }
   loaded._compile(compiled, filename)
-  return { hook: loaded.exports.useConversation(), cleanup: () => cleanup.forEach(fn => fn()), calls, api, completed, storage }
+  return { hook: loaded.exports.useConversation(), cleanup: () => cleanup.forEach(fn => fn()), calls, api, completed, storage, subscriptions }
 }
 async function flush() { for (let i = 0; i < 30; i++) await Promise.resolve() }
+
+function streamApiFixture() {
+  const sources = []
+  const previous = global.EventSource
+  class Source {
+    static CLOSED = 2
+    readyState = 0
+    listeners = new Map()
+    closed = false
+    constructor(url) { this.url = url; sources.push(this) }
+    addEventListener(kind, callback) { this.listeners.set(kind, callback) }
+    close() { this.closed = true; this.readyState = 2 }
+    emit(kind, data) { this.listeners.get(kind)?.({ data: typeof data === 'string' ? data : JSON.stringify(data) }) }
+  }
+  global.EventSource = Source
+  const filename = path.resolve(__dirname, '../../api/conversations.ts')
+  const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText
+  const loaded = new Module(filename, module)
+  loaded.filename = filename; loaded.paths = module.paths
+  loaded.require = id => {
+    if (id === './client') return { ApiError, getApiBaseUrl: () => '' }
+    if (id.endsWith('/types')) return { isTerminal: status => ['succeeded', 'failed', 'cancelled'].includes(status) }
+    return require(id)
+  }
+  loaded._compile(compiled, filename)
+  return { api: loaded.exports, sources, cleanup: () => { global.EventSource = previous } }
+}
+
+test('native EventSource reconnects only within the bound and closes on abort or terminal', () => {
+  const f = streamApiFixture()
+  const events = [], errors = [], reconnects = []
+  const handlers = { onEvent: e => events.push(e), onError: e => errors.push(e), onReconnecting: () => reconnects.push(1) }
+  try {
+    const controller = new AbortController()
+    f.api.subscribeConversationRun('会话', 'r1', handlers, controller.signal)
+    const source = f.sources[0]
+    assert.ok(source.url.endsWith('/runs/r1/events'))
+    source.onerror(); source.onerror()
+    assert.equal(source.closed, false); assert.equal(reconnects.length, 2)
+    source.emit('snapshot', { event: 'snapshot', run: { id: 'r1', status: 'running' }, text: '你好' })
+    source.onerror(); source.onerror()
+    assert.equal(source.closed, false)
+    source.onerror()
+    assert.equal(source.closed, true); assert.equal(errors.length, 1)
+    source.emit('delta', { event: 'delta', text: 'late' })
+    assert.equal(events.length, 1)
+    f.api.subscribeConversationRun('c1', 'r2', handlers, controller.signal)
+    controller.abort()
+    assert.equal(f.sources[1].closed, true)
+    f.api.subscribeConversationRun('c1', 'r3', handlers)
+    f.sources[2].emit('done', { event: 'done', run: { id: 'r3', status: 'succeeded' } })
+    assert.equal(f.sources[2].closed, true)
+    assert.equal(events.at(-1).event, 'done')
+    f.api.subscribeConversationRun('c1', 'r4', handlers)
+    f.sources[3].emit('delta', 'invalid json')
+    assert.equal(f.sources[3].closed, true); assert.equal(errors.length, 2)
+  } finally { f.cleanup() }
+})
+
+test('SSE deltas appear before completion and reconnect snapshots replace partial text', async () => {
+  let handlers, closed = 0
+  const run = { id: 'r1', client_message_id: '', status: 'running', stage: 'answering', message: null, error: null }
+  const f = fixture({
+    sendConversationMessage: async (_id, body) => { run.client_message_id = body.client_message_id; return run },
+    subscribeConversationRun: (_id, _runId, callbacks) => { handlers = callbacks; return () => closed++ },
+  })
+  try {
+    await f.hook.initialize()
+    f.hook.draft.value = 'hello'
+    await f.hook.send()
+    handlers.onEvent({ event: 'snapshot', run, text: '你' })
+    handlers.onEvent({ event: 'delta', text: '好' })
+    assert.equal(f.hook.streamingText.value, '你好')
+    assert.equal(f.hook.busy.value, true)
+    handlers.onEvent({ event: 'snapshot', run, text: '你好，' })
+    handlers.onEvent({ event: 'delta', text: '世界' })
+    assert.equal(f.hook.streamingText.value, '你好，世界')
+    const message = { id: 'reply', sequence: 2, role: 'assistant', content: '你好，世界', document_ids: [] }
+    handlers.onEvent({ event: 'done', run: { ...run, status: 'succeeded', message } })
+    await flush()
+    assert.equal(f.hook.streamingText.value, '')
+    assert.equal(f.hook.messages.value.filter(m => m.id === 'reply').length, 1)
+    assert.equal(f.hook.busy.value, false)
+    assert.equal(closed, 1)
+  } finally { f.cleanup() }
+})
+
+test('a detached SSE cannot append to another conversation and reconnect never resubmits', async () => {
+  let handlers, closed = 0, created = 0
+  const f = fixture({
+    createConversation: async () => ({ id: 'c' + (++created), messages: [], documents: [], active_run_id: null }),
+    sendConversationMessage: async (_id, body) => ({ id: 'r1', client_message_id: body.client_message_id, status: 'running', message: null, error: null }),
+    subscribeConversationRun: (_id, _runId, callbacks) => { handlers = callbacks; return () => closed++ },
+  })
+  try {
+    await f.hook.initialize(); f.hook.draft.value = 'hello'; await f.hook.send()
+    const detached = handlers
+    await f.hook.newConversation()
+    detached.onEvent({ event: 'delta', text: 'late' })
+    assert.equal(f.hook.conversationId.value, 'c2')
+    assert.equal(f.hook.streamingText.value, '')
+    assert.equal(closed, 1)
+  } finally { f.cleanup() }
+})
+
+test('SSE connection failure uses one status read and retry subscribes without resending', async () => {
+  let handlers, subscriptions = 0, reads = 0, sends = 0
+  const run = { id: 'r1', client_message_id: '', status: 'running', stage: 'working', message: null, error: null }
+  const f = fixture({
+    sendConversationMessage: async (_id, body) => { sends++; run.client_message_id = body.client_message_id; return run },
+    subscribeConversationRun: (_id, _runId, callbacks) => { subscriptions++; handlers = callbacks; return () => {} },
+    getConversationRun: async () => { reads++; return run },
+  })
+  try {
+    await f.hook.initialize(); f.hook.draft.value = 'hello'; await f.hook.send()
+    handlers.onError(new ApiError(0)); await flush()
+    assert.equal(reads, 1)
+    assert.equal(f.hook.retryable.value, true)
+    await f.hook.retry()
+    assert.equal(subscriptions, 2)
+    assert.equal(sends, 1)
+  } finally { f.cleanup() }
+})
+
+test('retry reconnects an unconfirmed submission even when status recovery also failed', async () => {
+  let handlers, subscribed = 0, restored = false, sends = 0
+  const f = fixture({
+    getConversation: async () => ({ id: 'c1', messages: [], documents: [], active_run_id: restored ? 'r1' : null }),
+    sendConversationMessage: async () => { sends++; throw new ApiError(0) },
+    subscribeConversationRun: (_id, _runId, callbacks) => { handlers = callbacks; subscribed++; return () => {} },
+    getConversationRun: async () => { throw new ApiError(0) },
+  })
+  try {
+    await f.hook.initialize(); f.hook.draft.value = 'hello'; await f.hook.send()
+    f.hook.suspend(); restored = true; await f.hook.initialize()
+    handlers.onError(new ApiError(0)); await flush()
+    assert.equal(f.hook.busy.value, true)
+    assert.equal(f.hook.retryable.value, true)
+    await f.hook.retry()
+    assert.equal(subscribed, 2)
+    assert.equal(sends, 1)
+  } finally { f.cleanup() }
+})
+
+test('failed new conversation restores a completed reply without a stale partial bubble', async () => {
+  let handlers, completed = false
+  const run = { id: 'r1', client_message_id: '', status: 'running', message: null, error: null }
+  const final = { id: 'final', sequence: 2, role: 'assistant', content: 'complete answer', document_ids: [] }
+  const f = fixture({
+    getConversation: async () => ({ id: 'c1', messages: completed ? [final] : [], documents: [], active_run_id: completed ? null : 'r1' }),
+    sendConversationMessage: async (_id, body) => { run.client_message_id = body.client_message_id; return run },
+    subscribeConversationRun: (_id, _runId, callbacks) => { handlers = callbacks; return () => {} },
+  })
+  try {
+    await f.hook.initialize(); f.hook.draft.value = 'hello'; await f.hook.send()
+    handlers.onEvent({ event: 'snapshot', run, text: 'partial' })
+    f.api.createConversation = async () => { completed = true; throw new ApiError(0) }
+    await f.hook.newConversation()
+    assert.equal(f.hook.messages.value.some(m => m.id === 'final'), true)
+    assert.equal(f.hook.streamingText.value, '')
+    assert.equal(f.hook.busy.value, false)
+  } finally { f.cleanup() }
+})
 
 test('a lost response on a later turn retries that submission, not the previous run', async () => {
   const f = fixture()

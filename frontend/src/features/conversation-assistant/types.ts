@@ -33,6 +33,10 @@ export interface RunView {
   message: MessageView | null
   error: SafeError | null
 }
+export type RunEvent =
+  | { event: 'snapshot'; run: RunView; text: string }
+  | { event: 'delta'; text: string }
+  | { event: 'state' | 'done'; run: RunView }
 export interface ConversationView {
   id: string
   expires_in_seconds: number

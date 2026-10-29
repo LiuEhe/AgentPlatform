@@ -9,7 +9,7 @@ import ConversationHistory from '../features/conversation-assistant/Conversation
 import { useConversation } from '../features/conversation-assistant/useConversation'
 
 defineOptions({ name: 'AgentConversationView' })
-const { conversationId, conversations, messages, documents, selectedDocumentIds, draft, activeRun, busy,
+const { conversationId, conversations, messages, documents, selectedDocumentIds, draft, activeRun, streamingText, busy,
   initializing, uploading, error, retryable, initialize, send, upload, stop, newConversation,
   switchConversation, suspend, retry } = useConversation()
 const fileInput = ref<HTMLInputElement>()
@@ -48,7 +48,7 @@ function create() { historyDialog.value?.close(); void newConversation() }
         </div>
         <template v-else>
           <div class="dialogue-heading"><h1>会话助手</h1><span class="muted small">{{ messages.filter(message => message.role === 'user').length }} 轮对话</span></div>
-          <ConversationMessages :messages="messages" :documents="documents" :busy="busy && !initializing && !uploading" :stage="activeRun?.stage ?? ''" />
+          <ConversationMessages :messages="messages" :documents="documents" :busy="busy && !initializing && !uploading" :stage="activeRun?.stage ?? ''" :streaming-text="streamingText" />
         </template>
         <div class="input-dock">
           <div v-if="error" class="conversation-error" role="alert">
