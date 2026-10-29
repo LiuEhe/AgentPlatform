@@ -139,7 +139,7 @@ export function useConversation() {
         retryAction = null
         return
       }
-      timer = setTimeout(() => void poll(id, runId, current), document.hidden ? 5000 : 1000)
+      timer = setTimeout(() => void poll(id, runId, current), 5000)
     } catch (reason) {
       if (current !== generation || controller.signal.aborted) return
       fail(reason)
