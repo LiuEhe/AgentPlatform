@@ -158,7 +158,7 @@ curl.exe -X POST "http://127.0.0.1:8000/api/v1/documents/export/docx" -H "Conten
 
 成功响应为 `application/vnd.openxmlformats-officedocument.wordprocessingml.document`，包含附件文件名和 `Cache-Control: no-store`。服务通过内存返回文件，不保存审核结果或附件。前端报告页通过“下载 Word”按钮调用此接口。`DocumentExportService.export_docx()` 同时可由后续 Python 业务工具复用，返回文件字节、文件名和 MIME 类型；Chat 和 MCP 尚未接入。
 
-支持 GFM 标题、段落、粗斜体、列表、引用、分隔线、代码、常规链接及管道表格。真实图片和原始 HTML 返回 422，代码中的同样文字保留。Word 使用 A4、2.5 cm 页边距、宋体/Times New Roman 正文、重复表头和自动换行；字体不嵌入，复杂排版需在目标 Word/WPS 环境验收。
+支持 GFM 标题、段落、粗斜体、列表、引用、分隔线、代码、常规链接及管道表格。表格等行内内容中的无属性 `<br>`、`<br/>`、`<br />`（大小写均可）映射为 Pandoc 原生 `LineBreak`，在 Word 中保留单元格内换行；代码或转义文字中的标签原样保留。真实图片、带属性的换行标签及其他原始 HTML 仍返回 422。Word 使用 A4、2.5 cm 页边距、宋体/Times New Roman 正文、重复表头和自动换行；字体不嵌入，复杂排版需在目标 Word/WPS 环境验收。
 
 | 环境配置 | 默认值 | 范围与含义 |
 | --- | --- | --- |

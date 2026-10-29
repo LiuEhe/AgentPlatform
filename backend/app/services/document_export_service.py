@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 EXPORT_QUEUE_TIMEOUT_SECONDS = 5.0
 
 
-def _validate_ast(ast: dict[str, object]) -> None:
+def _prepare_ast(ast: dict[str, object]) -> None:
     if not isinstance(ast, dict) or not (
         isinstance(ast.get("blocks"), list) and isinstance(ast.get("meta"), dict)
         and isinstance(ast.get("pandoc-api-version"), list)
@@ -33,6 +33,17 @@ def _validate_ast(ast: dict[str, object]) -> None:
     while pending:
         node = pending.pop()
         if isinstance(node, dict):
+            content = node.get("c")
+            if (
+                node.get("t") == "RawInline"
+                and isinstance(content, list) and len(content) == 2
+                and content[0] == "html" and isinstance(content[1], str)
+                and re.fullmatch(r"<br\s*/?>", content[1], flags=re.IGNORECASE)
+            ):
+                # GFM 表格使用 HTML 换行；转成 Pandoc 原生节点，代码文字不受影响。
+                node.clear()
+                node["t"] = "LineBreak"
+                continue
             if node.get("t") in {"Image", "RawBlock", "RawInline"}:
                 raise AppError("EXPORT_CONTENT_UNSUPPORTED", "暂不支持导出图片或原始 HTML", 422)
             pending.extend(node.values())
@@ -223,7 +234,7 @@ class DocumentExportService:
                 deadline=deadline,
             )
             ast = json.loads(raw_ast)
-            _validate_ast(ast)
+            _prepare_ast(ast)
             if not _leading_title(ast, title):
                 ast["meta"]["title"] = {"t": "MetaString", "c": title}
             else:

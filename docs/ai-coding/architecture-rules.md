@@ -57,6 +57,8 @@ flowchart LR
 
 独立导出接口 `POST /api/v1/documents/export/docx` 委托 `DocumentExportService` 校验 Markdown、检查 AST 并设置 Word 样式，使用基础设施 `PandocRunner` 调用 pypandoc-binary 包内程序。服务在 lifespan 中独立于模型配置装配，持有同进程共享额度、取消及关闭逻辑。文件通过内存返回，未增加附件存储、MCP 或 Chat 工具，也不把转换放入制度审核图或 AgentRuntime。
 
+导出复用锁定依赖中的 Pandoc 3.9 GFM reader 与 DOCX writer；GFM reader 将行内 `<br>` 保留为 RawInline，因此服务在既有 AST 校验阶段仅将无属性 HTML 换行映射为官方 LineBreak 节点，不自行解析 Markdown 或全局替换原文。代码与转义文字保留，其他原始 HTML 和图片仍被拒绝；结构映射规则参考 [Pandoc 原生行内节点](https://pandoc.org/lua-filters.html#type-inline)，并以真实包内程序验证。
+
 ## 已有目录职责
 
 会话助手使用完整的 `agents/conversation_assistant/graph/` LangGraph，依次准备材料、构造上下文、识别意图和门控，再进入普通回复、澄清或审核子调用。参数合并、模式校验和目标白名单归 Agent；`ConversationService` 每轮只调用一次会话 Agent，负责后台任务、幂等、容量、超时、取消、上传用例和 HTTP 映射，不再解释意图或审核参数。

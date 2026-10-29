@@ -67,7 +67,9 @@ def test_real_export_keeps_all_four_sections_and_long_evidence():
     )
 
 
-@pytest.mark.parametrize('source', ['![图](private-file.png)', '<b>原始HTML</b>'])
+@pytest.mark.parametrize('source', [
+    '![图](private-file.png)', '<b>原始HTML</b>', '<br onclick="alert(1)">',
+])
 def test_real_engine_rejects_media_but_keeps_code_literals(source):
     with TestClient(create_app(settings())) as client:
         response = client.post('/api/v1/documents/export/docx', json={'markdown': source})
@@ -77,6 +79,35 @@ def test_real_engine_rejects_media_but_keeps_code_literals(source):
                               json={'markdown': f'```\n{source}\n```'})
         assert literal.status_code == 200
         assert source in '\n'.join(p.text for p in Document(BytesIO(literal.content)).paragraphs)
+
+
+@pytest.mark.parametrize('line_break', ['<br>', '<br/>', '<BR />'])
+def test_report_table_html_breaks_become_word_line_breaks(line_break):
+    source = (
+        '## 一. 简述\n\n本次发现 3 项需要关注的冲突或重复问题。\n\n'
+        '## 二. 冲突检测\n\n'
+        '| 原始章/节/条/款/项及序号 | 问题类型 | 上传标准文档依据 |\n'
+        '| :--- | :--- | :--- |\n'
+        f'| 第二章 组织与职责{line_break}第二条{line_break}序号:1 '
+        '| 冲突 | 人事标准文档.docx：第二条 公司成立人事管理领导小组。 |\n\n'
+        '## 三. 术语检测\n\n需统一机构名称。\n\n'
+        '## 四. 修改建议\n\n1. 调整第二条职责表述。\n\n'
+        '字面量：`<br>` 和 &lt;br&gt;。\n\n'
+        '```html\n<br>\n```'
+    )
+    with TestClient(create_app(settings())) as client:
+        response = client.post('/api/v1/documents/export/docx', json={'markdown': source})
+    assert response.status_code == 200, response.text if response.status_code != 200 else ''
+    doc = Document(BytesIO(response.content))
+    cell = doc.tables[0].cell(1, 0)
+    assert cell.text == '第二章 组织与职责\n第二条\n序号:1'
+    assert len(cell._tc.xpath('.//w:br')) == 2
+    assert doc.tables[0].cell(1, 2).text.endswith('第二条 公司成立人事管理领导小组。')
+    text = '\n'.join(p.text for p in doc.paragraphs)
+    for heading in ('一. 简述', '二. 冲突检测', '三. 术语检测', '四. 修改建议'):
+        assert heading in text
+    assert '字面量：<br> 和 <br>。' in text
+    assert '<br>' in [p.text for p in doc.paragraphs]
 
 
 @pytest.mark.parametrize('heading', ['制度审核报告', '**制度审核报告**', '*制度审核报告*'])
