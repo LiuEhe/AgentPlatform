@@ -22,9 +22,9 @@ AgentPlatform 用分层结构组织智能体应用：前端通过 API 提交任�
 
 当前增加会话助手：可直接聊天、可选上传 DOCX 或粘贴正文；先识别意图，普通聊天、制度知识问答和摘要不调用审核，明确制度审核且参数齐全时才调用已有智能体，并原样展示结果。入口为 `/agents/conversation-assistant`。
 
-助手左侧管理当前页面内的会话记录，上传文件在输入框预览并随所属消息展示。普通对话通过 SSE 实时显示模型输出，调用制度审核时推送真实状态并展示完整结果。切换会话保留草稿与文件选择，离开后关闭订阅，返回时恢复同一任务；内存记录不等于永久历史。制度审核报告保留完整 Markdown，并提供章节导航、复制、独立 Word 下载和明确的停止等待操作。
+助手左侧从后端分页读取会话记录，上传文件在输入框预览并随所属消息展示。普通对话通过 SSE 实时显示模型输出，调用制度审核时推送真实状态并展示完整结果。切换会话保留草稿与文件选择，离开后关闭订阅，返回时恢复同一任务；历史保存到 PostgreSQL，刷新或重启后可恢复；未发送草稿仍仅在页面内存。制度审核报告保留完整 Markdown，并提供章节导航、复制、独立 Word 下载和明确的停止等待操作。
 
-会话及结果仅保存在单个后端进程内存中，空闲 2 小时或最长 8 小时后失效，重启清空。当前不提供登录、长期审核历史或制度审核节点级进度；项目没有关系型数据库或 Redis。临时会话不支持多工作进程共享，也不提供用户权限隔离。
+智能体元数据、会话、消息、文件路径及完整子调用结果保存到 PostgreSQL；上传原件与解析正文存放在 backend/documents 的 agent/session/file 分级目录，不自动过期。服务重启后未完成运行标记中断，不自动重做。活动任务、SSE 临时文本及取消句柄仍在单进程内存，请使用单工作进程；同库第二实例会拒绝启动。当前没有登录、用户权限隔离、长期记忆、长对话摘要或 Redis，独立审核表单不新增历史功能。
 
 后端另提供独立 Markdown 转 Word 下载接口，使用 Python 依赖自带的 Pandoc 转换、python-docx 统一样式，不依赖模型配置或系统级安装 Pandoc。原制度审核报告页可点击“下载 Word”保存当前报告；会话页本次仅展示调用结果，不增加下载、报告版本或新业务流程，MCP 尚未接入。
 
@@ -75,6 +75,8 @@ flowchart LR
 ```text
 Agent/
 ├── backend/
+│   ├── database/                   # 显式建库与当前 v2 建表 SQL
+│   ├── documents/                  # 会话文件原件与正文，运行时生成并被 Git 忽略
 │   ├── app/
 │   │   ├── agents/institution_review/  # 制度审核适配器、图、状态和专属节点
 │   │   ├── api/                        # 审核与健康检查路由
@@ -94,13 +96,14 @@ Agent/
 │   │   ├── router/                     # 页面路由
 │   │   └── views/                      # 首页、广场和工作台
 │   └── README.md                       # 前端配置和启动说明
+├── docs/database.md                # 数据库设计、结构与初始化入口
 ├── docs/ai-coding/                     # 项目治理、架构和质量规则
 └── README.md
 ```
 
 ## 本地启动
 
-需要 Python 3.12 或 3.13、[uv](https://docs.astral.sh/uv/)，以及 Node.js 20.19+ 或 22.12+ 和 pnpm。先按各自 README 配置后端模型与 RAGFlow 参数，然后在两个终端分别启动：
+需要 PostgreSQL 18（先按后端说明执行 SQL 初始化）、Python 3.12 或 3.13、[uv](https://docs.astral.sh/uv/)，以及 Node.js 20.19+ 或 22.12+ 和 pnpm。先按各自 README 配置后端模型与 RAGFlow 参数，然后在两个终端分别启动：
 
 ```powershell
 # 终端一：后端
@@ -122,6 +125,7 @@ pnpm dev
 
 ## 当前入口
 
+- `GET /api/v1/agents`：数据库智能体展示目录；会话接口统一使用 `/api/v1/sessions` 与 session_id/message_id/run_id/file_id。
 - `GET /health/live`：进程存活检查。
 - `GET /health/ready`：检查模型配置与审核运行时，并分别返回两种模式的配置可用性；不探测外部连通或账户额度。
 - `POST /api/v1/reviews`：以 `multipart/form-data` 上传草稿 `file`，以及审核方式 `review_mode`；`standard_document` 模式还需 `standard_file`，返回 `text/markdown` 审核报告。缺省方式为 `knowledge_base`，兼容原有单文件请求。

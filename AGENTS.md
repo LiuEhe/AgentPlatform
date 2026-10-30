@@ -49,6 +49,7 @@
 
 - [项目说明](README.md)：开始任务先读本文件和项目说明，了解当前能力、限制及启动入口。
 - [后端说明](backend/README.md)：涉及后端接口、Agent、模型接入或后端运行时阅读。
+- [数据库设计与初始化](docs/database.md)：涉及数据库表结构、SQL 初始化、会话持久化仓储、附件路径存储或数据库测试时先阅读；初始化 SQL 归 `backend/database/`，结构变更须同步更新该文档。
 - [前端说明](frontend/README.md)：涉及页面交互、前端请求、开发代理或前端构建时阅读。
 - [治理原则与变更机制](docs/ai-coding/governance.md)：调整架构、依赖或公共契约，或遇到规则冲突时阅读。
 - [当前架构、目录职责与依赖边界](docs/ai-coding/architecture-rules.md)：新增或调整模块、调用关系及职责边界前阅读。

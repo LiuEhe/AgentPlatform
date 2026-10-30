@@ -27,7 +27,7 @@ flowchart LR
   Main --> RagClient
   HTTP --> Core[配置、错误处理、日志]
   HTTP --> ConversationService[ConversationService]
-  ConversationService --> SessionStore[内存会话存储基础设施]
+  ConversationService --> SessionStore[PostgreSQL 会话历史仓储]
   ConversationService --> ParseNode[公共 DOCX 解析节点]
   ParseNode --> DocNode
   ConversationService --> Runtime
@@ -63,19 +63,23 @@ flowchart LR
 
 会话助手使用完整的 `agents/conversation_assistant/graph/` LangGraph，依次准备材料、构造上下文、识别意图和门控，再进入普通回复、澄清或审核子调用。参数合并、模式校验和目标白名单归 Agent；`ConversationService` 每轮只调用一次会话 Agent，负责后台任务、幂等、容量、超时、取消、上传用例和 HTTP 映射，不再解释意图或审核参数。
 
-`infrastructure/conversation/in_memory_store.py` 保存消息、完整材料、运行记录和不透明续接数据，并管理 TTL、锁和容量计数；中立记录结构位于 `schemas/conversation_session.py`，本轮契约位于 `schemas/conversation_turn.py`。这类应用会话存储与 Agent 的 `graph/state.py` 分开。未启用图检查点，不维护第二份消息历史。
+`infrastructure/conversation/postgres_store.py` 以 asyncpg 官方连接池和事务保存 agents 元数据、chat_sessions、messages、files 路径、runs、agent_calls 及版本化续接数据；初始化 SQL 独立放在 `backend/database/`，由部署者显式执行，应用启动不建表。事务内分配消息序号、约束幂等和每会话唯一活动运行，模型/解析调用不持有长事务。`active_runs.py` 只保存进程内活动事件、临时文本、互斥与额度，不维护第二份可修改持久历史。中立 DTO 位于 `schemas/conversation_session.py`，Agent 业务状态和本轮输入输出契约保持独立。未启用 checkpointer 或长期记忆 Store。
 
 上传时调用 `nodes/document/parse.py` 完成格式及解压校验，并复用 `docx_to_markdown.py`，会话图使用解析结果，不重复解析。通用序列化预算及裁剪归 `nodes/llm/context.py`，会话材料选择归专属 `nodes/context_prepare.py`。模型输入预算为 24000 个序列化字符，历史子结果片段最多 4000 字符；这不是模型 token 上限。子调用按材料 ID 获取完整原文。
 
 会话专属 `tools/institution_review.py` 只适配已接入审核能力；图通过构建上下文注入的调用函数，使用生产环境同一个 `AgentRuntime` 调用原有制度审核 Agent。注册期间不执行调用，全部注册成功后才发布运行时；制度审核图继续在启动时构建并共享额度，没有通用工具中心或自动多智能体执行循环。运行时结果契约不变，invoke 增加可选通用事件回调，通过 AgentContext 交给适配器，不引入 HTTP、存储或具体审核规则；注册表工厂允许注入注册表及调用函数以完成装配。
 
-DOCX 上传可选，粘贴正文引用当前会话用户消息。消息、结果、待补齐审核参数与材料只留在内存；服务关闭先回收后台任务，再关闭外部客户端。前端 `features/conversation-assistant/` 负责聊天交互，`AgentConversationView.vue` 负责页面组合。当前使用 SSE，普通回答流式，审核推送真实阶段和完整结果；不提供跨进程恢复或用户权限隔离。
+DOCX 上传可选，粘贴正文引用当前会话用户消息。消息、结果、待补齐审核参数与文件元数据保存在 PostgreSQL，不自动过期；服务关闭先回收后台任务，再关闭外部客户端。前端 `features/conversation-assistant/` 负责聊天交互，`AgentConversationView.vue` 负责页面组合。当前使用 SSE，普通回答流式，审核推送真实阶段和完整结果；不提供跨进程恢复或用户权限隔离。
 
-会话适配器使用官方 LangGraph astream 单次驱动图，白名单输出 reply_chat 的文本，保留最终状态的校验和评估投影。应用服务接收文本/阶段事件，临时累计文本、变更通知与容量归现有会话存储，不放入 Agent 业务状态。SSE 订阅从同一运行读取 snapshot/delta/state/done，不重新调用模型，不建立事件日志或无界队列；终态回收临时文本占用。API 使用 FastAPI 官方 EventSourceResponse 与 ServerSentEvent；框架处理协议编码、心跳及响应头，应用服务只等待业务状态变化。依赖在开始流响应前校验运行，断开时通过标准库 aclosing 关闭订阅迭代器，不取消后台任务。
+会话适配器使用官方 LangGraph astream 单次驱动图，白名单输出 reply_chat 的文本，保留最终状态的校验和评估投影。应用服务接收文本/阶段事件，临时累计文本、变更通知与容量归活动运行状态，不放入 Agent 业务状态。SSE 订阅从同一运行读取 snapshot/delta/state/done，不重新调用模型，不建立事件日志或无界队列；终态回收临时文本占用。API 使用 FastAPI 官方 EventSourceResponse 与 ServerSentEvent；框架处理协议编码、心跳及响应头，应用服务只等待业务状态变化。依赖在开始流响应前校验运行，断开时通过标准库 aclosing 关闭订阅迭代器，不取消后台任务。
 
 前端导航为宣传首页 → 智能体目录 → 独立智能体页面。App 使用 Vue KeepAlive 保留助手页面；会话 feature 在页面内存中持有已访问会话的消息、材料元数据、草稿、附件选择与失败重试快照，左栏展示会话记录。激活后读取会话并订阅活动任务，停用时中止客户端请求与 SSE，不取消后端任务；响应代次、会话/运行 ID 和订阅实例防止迟到事件串入新会话。原生 EventSource 限定错误重连，失败可进行一次状态读取并提示手动恢复，不回退周期轮询。现有 sessionStorage 仅保存当前会话和客户端消息 ID，不写入正文，不构成持久会话存储或新的全局状态管理层。
 
 助手上传文件在输入框中预览，发送后随对应消息展示，不设右侧材料模块。独立审核仍走同步接口，停止等待仅使用 AbortSignal 中止客户端等待；报告以完整 Markdown 为真源，用 marked Renderer 生成章节定位，经 DOMPurify 清理后呈现，复制与 Word 导出使用原始完整内容。
+
+### 数据库部署资产 `backend/database/`
+
+该目录只放显式建库、建表 SQL，由部署者、数据库测试及 CI 调用，不属于 `backend/app/` 的 Python 运行时模块，也不打入应用 wheel 的包数据。数据库驱动适配与查询事务仍归 `app/infrastructure/conversation/`。表结构与初始化规则集中在 [数据库设计与初始化](../database.md)，涉及结构、仓储和数据库测试时先阅读；变更 SQL 时同步维护该文档、测试及 CI 的引用。
 
 ### 后端 `backend/app/`
 
@@ -89,7 +93,7 @@ DOCX 上传可选，粘贴正文引用当前会话用户消息。消息、结果
 | `agents/institution_review/graph/` | 制度审核 LangGraph 状态、图和路由边。 |
 | `agents/institution_review/nodes/` | 制度审核专属节点、提示调用和业务结构。 |
 | `nodes/` | 公共处理能力，包括 DOCX 转换、解析校验和 LLM 输入预算。会话业务材料选择不进入通用 LLM 节点；公共节点也可独立于图调用。 |
-| `infrastructure/` | 外部系统/SDK 适配及具体存储实现，包括聊天模型、RAGFlow、Pandoc 和会话内存存储。存储实现不解释 Agent 业务或返回 HTTP View。 |
+| `infrastructure/` | 外部系统/SDK 适配及具体存储实现，包括聊天模型、RAGFlow、Pandoc 和会话 PostgreSQL 仓储及活动内存状态。存储实现不解释 Agent 业务或返回 HTTP View。 |
 | `schemas/` | 应用级审核响应与引用等共享数据结构。Agent 私有结构保留在 Agent 包内。 |
 
 ### 前端 `frontend/src/`
@@ -134,3 +138,15 @@ DOCX 上传可选，粘贴正文引用当前会话用户消息。消息、结果
 ## 当前架构文档状态
 
 `docs/superpowers/智能体平台项目架构图_v2.md` 是规划材料，其中的数据库、认证、stores、消息队列和其他模块不代表当前实现。评估变更时以代码和本文件的“当前架构图”为准；未来计划须明确标注为计划，并单独审批。
+
+### 会话持久化运行边界
+
+同一数据库由专用连接持固定 advisory lock，首版仅一个应用进程；第二实例拒绝启动。启动恢复遗留 queued/running 为中断失败，不调用模型。终态消息、完整结果、continuation 与运行状态原子提交后才发送 SSE done；终态提交失败或运行权丢失拒绝新写入，需要服务重启。客户端历史列表从后端按更新时间分页，消息按 sequence 前后分页；sessionStorage 不是历史真源。没有用户/租户隔离或历史自动清理。数据库、连接、池和取消故障采用官方 asyncpg API，不自建协议/心跳。
+
+### 会话文件与智能体目录
+
+`infrastructure/documents/local_file_store.py` 负责附件原件及已解析 Markdown 的本地暂存、目录发布、读取和精确清理；默认根为 backend/documents，DOCUMENTS_DIR 相对 backend 解析，路径按 agent_id/session_id/file_id 分级，数据库保存相对 POSIX 路径。ConversationService 协调解析、文件发布和元数据事务，取消等待不可中止的写线程；提交未确认时先查询 file_id，无法核实则保留文件，不盲删。文件与数据库不构成跨资源原子事务，崩溃可留下待核对孤立文件。Agent 只接收服务加载的 TurnDocument 正文，不导入文件或数据库存储。
+
+AgentCatalogService 消费注入的 list_agents 查询，HTTP GET /api/v1/agents 和前端目录实际使用该元数据；运行执行仍由代码注册表控制。会话公共接口为 /api/v1/sessions，使用 session_id/message_id/run_id/file_id；文件返回元数据，不公开内部路径或静态目录。用户已批准丢弃旧表数据，本轮直接初始化 v2，不保留迁移或旧 HTTP 别名。
+
+未来个人私有会话需要真实 users 与 chat_sessions.user_id，并在所有会话、运行、文件、SSE 和取消入口校验服务端身份。当前没有用户身份来源，不伪造用户、不接受客户端 user_id 授权、不以文件目录代替权限控制。

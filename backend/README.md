@@ -1,12 +1,12 @@
 # 智能体平台后端
 
-基于 Python 3.12/3.13、FastAPI、LangChain、LangGraph 和 RAGFlow 的制度审核与会话服务。独立审核接口同步返回报告；会话助手通过意图识别决定普通回答、追问或调用现有制度审核，异步运行并通过 SSE 推送普通回答增量、真实阶段与最终结果。不依赖 Redis 或关系型数据库。
+基于 Python 3.12/3.13、FastAPI、LangChain、LangGraph 和 RAGFlow 的制度审核与会话服务。独立审核接口同步返回报告；会话助手通过意图识别决定普通回答、追问或调用现有制度审核，异步运行并通过 SSE 推送普通回答增量、真实阶段与最终结果。会话历史依赖 PostgreSQL 18 与 asyncpg 0.32.0，不依赖 Redis。
 
-## 临时会话助手
+## 会话助手与持久历史
 
 上传为可选步骤：无文件直接发消息，也可上传 DOCX 或将正文粘贴为用户消息。普通聊天、制度概念解释和摘要仅调用聊天模型，明确制度审核意图且参数齐全才执行子智能体。缺少审核方式、草稿或标准角色时先追问，用户转移话题时清除待补齐任务。只接入 `institution_review`，不新增工作汇总、报告生成 Agent。
 
-`conversation_assistant/graph/` 使用 LangGraph 表达材料准备、上下文选择、结构化意图识别、参数门控及回复/子调用分支。`ConversationService` 只负责会话用例、任务生命周期和 HTTP 映射；`infrastructure/conversation/in_memory_store.py` 保存中立会话记录。业务图状态与存储分开，未接入 checkpointer。
+`conversation_assistant/graph/` 使用 LangGraph 表达材料准备、上下文选择、结构化意图识别、参数门控及回复/子调用分支。`ConversationService` 只负责会话用例、任务生命周期和 HTTP 映射；`infrastructure/conversation/postgres_store.py` 保存中立会话记录，`active_runs.py` 只管理活动通知与临时文本。业务图状态与存储分开，未接入 checkpointer。
 
 上传阶段调用 `nodes/document/parse.py` 并复用既有 DOCX 转换器，聊天不重复解析。通用输入预算由 `nodes/llm/context.py` 处理，材料选择策略留在会话 Agent；模型上下文最多 24000 个序列化字符，历史审核结果仅带最多 4000 字符片段，审核始终使用独立保留的完整原文。父子调用通过同一个 `AgentRuntime`，制度审核图在启动时构建并复用。
 
@@ -14,23 +14,42 @@
 
 | 方法与路径 | 行为 |
 | --- | --- |
-| `POST /api/v1/conversations` | 创建临时会话，返回 201 |
-| `GET /api/v1/conversations/{id}?after_sequence=0` | 读取消息和文档元数据，支持按消息序号增量获取 |
-| `POST /api/v1/conversations/{id}/documents` | multipart 字段 `file` 上传一份 DOCX，返回文档 ID；不自动触发审核 |
-| `POST /api/v1/conversations/{id}/messages` | JSON `{client_message_id, content, document_ids: []}`，返回 202 及运行 ID |
-| `GET /api/v1/conversations/{id}/runs/{run_id}` | 查询 queued/running/succeeded/failed/cancelled 及结果 |
-| `GET /api/v1/conversations/{id}/runs/{run_id}/events` | SSE 订阅同一运行：snapshot、delta、state、done |
-| `POST /api/v1/conversations/{id}/runs/{run_id}/cancel` | 停止任务；终态请求幂等 |
+| `GET /api/v1/agents` | 读取数据库中的 agent_id/name/description；不授予执行能力 |
+| `POST /api/v1/sessions` | 创建持久会话，返回 201 |
+| `GET /api/v1/sessions/{session_id}?after_sequence=0` | 读取 session_id、消息 message_id 和文件元数据，支持按消息序号增量获取 |
+| `POST /api/v1/sessions/{session_id}/files` | multipart 字段 `file` 上传一份 DOCX，返回 file_id/original_name/size_bytes/content_chars/created_at，不暴露路径；不自动触发审核 |
+| `POST /api/v1/sessions/{session_id}/messages` | JSON `{client_message_id, content, file_ids: []}`，返回 202 及 run_id |
+| `GET /api/v1/sessions/{session_id}/runs/{run_id}` | 查询 queued/running/succeeded/failed/cancelled 及结果 |
+| `GET /api/v1/sessions/{session_id}/runs/{run_id}/events` | SSE 订阅同一运行：snapshot、delta、state、done |
+| `POST /api/v1/sessions/{session_id}/runs/{run_id}/cancel` | 停止任务；终态请求幂等 |
 
 相同 `client_message_id` 与相同内容复用原运行；同 ID 异内容返回 409。失败运行仍以 HTTP 200 返回运行资源，并在 `error` 中保存安全错误；只有请求本身无效时使用 HTTP 错误。无模型配置时可管理会话及材料，消息执行返回 503。知识库配置只影响知识库审核。
 
 SSE 使用已锁定 FastAPI 0.141.1 的官方 `EventSourceResponse` 与 `ServerSentEvent`，不增加依赖。首个 `snapshot` 数据为 `{event, run, text}`，包含当前状态及累计临时回答；`delta` 的 `text` 为新文本，`state` 和 `done` 的 `run` 为 RunView，终态包含正式消息。事件分帧、JSON 编码、空闲约 15 秒的注释心跳及防缓存/防代理缓冲响应头均由框架负责，不保留手写实现；`ServerSentEvent(retry=3000)` 指定浏览器重连间隔。目标通过 FastAPI 依赖在响应开始前校验，不存在时仍返回标准 JSON 404。代理部署需保持长连接并及时转发事件。[官方 SSE 文档](https://fastapi.tiangolo.com/tutorial/server-sent-events/) 与本地 `fastapi/sse.py`、`fastapi/routing.py` 已核对；会话快照、容量管理和取消属于应用策略，仍由既有服务与存储负责。
 
-每次订阅只读取现有运行，不调用模型；断开不取消任务，重连先获取累计快照，不提供持久事件日志或跨进程重放。官方 LangGraph `astream` 只将 `reply_chat` 的模型文本对外发送；结构化意图、思考内容和子审核中间输出不外发。审核只推送顶层真实阶段及最终完整结果。累计临时文本属于内存会话存储，计入现有容量；慢读者按偏移获取合并增量，不创建无界队列。成功、失败、取消、超时或到期时通知订阅，临时文本占用被回收，正式消息仍执行原容量检查。
+每次订阅只读取现有运行，不调用模型；断开不取消任务，重连先获取累计快照，不提供持久事件日志或跨进程重放。官方 LangGraph `astream` 只将 `reply_chat` 的模型文本对外发送；结构化意图、思考内容和子审核中间输出不外发。审核只推送顶层真实阶段及最终完整结果。累计临时文本属于活动运行内存状态，计入临时字节额度；慢读者按偏移获取合并增量，不创建无界队列。成功、失败、取消或超时时通知订阅，临时文本占用被回收，正式消息仍执行原容量检查。
 
-会话使用单进程内存，空闲默认 7200 秒、最长 28800 秒；状态查询及 SSE 订阅不续期，服务重启清空。每会话最多 8 文档/100 消息，用户消息 12000 字符，材料累计 100000 字符，输出单次最多 200000 字符。进程默认 3 个运行、6 个等待，排队 30 秒、运行 600 秒超时。配置为 `CONVERSATION_IDLE_SECONDS`、`CONVERSATION_LIFETIME_SECONDS`、`CONVERSATION_MAX_SESSIONS`（100）、`CONVERSATION_MAX_BYTES`（134217728）、`CONVERSATION_CONCURRENCY`、`CONVERSATION_QUEUE_SIZE`、`CONVERSATION_RUN_TIMEOUT_SECONDS`、`CONVERSATION_QUEUE_TIMEOUT_SECONDS`。字节预算仅限制业务载荷，不等于进程 RSS 上限。
+会话历史不自动过期。每会话最多 8 文档/100 消息，用户消息 12000 字符，材料累计 100000 字符，消息与子结果累计 1000000 字符，输出单次最多 200000 字符。进程默认 3 个运行、6 个等待，排队 30 秒、运行 600 秒超时；原有并发与超时配置保留。`CONVERSATION_TRANSIENT_MAX_BYTES` 默认 134217728，仅限制临时流式文本及解析中的上传字节，不统计全库历史，也不等于 RSS 上限。旧 TTL、MAX_SESSIONS、MAX_BYTES 配置不再使用。
 
-会话任务与 DOCX 解析并发受控，应用关闭先回收任务再关闭外部客户端。原始上传文件不落盘，正文仅保存在会话内。请使用单工作进程；本次没有用户认证、跨进程恢复或多用户权限隔离。
+运行和 DOCX 解析仍受并发控制。原始 DOCX 与解析 Markdown 通过 `infrastructure/documents/local_file_store.py` 保存到 `backend/documents/<agent_id>/<session_id>/<file_id>/`，数据库只保存路径和元数据。`DOCUMENTS_DIR` 可指定其他根目录，相对路径按 backend 解析；数据库和文件目录必须共同备份。应用关闭先取消并收尾任务，再关闭数据库及外部客户端。使用单工作进程；没有用户认证或权限隔离。固定 PostgreSQL advisory lock 防止同库第二实例启动，锁连接丢失或终态提交失败后拒绝新写入并结束订阅，需要重启服务；已提交历史保留，未提交临时结果可能丢失。
+
+### SQL 初始化与配置
+
+数据库设计与操作说明统一见 [数据库设计与初始化](../docs/database.md)，包括表关系、字段、约束、索引及完整初始化命令。
+
+建库和建表 SQL 位于 `backend/database/`：先在 postgres 管理库执行 `database/create_databases.sql`，再分别连接应用库和专用测试库执行 `database/schema_v2.sql`。在后端 `.env` 配置 `DATABASE_URL` 后启动单工作进程服务；应用启动只验证结构版本，不自动建库或建表。本地旧会话表已按用户授权清理并初始化为 v2，旧建表和一次性清理脚本已移除；不提供迁移或旧接口兼容。已有 v2 库不要重复执行初始化。
+
+### 历史查询
+
+- `GET /api/v1/sessions?agent_id=conversation_assistant&limit=20&cursor=...`：按更新时间与 ID 倒序的键集分页，返回 items/next_cursor。
+- `GET /api/v1/sessions/{session_id}`：默认最新 50 条消息，响应按 sequence 升序；before_sequence 读取更早一页，after_sequence 追赶新消息，两者互斥。limit 为 1–100。
+- has_more 说明本次方向还有下一页，next_before_sequence/next_after_sequence 为下一页位置；last_sequence 是全会话最高序号，不能当作已收到的位置。响应不再含 expires_in_seconds。
+- 完整消息、已提交报告和材料关联可以在刷新/重启后恢复；SSE 增量仅在当前运行进程内重连恢复，订阅历史终态返回终态后关闭，不重新调用模型。
+
+### PostgreSQL 测试
+
+执行测试前在当前终端显式提供指向专用 `agent_platform_test` 的 `TEST_DATABASE_URL`。真实数据库测试与 CI 统一使用 `database/schema_v2.sql`；测试 schema 隔离及清理范围见 [数据库测试与维护](../docs/database.md#测试与维护)。模型和检索仍使用替身。
+
 
 ## Langfuse 追踪、Prompt 与实验
 
