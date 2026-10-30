@@ -89,6 +89,81 @@ test('initialization restores server history instead of creating an empty conver
   } finally { f.cleanup() }
 })
 
+test('repeated new conversation clicks reuse the current blank conversation', async () => {
+  let created = 0
+  const f = fixture({ createSession: async () => ({
+    session_id: 'c' + (++created), messages: [], files: [], active_run_id: null, last_sequence: 0,
+  }) })
+  try {
+    await f.hook.initialize()
+    await f.hook.newSession()
+    await f.hook.newSession()
+    assert.equal(created, 1)
+    assert.equal(f.hook.sessionId.value, 'c1')
+    assert.deepEqual(f.hook.sessions.value.map(item => item.session_id), ['c1'])
+  } finally { f.cleanup() }
+})
+
+test('new conversation clicks while creation is pending do not create extra sessions', async () => {
+  let created = 0
+  const responses = []
+  const view = id => ({ session_id: id, messages: [], files: [], active_run_id: null, last_sequence: 0 })
+  const f = fixture({ createSession: () => {
+    const id = 'c' + (++created)
+    if (created === 1) return view(id)
+    return new Promise(resolve => responses.push(() => resolve(view(id))))
+  } })
+  try {
+    await f.hook.initialize()
+    f.hook.draft.value = 'keep this draft'
+    const first = f.hook.newSession()
+    const second = f.hook.newSession()
+    responses.forEach(resolve => resolve())
+    await Promise.all([first, second])
+    assert.equal(created, 2)
+    assert.equal(f.hook.sessionId.value, 'c2')
+    assert.deepEqual(f.hook.sessions.value.map(item => item.session_id), ['c2', 'c1'])
+    assert.equal(f.hook.draft.value, '')
+  } finally { f.cleanup() }
+})
+
+test('retry creates a replacement when a restored blank conversation no longer exists', async () => {
+  let created = 0
+  const f = fixture({
+    createSession: async () => ({ session_id: 'c' + (++created), messages: [], files: [], active_run_id: null, last_sequence: 0 }),
+    getSession: async () => { throw new ApiError(404) },
+  })
+  try {
+    await f.hook.initialize()
+    await f.hook.initialize()
+    assert.equal(f.hook.retryable.value, true)
+    await f.hook.retry()
+    assert.equal(f.hook.sessionId.value, 'c2')
+    assert.equal(f.storage.get('agent-platform-session'), 'c2')
+    assert.equal(f.hook.error.value, '')
+  } finally { f.cleanup() }
+})
+
+for (const content of ['draft', 'file']) {
+  test(`new conversation preserves a previous conversation containing only a ${content}`, async () => {
+    let created = 0
+    const view = id => ({ session_id: id, messages: [], files: [], active_run_id: null, last_sequence: 0 })
+    const f = fixture({ createSession: async () => view('c' + (++created)), getSession: async id => view(id) })
+    try {
+      await f.hook.initialize()
+      if (content === 'draft') f.hook.draft.value = 'unsent draft'
+      else await f.hook.upload({ name: 'draft.docx' })
+      await f.hook.newSession()
+      assert.equal(f.hook.sessionId.value, 'c2')
+      assert.equal(f.hook.draft.value, '')
+      assert.deepEqual(f.hook.selectedFileIds.value, [])
+      await f.hook.switchSession('c1')
+      if (content === 'draft') assert.equal(f.hook.draft.value, 'unsent draft')
+      else assert.deepEqual(f.hook.selectedFileIds.value, ['d1'])
+    } finally { f.cleanup() }
+  })
+}
+
 test('returning to a cached conversation fills the gap before the latest page', async () => {
   const messages = (start, end) => Array.from({ length: end - start + 1 }, (_, i) => ({
     message_id: `m${start + i}`, sequence: start + i, role: 'user', content: String(start + i), file_ids: [],
@@ -518,7 +593,10 @@ test('a failed switch retry belongs to its own conversation snapshot', async () 
   })
   try {
     await f.hook.initialize()
-    await f.hook.newSession(); await f.hook.newSession(); await f.hook.newSession()
+    for (let i = 1; i <= 3; i++) {
+      f.hook.draft.value = `draft ${i}`
+      await f.hook.newSession()
+    }
     await f.hook.switchSession('c1')
     failures.add('c2'); failures.add('c4')
     await f.hook.switchSession('c2')

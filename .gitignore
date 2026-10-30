@@ -10,3 +10,4 @@ docs/document
 .pnpm-store/
 # 会话上传原件、解析正文和暂存文件
 /backend/documents/
+.vscode/

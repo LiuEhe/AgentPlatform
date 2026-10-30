@@ -303,6 +303,10 @@ export function useConversation() {
     finally { if (current === generation) loadingEarlier.value = false }
   }
   async function newSession() {
+    if (initializing.value) return
+    // 当前仍是可用的空白对话时复用它，避免重复点击堆积空会话。
+    if (sessionId.value && !busy.value && !messages.value.length && !files.value.length &&
+      !draft.value && !pending && !activeRun.value && !error.value) return
     saveCurrent()
     const previousId = sessionId.value
     const current = resetRequests()
@@ -422,10 +426,10 @@ export function useConversation() {
   }
   async function retry() {
     const action = retryAction
+    if (action === 'create') { await newSession(); return }
     error.value = ''; retryable.value = false
     retryAction = null
-    if (action === 'create') await newSession()
-    else if (action === 'initialize') await initialize()
+    if (action === 'initialize') await initialize()
     else if (action === 'switch' && retryTarget) await switchSession(retryTarget)
     else if (action === 'stream' && activeRun.value && sessionId.value) watchRun(sessionId.value, activeRun.value.run_id, generation)
     else if (action === 'refresh' && activeRun.value && sessionId.value) await refreshCompleted(sessionId.value, activeRun.value.run_id, generation, subscriptionVersion)
