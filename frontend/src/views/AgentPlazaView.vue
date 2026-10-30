@@ -1,11 +1,29 @@
 <script setup lang="ts">
 import { RouterLink } from 'vue-router'
+import { computed, onMounted, ref } from 'vue'
 import { ArrowUpRight, CircleQuestionMark, MessagesSquare, PanelsTopLeft, ShieldCheck } from '@lucide/vue'
+import { listAgents } from '../api/agents'
+import type { AgentMetadata } from '../api/agents'
 
-const agents = [
-  { name: '会话助手', to: '/agents/conversation-assistant', icon: MessagesSquare, kind: '对话型', description: '讨论问题、起草文字、整理材料。围绕上下文连续交流，让思路逐渐清楚。', tags: ['多轮对话', '文件讨论', '写作整理'] },
-  { name: '制度审核', to: '/agents/institution-review', icon: ShieldCheck, kind: '任务型', description: '上传制度草稿，选择标准或知识库。查看条款问题、相关依据与完整报告。', tags: ['制度对照', '术语检查', '报告导出'] },
-]
+const entries = {
+  conversation_assistant: { to: '/agents/conversation-assistant', icon: MessagesSquare, kind: '对话型', tags: ['多轮对话', '文件讨论', '写作整理'] },
+  institution_review: { to: '/agents/institution-review', icon: ShieldCheck, kind: '任务型', tags: ['制度对照', '术语检查', '报告导出'] },
+}
+const metadata = ref<AgentMetadata[]>([])
+const loading = ref(true)
+const error = ref('')
+const agents = computed(() => metadata.value.flatMap(agent => {
+  const entry = entries[agent.agent_id as keyof typeof entries]
+  return entry ? [{ ...agent, ...entry }] : []
+}))
+async function load() {
+  loading.value = true
+  error.value = ''
+  try { metadata.value = await listAgents() }
+  catch (reason) { error.value = reason instanceof Error ? reason.message : '智能体目录加载失败。' }
+  finally { loading.value = false }
+}
+onMounted(load)
 </script>
 
 <template>
@@ -16,6 +34,8 @@ const agents = [
       <p>每个智能体都有自己的工作空间，选好后即可进入。</p>
     </div>
     <div class="directory-label"><span>全部智能体</span><span class="muted">{{ agents.length }} 个智能体</span></div>
+    <p v-if="loading" role="status">正在加载智能体…</p>
+    <p v-if="error" role="alert">{{ error }} <button class="text-button" type="button" @click="load">重试</button></p>
     <div class="agent-grid">
       <RouterLink v-for="agent in agents" :key="agent.to" class="agent-card" :to="agent.to">
         <div class="agent-symbol"><component :is="agent.icon" :size="28" :stroke-width="1.75" aria-hidden="true" /></div>

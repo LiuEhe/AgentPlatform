@@ -1,8 +1,8 @@
 export type RunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 export interface SafeError { code: string; message: string }
-export interface DocumentView { id: string; filename: string; chars: number }
+export interface FileView { file_id: string; original_name: string; size_bytes: number; content_chars: number; created_at: string }
 export interface AgentCallView {
-  id: string
+  call_id: string
   agent_id: string
   agent_name: string
   invocation_id: string | null
@@ -12,21 +12,22 @@ export interface AgentCallView {
   error: SafeError | null
 }
 export interface MessageView {
-  id: string
+  message_id: string
   sequence: number
+  created_at: string
   role: 'user' | 'assistant'
   content: string
-  document_ids: string[]
+  file_ids: string[]
   run_id: string | null
   agent_call: AgentCallView | null
 }
 export interface MessageCreate {
   client_message_id: string
   content: string
-  document_ids: string[]
+  file_ids: string[]
 }
 export interface RunView {
-  id: string
+  run_id: string
   client_message_id: string
   status: RunStatus
   stage: string
@@ -37,13 +38,15 @@ export type RunEvent =
   | { event: 'snapshot'; run: RunView; text: string }
   | { event: 'delta'; text: string }
   | { event: 'state' | 'done'; run: RunView }
-export interface ConversationView {
-  id: string
-  expires_in_seconds: number
+export interface SessionView extends SessionSummary {
   messages: MessageView[]
-  documents: DocumentView[]
+  files: FileView[]
   active_run_id: string | null
   last_sequence: number
+  has_more: boolean
+  next_before_sequence: number | null
+  next_after_sequence: number | null
 }
-export interface ConversationSummary { id: string; title: string }
+export interface SessionSummary { session_id: string; agent_id: string; title: string; created_at: string; updated_at: string }
+export interface SessionListView { items: SessionSummary[]; next_cursor: string | null }
 export const isTerminal = (status: RunStatus) => ['succeeded', 'failed', 'cancelled'].includes(status)

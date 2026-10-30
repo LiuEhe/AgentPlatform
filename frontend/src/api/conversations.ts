@@ -1,8 +1,8 @@
 import { ApiError, createApiError, getApiBaseUrl } from './client'
 import { isTerminal } from '../features/conversation-assistant/types'
-import type { ConversationView, DocumentView, MessageCreate, RunEvent, RunView } from '../features/conversation-assistant/types'
+import type { SessionListView, SessionView, FileView, MessageCreate, RunEvent, RunView } from '../features/conversation-assistant/types'
 
-const root = '/api/v1/conversations'
+const root = '/api/v1/sessions'
 const path = (id: string) => `${root}/${encodeURIComponent(id)}`
 
 async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
@@ -16,22 +16,34 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
   }
 }
 
-export const createConversation = (signal?: AbortSignal) =>
-  request<ConversationView>(root, { method: 'POST', signal })
-export const getConversation = (id: string, afterSequence = 0, signal?: AbortSignal) =>
-  request<ConversationView>(`${path(id)}?after_sequence=${afterSequence}`, { signal })
-export const uploadConversationDocument = (id: string, file: File, signal?: AbortSignal) => {
+export const createSession = (signal?: AbortSignal) =>
+  request<SessionView>(root, { method: 'POST', signal })
+export interface MessagePageOptions { limit?: number; beforeSequence?: number; afterSequence?: number }
+export const getSession = (id: string, options: MessagePageOptions = {}, signal?: AbortSignal) => {
+  const query = new URLSearchParams()
+  if (options.limit !== undefined) query.set('limit', String(options.limit))
+  if (options.beforeSequence !== undefined) query.set('before_sequence', String(options.beforeSequence))
+  if (options.afterSequence !== undefined) query.set('after_sequence', String(options.afterSequence))
+  return request<SessionView>(`${path(id)}?${query}`, { signal })
+}
+export const listSessions = (options: { limit?: number; cursor?: string; agentId?: string } = {}, signal?: AbortSignal) => {
+  const query = new URLSearchParams({ agent_id: options.agentId ?? 'conversation_assistant' })
+  if (options.limit !== undefined) query.set('limit', String(options.limit))
+  if (options.cursor) query.set('cursor', options.cursor)
+  return request<SessionListView>(`${root}?${query}`, { signal })
+}
+export const uploadSessionFile = (id: string, file: File, signal?: AbortSignal) => {
   const body = new FormData()
   body.append('file', file)
-  return request<DocumentView>(`${path(id)}/documents`, { method: 'POST', body, signal })
+  return request<FileView>(`${path(id)}/files`, { method: 'POST', body, signal })
 }
-export const sendConversationMessage = (id: string, input: MessageCreate, signal?: AbortSignal) =>
+export const sendSessionMessage = (id: string, input: MessageCreate, signal?: AbortSignal) =>
   request<RunView>(`${path(id)}/messages`, {
     method: 'POST', body: JSON.stringify(input), headers: { 'Content-Type': 'application/json' }, signal,
   })
-export const getConversationRun = (id: string, runId: string, signal?: AbortSignal) =>
+export const getSessionRun = (id: string, runId: string, signal?: AbortSignal) =>
   request<RunView>(`${path(id)}/runs/${encodeURIComponent(runId)}`, { signal })
-export const cancelConversationRun = (id: string, runId: string) =>
+export const cancelSessionRun = (id: string, runId: string) =>
   request<RunView>(`${path(id)}/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
 
 export interface RunSubscriptionHandlers {
@@ -40,7 +52,7 @@ export interface RunSubscriptionHandlers {
   onReconnecting?: () => void
 }
 
-export function subscribeConversationRun(id: string, runId: string, handlers: RunSubscriptionHandlers, signal?: AbortSignal): () => void {
+export function subscribeSessionRun(id: string, runId: string, handlers: RunSubscriptionHandlers, signal?: AbortSignal): () => void {
   if (signal?.aborted) return () => {}
   const source = new EventSource(`${getApiBaseUrl()}${path(id)}/runs/${encodeURIComponent(runId)}/events`)
   let closed = false
@@ -63,7 +75,7 @@ export function subscribeConversationRun(id: string, runId: string, handlers: Ru
         event = JSON.parse(message.data) as RunEvent
         if (event.event !== kind ||
           ((kind === 'delta' || kind === 'snapshot') && typeof ('text' in event && event.text) !== 'string') ||
-          (event.event !== 'delta' && (!event.run || event.run.id !== runId))) throw new Error('Invalid stream event')
+          (event.event !== 'delta' && (!event.run || event.run.run_id !== runId))) throw new Error('Invalid stream event')
       } catch { fail(); return }
       failures = 0
       if (event.event === 'done' || (event.event !== 'delta' && isTerminal(event.run.status))) close()

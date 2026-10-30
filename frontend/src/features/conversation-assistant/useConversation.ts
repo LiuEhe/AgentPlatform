@@ -2,14 +2,14 @@ import { computed, onBeforeUnmount, ref } from 'vue'
 import * as api from '../../api/conversations'
 import { ApiError } from '../../api/client'
 import { isTerminal } from './types'
-import type { ConversationSummary, ConversationView, DocumentView, MessageCreate, MessageView, RunView } from './types'
+import type { SessionSummary, SessionView, FileView, MessageCreate, MessageView, RunView } from './types'
 
-const SESSION_KEY = 'agent-platform-conversation'
-const PENDING_KEY = 'agent-platform-conversation-pending-id'
+const SESSION_KEY = 'agent-platform-session'
+const PENDING_KEY = 'agent-platform-session-pending-id'
 type RetryAction = 'initialize' | 'create' | 'send' | 'stream' | 'refresh' | 'switch' | null
 interface ConversationSnapshot {
   messages: MessageView[]
-  documents: DocumentView[]
+  files: FileView[]
   selectedIds: string[]
   draft: string
   run: RunView | null
@@ -18,14 +18,16 @@ interface ConversationSnapshot {
   retryTarget: string | null
   error: string
   streamingText: string
+  earlierCursor: number | null
+  receivedSequence: number
 }
 
 export function useConversation() {
-  const conversationId = ref<string | null>(null)
-  const conversations = ref<ConversationSummary[]>([])
+  const sessionId = ref<string | null>(null)
+  const sessions = ref<SessionSummary[]>([])
   const messages = ref<MessageView[]>([])
-  const documents = ref<DocumentView[]>([])
-  const selectedDocumentIds = ref<string[]>([])
+  const files = ref<FileView[]>([])
+  const selectedFileIds = ref<string[]>([])
   const draft = ref('')
   const activeRun = ref<RunView | null>(null)
   const streamingText = ref('')
@@ -34,6 +36,13 @@ export function useConversation() {
   const sending = ref(false)
   const uploading = ref(false)
   const retryable = ref(false)
+  const earlierCursor = ref<number | null>(null)
+  const receivedSequence = ref(0)
+  const hasEarlierMessages = computed(() => earlierCursor.value !== null)
+  const loadingEarlier = ref(false)
+  const loadingHistory = ref(false)
+  const listCursor = ref<string | null>(null)
+  const hasMoreSessions = computed(() => listCursor.value !== null)
   let pending: MessageCreate | null = null
   let retryAction: RetryAction = null
   let retryTarget: string | null = null
@@ -46,25 +55,21 @@ export function useConversation() {
     Boolean(activeRun.value && !isTerminal(activeRun.value.status)))
 
   function saveCurrent() {
-    const id = conversationId.value
+    const id = sessionId.value
     if (!id) return
     snapshots.set(id, {
-      messages: [...messages.value], documents: [...documents.value],
-      selectedIds: [...selectedDocumentIds.value], draft: draft.value, run: activeRun.value,
+      messages: [...messages.value], files: [...files.value],
+      selectedIds: [...selectedFileIds.value], draft: draft.value, run: activeRun.value,
       pending, retryAction: retryAction ?? (pending ? 'send' : null), retryTarget, error: error.value,
-      streamingText: streamingText.value,
+      streamingText: streamingText.value, earlierCursor: earlierCursor.value, receivedSequence: receivedSequence.value,
     })
-    const title = messages.value.find(message => message.role === 'user')?.content.slice(0, 24) || '新对话'
-    const existing = conversations.value.find(item => item.id === id)
-    if (existing) existing.title = title
-    else conversations.value.unshift({ id, title })
   }
   function restore(id: string | null) {
     const snapshot = id ? snapshots.get(id) : undefined
-    conversationId.value = id
+    sessionId.value = id
     messages.value = [...(snapshot?.messages ?? [])]
-    documents.value = [...(snapshot?.documents ?? [])]
-    selectedDocumentIds.value = [...(snapshot?.selectedIds ?? [])]
+    files.value = [...(snapshot?.files ?? [])]
+    selectedFileIds.value = [...(snapshot?.selectedIds ?? [])]
     draft.value = snapshot?.draft ?? ''
     activeRun.value = snapshot?.run ?? null
     pending = snapshot?.pending ?? null
@@ -73,9 +78,11 @@ export function useConversation() {
     retryTarget = snapshot?.retryTarget ?? null
     retryable.value = retryAction !== null
     streamingText.value = snapshot?.streamingText ?? ''
+    earlierCursor.value = snapshot?.earlierCursor ?? null
+    receivedSequence.value = snapshot?.receivedSequence ?? 0
   }
-  async function resume(view: ConversationView, current: number) {
-    if (view.active_run_id) watchRun(view.id, view.active_run_id, current)
+  async function resume(view: SessionView, current: number) {
+    if (view.active_run_id) watchRun(view.session_id, view.active_run_id, current)
     else {
       activeRun.value = null
       streamingText.value = ''
@@ -94,22 +101,46 @@ export function useConversation() {
     try { return sessionStorage.getItem(key) } catch { return null }
   }
   function merge(incoming: MessageView[]) {
-    const indexed = new Map(messages.value.map(message => [message.id, message]))
-    incoming.forEach(message => indexed.set(message.id, message))
+    const indexed = new Map(messages.value.map(message => [message.message_id, message]))
+    incoming.forEach(message => indexed.set(message.message_id, message))
     messages.value = [...indexed.values()].sort((a, b) => a.sequence - b.sequence)
   }
-  function receive(view: ConversationView) {
-    conversationId.value = view.id
-    remember(SESSION_KEY, view.id)
+  function receive(view: SessionView, direction: 'latest' | 'earlier' | 'after' = 'latest') {
+    if (direction === 'earlier' || (direction === 'latest' && !messages.value.length)) earlierCursor.value = view.next_before_sequence ?? null
+    if (direction !== 'earlier') receivedSequence.value = Math.max(receivedSequence.value, ...view.messages.map(m => m.sequence))
+    sessionId.value = view.session_id
+    remember(SESSION_KEY, view.session_id)
     merge(view.messages)
-    documents.value = view.documents
+    files.value = view.files
+    const summary = { session_id: view.session_id, agent_id: view.agent_id, title: view.title,
+      created_at: view.created_at, updated_at: view.updated_at }
+    const existing = sessions.value.find(item => item.session_id === view.session_id)
+    if (existing) Object.assign(existing, summary)
+    else sessions.value.unshift(summary)
+    sessions.value.sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.session_id.localeCompare(a.session_id))
     saveCurrent()
   }
   function fail(reason: unknown) {
     if (reason instanceof ApiError && reason.status === 404) {
-      error.value = '这个临时会话已失效，请新建对话。你的输入仍保留在输入框中。'
+      error.value = '这个会话不存在，请新建对话。你的输入仍保留在输入框中。'
       remember(SESSION_KEY, null)
     } else error.value = reason instanceof Error ? reason.message : '操作未完成，请稍后重试。'
+  }
+  async function receiveLatest(view: SessionView, current: number) {
+    let after = receivedSequence.value
+    if (messages.value.length) {
+      while (after < view.last_sequence) {
+        const page = await api.getSession(view.session_id, { afterSequence: after }, controller.signal)
+        if (current !== generation || sessionId.value !== view.session_id) return false
+        const last = page.messages.at(-1)?.sequence
+        if (last === undefined || last <= after) throw new Error('消息分页位置无效，请重新连接。')
+        receive(page, 'after')
+        after = last
+      }
+    }
+    if (current !== generation) return false
+    receive(view)
+    return true
   }
   function resetRequests() {
     generation += 1
@@ -118,6 +149,8 @@ export function useConversation() {
     closeStream()
     sending.value = false
     uploading.value = false
+    loadingEarlier.value = false
+    loadingHistory.value = false
     retryable.value = false
     retryAction = null
     retryTarget = null
@@ -133,18 +166,24 @@ export function useConversation() {
     if (pending?.client_message_id === run.client_message_id) {
       pending = null
       draft.value = ''
-      selectedDocumentIds.value = []
+      selectedFileIds.value = []
       remember(PENDING_KEY, null)
     }
     if (run.message) merge([run.message])
   }
   async function refreshCompleted(id: string, runId: string, current: number, version: number) {
     const valid = () => current === generation && version === subscriptionVersion &&
-      id === conversationId.value && activeRun.value?.id === runId
+      id === sessionId.value && activeRun.value?.run_id === runId
     try {
-      const view = await api.getConversation(id, 0, controller.signal)
-      if (!valid()) return
-      receive(view)
+      let after = receivedSequence.value
+      while (valid()) {
+        const view = await api.getSession(id, { afterSequence: after }, controller.signal)
+        if (!valid()) return
+        receive(view, 'after')
+        if (!view.has_more) break
+        if (view.next_after_sequence === null || view.next_after_sequence <= after) throw new Error('消息分页位置无效，请重新连接。')
+        after = view.next_after_sequence
+      }
     } catch (reason) {
       if (!valid() || controller.signal.aborted) return
       fail(reason)
@@ -158,26 +197,26 @@ export function useConversation() {
     streamingText.value = ''
     error.value = run.error?.message ?? ''
     retryable.value = false; retryAction = null
-    void refreshCompleted(id, run.id, current, subscriptionVersion)
+    void refreshCompleted(id, run.run_id, current, subscriptionVersion)
   }
   function watchRun(id: string, runId: string, current: number) {
     closeStream()
     const version = subscriptionVersion
     let reconnecting = false
-    if (activeRun.value?.id !== runId) {
+    if (activeRun.value?.run_id !== runId) {
       streamingText.value = ''
-      activeRun.value = { id: runId, client_message_id: '', status: 'running', stage: '正在连接任务…', message: null, error: null }
+      activeRun.value = { run_id: runId, client_message_id: '', status: 'running', stage: '正在连接任务…', message: null, error: null }
     }
     const valid = () => current === generation && version === subscriptionVersion &&
-      id === conversationId.value && activeRun.value?.id === runId
+      id === sessionId.value && activeRun.value?.run_id === runId
     async function disconnected(reason: unknown) {
       if (!valid()) return
       closeStream()
       const recoveryVersion = subscriptionVersion
-      const recoveryValid = () => current === generation && recoveryVersion === subscriptionVersion && id === conversationId.value && activeRun.value?.id === runId
+      const recoveryValid = () => current === generation && recoveryVersion === subscriptionVersion && id === sessionId.value && activeRun.value?.run_id === runId
       try {
         // 只查询一次以识别终态/失效；手动重试重新订阅，不回退到定时查询。
-        const run = await api.getConversationRun(id, runId, controller.signal)
+        const run = await api.getSessionRun(id, runId, controller.signal)
         if (!recoveryValid()) return
         if (isTerminal(run.status)) { finishRun(id, run, current); return }
         acceptRun(run)
@@ -191,7 +230,7 @@ export function useConversation() {
       }
     }
     try {
-      unsubscribe = api.subscribeConversationRun(id, runId, {
+      unsubscribe = api.subscribeSessionRun(id, runId, {
         onEvent(event) {
           if (!valid()) return
           if (reconnecting) { error.value = ''; reconnecting = false }
@@ -214,11 +253,16 @@ export function useConversation() {
     initializing.value = true
     error.value = ''
     try {
-      const id = conversationId.value ?? stored(SESSION_KEY)
-      const view = id ? await api.getConversation(id, 0, controller.signal) :
-        await api.createConversation(controller.signal)
+      const list = await api.listSessions({}, controller.signal)
       if (current !== generation) return
-      receive(view)
+      mergeSummaries(list.items)
+      listCursor.value = list.next_cursor
+      const id = sessionId.value ?? stored(SESSION_KEY) ?? list.items[0]?.session_id
+      const view = id ? await api.getSession(id, {}, controller.signal) :
+        await api.createSession(controller.signal)
+      if (current !== generation) return
+      if (sessionId.value !== view.session_id) restore(view.session_id)
+      if (!await receiveLatest(view, current)) return
       if (!pending) remember(PENDING_KEY, null)
       await resume(view, current)
     } catch (reason) {
@@ -230,14 +274,42 @@ export function useConversation() {
     }
     finally { if (current === generation) initializing.value = false }
   }
-  async function newConversation() {
+  function mergeSummaries(items: SessionSummary[]) {
+    const indexed = new Map(sessions.value.map(item => [item.session_id, item]))
+    items.forEach(item => indexed.set(item.session_id, item))
+    sessions.value = [...indexed.values()].sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.session_id.localeCompare(a.session_id))
+  }
+  async function loadMoreSessions() {
+    if (loadingHistory.value || !listCursor.value) return
+    const current = generation
+    loadingHistory.value = true
+    try {
+      const page = await api.listSessions({ cursor: listCursor.value }, controller.signal)
+      if (current !== generation) return
+      mergeSummaries(page.items)
+      listCursor.value = page.next_cursor
+    } catch (reason) { if (current === generation && !controller.signal.aborted) fail(reason) }
+    finally { if (current === generation) loadingHistory.value = false }
+  }
+  async function loadEarlierMessages() {
+    const id = sessionId.value, before = earlierCursor.value, current = generation
+    if (!id || before === null || loadingEarlier.value) return
+    loadingEarlier.value = true
+    try {
+      const page = await api.getSession(id, { beforeSequence: before }, controller.signal)
+      if (current !== generation || id !== sessionId.value) return
+      receive(page, 'earlier')
+    } catch (reason) { if (current === generation && !controller.signal.aborted) fail(reason) }
+    finally { if (current === generation) loadingEarlier.value = false }
+  }
+  async function newSession() {
     saveCurrent()
-    const previousId = conversationId.value
+    const previousId = sessionId.value
     const current = resetRequests()
     initializing.value = true
     error.value = ''
     try {
-      const view = await api.createConversation(controller.signal)
+      const view = await api.createSession(controller.signal)
       if (current !== generation) return
       restore(null)
       sending.value = false; uploading.value = false
@@ -252,48 +324,48 @@ export function useConversation() {
       // 新会话创建失败时恢复原会话的实际状态，避免旧请求的标记永久禁用输入。
       if (previousId) {
         try {
-          const previous = await api.getConversation(previousId, 0, controller.signal)
+          const previous = await api.getSession(previousId, {}, controller.signal)
           if (current !== generation) return
-          receive(previous)
+          if (!await receiveLatest(previous, current)) return
           await resume(previous, current)
         } catch { /* 保留创建失败提示，仍可再次新建 */ }
       }
     }
     finally { if (current === generation) initializing.value = false }
   }
-  async function switchConversation(id: string) {
-    if (id === conversationId.value) return
+  async function switchSession(id: string) {
+    if (id === sessionId.value) return
     saveCurrent()
-    const previousId = conversationId.value
+    const previousId = sessionId.value
     const current = resetRequests()
     initializing.value = true
     try {
-      const view = await api.getConversation(id, 0, controller.signal)
+      const view = await api.getSession(id, {}, controller.signal)
       if (current !== generation) return
       restore(id)
-      receive(view)
+      if (!await receiveLatest(view, current)) return
       remember(PENDING_KEY, pending?.client_message_id ?? null)
       await resume(view, current)
     } catch (reason) {
       if (current !== generation || controller.signal.aborted) return
       restore(previousId)
       error.value = reason instanceof ApiError && reason.status === 404
-        ? '这段临时会话已失效。当前对话与输入仍保留。'
+        ? '这段会话不存在。当前对话与输入仍保留。'
         : reason instanceof Error ? reason.message : '切换对话失败，请重试。'
       retryable.value = !(reason instanceof ApiError && reason.status === 404)
       retryAction = retryable.value ? 'switch' : null
       retryTarget = id
       if (previousId && activeRun.value && !isTerminal(activeRun.value.status)) {
-        watchRun(previousId, activeRun.value.id, current)
+        watchRun(previousId, activeRun.value.run_id, current)
       }
     } finally { if (current === generation) initializing.value = false }
   }
   async function send() {
-    const id = conversationId.value
-    if (!id || busy.value || (!draft.value.trim() && !selectedDocumentIds.value.length)) return
+    const id = sessionId.value
+    if (!id || busy.value || (!draft.value.trim() && !selectedFileIds.value.length)) return
     const current = generation
-    const body = { content: draft.value.trim() ? draft.value : '请查看我上传的文件。', document_ids: [...selectedDocumentIds.value] }
-    if (pending && (pending.content !== body.content || JSON.stringify(pending.document_ids) !== JSON.stringify(body.document_ids))) {
+    const body = { content: draft.value.trim() ? draft.value : '请查看我上传的文件。', file_ids: [...selectedFileIds.value] }
+    if (pending && (pending.content !== body.content || JSON.stringify(pending.file_ids) !== JSON.stringify(body.file_ids))) {
       error.value = '上一条消息的发送状态尚未确认，请先重试，或新建对话。'
       return
     }
@@ -304,14 +376,14 @@ export function useConversation() {
     sending.value = true
     error.value = ''
     try {
-      const run = await api.sendConversationMessage(id, pending, controller.signal)
+      const run = await api.sendSessionMessage(id, pending, controller.signal)
       if (current !== generation) return
       pending = null; remember(PENDING_KEY, null); retryable.value = false
-      draft.value = ''; selectedDocumentIds.value = []; activeRun.value = run
-      const view = await api.getConversation(id, 0, controller.signal)
+      draft.value = ''; selectedFileIds.value = []; activeRun.value = run
+      const view = await api.getSession(id, {}, controller.signal)
       if (current !== generation) return
-      receive(view)
-      watchRun(id, run.id, current)
+      if (!await receiveLatest(view, current)) return
+      watchRun(id, run.run_id, current)
     } catch (reason) {
       if (current !== generation || controller.signal.aborted) return
       fail(reason)
@@ -323,28 +395,28 @@ export function useConversation() {
     } finally { if (current === generation) sending.value = false }
   }
   async function upload(file: File) {
-    const id = conversationId.value
+    const id = sessionId.value
     if (!id || busy.value) return
     const current = generation
     uploading.value = true; error.value = ''
     try {
-      const result = await api.uploadConversationDocument(id, file, controller.signal)
+      const result = await api.uploadSessionFile(id, file, controller.signal)
       if (current !== generation) return
-      documents.value.push(result)
-      selectedDocumentIds.value.push(result.id)
+      files.value.push(result)
+      selectedFileIds.value.push(result.file_id)
     } catch (reason) { if (current === generation && !controller.signal.aborted) fail(reason) }
     finally { if (current === generation) uploading.value = false }
   }
   async function stop() {
-    const id = conversationId.value, run = activeRun.value, current = generation
+    const id = sessionId.value, run = activeRun.value, current = generation
     if (!id || !run || initializing.value || isTerminal(run.status)) return
     try {
-      const result = await api.cancelConversationRun(id, run.id)
-      if (current !== generation || id !== conversationId.value || run.id !== activeRun.value?.id) return
+      const result = await api.cancelSessionRun(id, run.run_id)
+      if (current !== generation || id !== sessionId.value || run.run_id !== activeRun.value?.run_id) return
       if (isTerminal(result.status)) finishRun(id, result, current)
       else {
         acceptRun(result)
-        if (!unsubscribe) watchRun(id, run.id, current)
+        if (!unsubscribe) watchRun(id, run.run_id, current)
       }
     } catch (reason) { if (current === generation) fail(reason) }
   }
@@ -352,13 +424,13 @@ export function useConversation() {
     const action = retryAction
     error.value = ''; retryable.value = false
     retryAction = null
-    if (action === 'create') await newConversation()
+    if (action === 'create') await newSession()
     else if (action === 'initialize') await initialize()
-    else if (action === 'switch' && retryTarget) await switchConversation(retryTarget)
-    else if (action === 'stream' && activeRun.value && conversationId.value) watchRun(conversationId.value, activeRun.value.id, generation)
-    else if (action === 'refresh' && activeRun.value && conversationId.value) await refreshCompleted(conversationId.value, activeRun.value.id, generation, subscriptionVersion)
+    else if (action === 'switch' && retryTarget) await switchSession(retryTarget)
+    else if (action === 'stream' && activeRun.value && sessionId.value) watchRun(sessionId.value, activeRun.value.run_id, generation)
+    else if (action === 'refresh' && activeRun.value && sessionId.value) await refreshCompleted(sessionId.value, activeRun.value.run_id, generation, subscriptionVersion)
     else if (action === 'send' || pending) await send()
-    else if (activeRun.value && conversationId.value) watchRun(conversationId.value, activeRun.value.id, generation)
+    else if (activeRun.value && sessionId.value) watchRun(sessionId.value, activeRun.value.run_id, generation)
   }
   function suspend() {
     saveCurrent()
@@ -366,6 +438,7 @@ export function useConversation() {
     initializing.value = false
   }
   onBeforeUnmount(suspend)
-  return { conversationId, conversations, messages, documents, selectedDocumentIds, draft, activeRun, streamingText, busy,
-    initializing, uploading, error, retryable, initialize, send, upload, stop, newConversation, switchConversation, suspend, retry }
+  return { sessionId, sessions, messages, files, selectedFileIds, draft, activeRun, streamingText, busy,
+    initializing, uploading, error, retryable, initialize, send, upload, stop, newSession, switchSession, suspend, retry,
+    loadMoreSessions, loadEarlierMessages, hasMoreSessions, hasEarlierMessages, loadingHistory, loadingEarlier }
 }
