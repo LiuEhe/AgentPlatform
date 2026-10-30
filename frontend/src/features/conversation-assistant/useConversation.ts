@@ -2,10 +2,11 @@ import { computed, onBeforeUnmount, ref } from 'vue'
 import * as api from '../../api/conversations'
 import { ApiError } from '../../api/client'
 import { isTerminal } from './types'
-import type { SessionSummary, SessionView, FileView, MessageCreate, MessageView, RunView } from './types'
+import type { SessionSummary, SessionView, FileView, MessageCreate, MessageView, RunView, PendingSessionDeletion } from './types'
 
 const SESSION_KEY = 'agent-platform-session'
 const PENDING_KEY = 'agent-platform-session-pending-id'
+const DELETIONS_KEY = 'agent-platform-session-deletions'
 type RetryAction = 'initialize' | 'create' | 'send' | 'stream' | 'refresh' | 'switch' | null
 interface ConversationSnapshot {
   messages: MessageView[]
@@ -41,6 +42,15 @@ export function useConversation() {
   const hasEarlierMessages = computed(() => earlierCursor.value !== null)
   const loadingEarlier = ref(false)
   const loadingHistory = ref(false)
+  const deleting = ref(false)
+  const deletionError = ref('')
+  const pendingDeletions = ref<PendingSessionDeletion[]>(readPendingDeletions())
+  const deletedSessionIds = new Set(pendingDeletions.value.filter(item => item.phase === 'cleanup_pending').map(item => item.session_id))
+  let historyVersion = 0
+  let deletionVersion = 0
+  let suspended = false
+  const deletionRequests = new Map<string, number>()
+  let deletionController = new AbortController()
   const listCursor = ref<string | null>(null)
   const hasMoreSessions = computed(() => listCursor.value !== null)
   let pending: MessageCreate | null = null
@@ -51,8 +61,82 @@ export function useConversation() {
   let controller = new AbortController()
   let unsubscribe: (() => void) | undefined
   let subscriptionVersion = 0
-  const busy = computed(() => initializing.value || sending.value || uploading.value ||
+  const busy = computed(() => initializing.value || sending.value || uploading.value || deleting.value ||
     Boolean(activeRun.value && !isTerminal(activeRun.value.status)))
+  const canDelete = computed(() => !initializing.value && !sending.value && !uploading.value && !deleting.value)
+
+  function readPendingDeletions(): PendingSessionDeletion[] {
+    try {
+      const value: unknown = JSON.parse(stored(DELETIONS_KEY) ?? '[]')
+      if (!Array.isArray(value)) return []
+      const valid = value.filter((item): item is PendingSessionDeletion => item &&
+        typeof item.session_id === 'string' && item.session_id.length > 0 &&
+        (item.phase === 'unconfirmed' || item.phase === 'cleanup_pending'))
+      return [...new Map(valid.map(item => [item.session_id, { session_id: item.session_id, phase: item.phase }])).values()]
+    } catch { return [] }
+  }
+  function setDeletion(id: string, phase: PendingSessionDeletion['phase'] | null) {
+    pendingDeletions.value = pendingDeletions.value.filter(item => item.session_id !== id)
+    if (phase) pendingDeletions.value.push({ session_id: id, phase })
+    remember(DELETIONS_KEY, pendingDeletions.value.length ? JSON.stringify(pendingDeletions.value) : null)
+  }
+  function hasDraft(id: string) { return Boolean(id === sessionId.value ? draft.value : snapshots.get(id)?.draft) }
+  function invalidateSession(id: string) {
+    deletedSessionIds.add(id)
+    historyVersion += 1
+    loadingHistory.value = false
+    sessions.value = sessions.value.filter(item => item.session_id !== id)
+    snapshots.delete(id)
+    for (const snapshot of snapshots.values()) {
+      if (snapshot.retryTarget === id) { snapshot.retryTarget = null; snapshot.retryAction = null }
+    }
+    if (retryTarget === id) { retryTarget = null; retryAction = null; retryable.value = false }
+    if (stored(SESSION_KEY) === id) { remember(SESSION_KEY, null); remember(PENDING_KEY, null) }
+    if (sessionId.value === id) {
+      resetRequests()
+      restore(null)
+    }
+  }
+  async function deleteSession(id: string) {
+    if (!canDelete.value) return
+    const version = ++deletionVersion
+    deletionRequests.set(id, version)
+    deletionController = new AbortController()
+    const signal = deletionController.signal
+    deleting.value = true
+    deletionError.value = ''
+    const previous = pendingDeletions.value.find(item => item.session_id === id)?.phase
+    setDeletion(id, previous ?? 'unconfirmed')
+    let removed = false
+    try {
+      await api.deleteSession(id, signal)
+      if (deletionRequests.get(id) !== version) return
+      setDeletion(id, null)
+      removed = true
+    } catch (reason) {
+      if (deletionRequests.get(id) !== version) return
+      if (reason instanceof ApiError && reason.code === 'CONVERSATION_DELETE_INCOMPLETE') {
+        setDeletion(id, 'cleanup_pending')
+        if (version === deletionVersion) deletionError.value = '对话已删除，附件清理未完成。'
+        removed = true
+      } else if (reason instanceof ApiError && reason.status === 409) {
+        setDeletion(id, null)
+        if (version === deletionVersion) deletionError.value = '请等待上传完成，或停止任务并等其结束后再删除。'
+      } else if (version === deletionVersion && !signal.aborted) deletionError.value = '删除结果尚未确认，请重试。'
+    } finally {
+      // 确定的资源结果独立于页面导航；停用后也必须失效该目标缓存。
+      if (removed) {
+        const wasCurrent = id === sessionId.value
+        invalidateSession(id)
+        if (wasCurrent && !suspended && (version === deletionVersion || !deleting.value)) await initializeSession()
+      }
+      if (version === deletionVersion) deleting.value = false
+      if (deletionRequests.get(id) === version) deletionRequests.delete(id)
+    }
+  }
+  async function retryDeletion(id: string) {
+    if (pendingDeletions.value.some(item => item.session_id === id)) await deleteSession(id)
+  }
 
   function saveCurrent() {
     const id = sessionId.value
@@ -106,6 +190,7 @@ export function useConversation() {
     messages.value = [...indexed.values()].sort((a, b) => a.sequence - b.sequence)
   }
   function receive(view: SessionView, direction: 'latest' | 'earlier' | 'after' = 'latest') {
+    if (deletedSessionIds.has(view.session_id)) return
     if (direction === 'earlier' || (direction === 'latest' && !messages.value.length)) earlierCursor.value = view.next_before_sequence ?? null
     if (direction !== 'earlier') receivedSequence.value = Math.max(receivedSequence.value, ...view.messages.map(m => m.sequence))
     sessionId.value = view.session_id
@@ -121,10 +206,12 @@ export function useConversation() {
     saveCurrent()
   }
   function fail(reason: unknown) {
-    if (reason instanceof ApiError && reason.status === 404) {
-      error.value = '这个会话不存在，请新建对话。你的输入仍保留在输入框中。'
-      remember(SESSION_KEY, null)
-    } else error.value = reason instanceof Error ? reason.message : '操作未完成，请稍后重试。'
+    if (reason instanceof ApiError && reason.code === 'CONVERSATION_NOT_FOUND' && sessionId.value) {
+      invalidateSession(sessionId.value)
+      queueMicrotask(() => { void initialize() })
+      return
+    }
+    error.value = reason instanceof Error ? reason.message : '操作未完成，请稍后重试。'
   }
   async function receiveLatest(view: SessionView, current: number) {
     let after = receivedSequence.value
@@ -248,6 +335,10 @@ export function useConversation() {
     } catch (reason) { void disconnected(reason) }
   }
   async function initialize() {
+    suspended = false
+    if (!deleting.value) await initializeSession()
+  }
+  async function initializeSession() {
     saveCurrent()
     const current = resetRequests()
     initializing.value = true
@@ -255,12 +346,32 @@ export function useConversation() {
     try {
       const list = await api.listSessions({}, controller.signal)
       if (current !== generation) return
-      mergeSummaries(list.items)
+      sessions.value = list.items.filter(item => !deletedSessionIds.has(item.session_id))
       listCursor.value = list.next_cursor
-      const id = sessionId.value ?? stored(SESSION_KEY) ?? list.items[0]?.session_id
-      const view = id ? await api.getSession(id, {}, controller.signal) :
-        await api.createSession(controller.signal)
+      const ids = new Set([sessionId.value, stored(SESSION_KEY), ...list.items.map(item => item.session_id)])
+      let view: SessionView | undefined
+      for (const id of ids) {
+        if (!id || deletedSessionIds.has(id)) continue
+        try {
+          view = await api.getSession(id, {}, controller.signal)
+          break
+        } catch (reason) {
+          if (current !== generation) return
+          if (!(reason instanceof ApiError && reason.status === 404)) throw reason
+          // 当前初始化已隔离旧请求；只失效目标，保持本轮请求代次。
+          deletedSessionIds.add(id)
+          snapshots.delete(id)
+          sessions.value = sessions.value.filter(item => item.session_id !== id)
+          if (sessionId.value === id) restore(null)
+          remember(SESSION_KEY, null); remember(PENDING_KEY, null)
+        }
+      }
       if (current !== generation) return
+      if (!view) {
+        restore(null)
+        remember(SESSION_KEY, null); remember(PENDING_KEY, null)
+        return
+      }
       if (sessionId.value !== view.session_id) restore(view.session_id)
       if (!await receiveLatest(view, current)) return
       if (!pending) remember(PENDING_KEY, null)
@@ -276,24 +387,25 @@ export function useConversation() {
   }
   function mergeSummaries(items: SessionSummary[]) {
     const indexed = new Map(sessions.value.map(item => [item.session_id, item]))
-    items.forEach(item => indexed.set(item.session_id, item))
+    items.forEach(item => { if (!deletedSessionIds.has(item.session_id)) indexed.set(item.session_id, item) })
     sessions.value = [...indexed.values()].sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.session_id.localeCompare(a.session_id))
   }
   async function loadMoreSessions() {
-    if (loadingHistory.value || !listCursor.value) return
+    if (deleting.value || loadingHistory.value || !listCursor.value) return
     const current = generation
+    const version = historyVersion
     loadingHistory.value = true
     try {
       const page = await api.listSessions({ cursor: listCursor.value }, controller.signal)
-      if (current !== generation) return
+      if (current !== generation || version !== historyVersion) return
       mergeSummaries(page.items)
       listCursor.value = page.next_cursor
     } catch (reason) { if (current === generation && !controller.signal.aborted) fail(reason) }
-    finally { if (current === generation) loadingHistory.value = false }
+    finally { if (current === generation && version === historyVersion) loadingHistory.value = false }
   }
   async function loadEarlierMessages() {
     const id = sessionId.value, before = earlierCursor.value, current = generation
-    if (!id || before === null || loadingEarlier.value) return
+    if (deleting.value || !id || before === null || loadingEarlier.value) return
     loadingEarlier.value = true
     try {
       const page = await api.getSession(id, { beforeSequence: before }, controller.signal)
@@ -303,7 +415,7 @@ export function useConversation() {
     finally { if (current === generation) loadingEarlier.value = false }
   }
   async function newSession() {
-    if (initializing.value) return
+    if (initializing.value || deleting.value) return
     // 当前仍是可用的空白对话时复用它，避免重复点击堆积空会话。
     if (sessionId.value && !busy.value && !messages.value.length && !files.value.length &&
       !draft.value && !pending && !activeRun.value && !error.value) return
@@ -338,6 +450,7 @@ export function useConversation() {
     finally { if (current === generation) initializing.value = false }
   }
   async function switchSession(id: string) {
+    if (deleting.value || deletedSessionIds.has(id)) return
     if (id === sessionId.value) return
     saveCurrent()
     const previousId = sessionId.value
@@ -353,6 +466,7 @@ export function useConversation() {
     } catch (reason) {
       if (current !== generation || controller.signal.aborted) return
       restore(previousId)
+      if (reason instanceof ApiError && reason.status === 404) invalidateSession(id)
       error.value = reason instanceof ApiError && reason.status === 404
         ? '这段会话不存在。当前对话与输入仍保留。'
         : reason instanceof Error ? reason.message : '切换对话失败，请重试。'
@@ -413,7 +527,7 @@ export function useConversation() {
   }
   async function stop() {
     const id = sessionId.value, run = activeRun.value, current = generation
-    if (!id || !run || initializing.value || isTerminal(run.status)) return
+    if (deleting.value || !id || !run || initializing.value || isTerminal(run.status)) return
     try {
       const result = await api.cancelSessionRun(id, run.run_id)
       if (current !== generation || id !== sessionId.value || run.run_id !== activeRun.value?.run_id) return
@@ -425,6 +539,7 @@ export function useConversation() {
     } catch (reason) { if (current === generation) fail(reason) }
   }
   async function retry() {
+    if (deleting.value) return
     const action = retryAction
     if (action === 'create') { await newSession(); return }
     error.value = ''; retryable.value = false
@@ -437,12 +552,17 @@ export function useConversation() {
     else if (activeRun.value && sessionId.value) watchRun(sessionId.value, activeRun.value.run_id, generation)
   }
   function suspend() {
+    suspended = true
+    deletionVersion += 1
+    deletionController.abort()
+    deleting.value = false
     saveCurrent()
     resetRequests()
     initializing.value = false
   }
   onBeforeUnmount(suspend)
   return { sessionId, sessions, messages, files, selectedFileIds, draft, activeRun, streamingText, busy,
+    deleting, canDelete, pendingDeletions, deletionError, deleteSession, retryDeletion, hasDraft,
     initializing, uploading, error, retryable, initialize, send, upload, stop, newSession, switchSession, suspend, retry,
     loadMoreSessions, loadEarlierMessages, hasMoreSessions, hasEarlierMessages, loadingHistory, loadingEarlier }
 }

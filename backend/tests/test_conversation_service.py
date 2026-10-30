@@ -37,6 +37,185 @@ class Runtime:
         )
 
 
+@pytest.mark.parametrize("phase,code", [
+    ("intent", "STORAGE_UNAVAILABLE"), ("rollback", "STORAGE_UNAVAILABLE"),
+    ("ack", None), ("unknown", "STORAGE_UNAVAILABLE"),
+    ("files", "CONVERSATION_DELETE_INCOMPLETE"),
+    ("receipt", "CONVERSATION_DELETE_INCOMPLETE"),
+])
+def test_delete_failure_boundaries_and_retry(monkeypatch, phase, code):
+    async def scenario():
+        service = await make_service()
+        service.runtime = None
+        sid = (await service.create()).session_id
+        staged = service._files.stage("conversation_assistant", sid, str(uuid4()), b"docx", "body")
+        paths = service._files.publish(staged)
+        original_delete = service._store.delete_session
+        original_inspect = service._store.inspect_deletion
+        inspections = 0
+        def fail_file(*args):
+            raise OSError("failure")
+        async def delete(*args):
+            if phase != "rollback":
+                await original_delete(*args)
+            raise AppError("STORAGE_UNAVAILABLE", "unknown", 503)
+        async def inspect(*args):
+            nonlocal inspections
+            inspections += 1
+            if inspections > 1:
+                raise AppError("STORAGE_UNAVAILABLE", "unknown", 503)
+            return await original_inspect(*args)
+        try:
+            with monkeypatch.context() as patch:
+                if phase == "intent":
+                    patch.setattr(service._files, "write_deletion_intent", fail_file)
+                if phase in {"rollback", "ack", "unknown"}:
+                    patch.setattr(service._store, "delete_session", delete)
+                if phase == "unknown":
+                    patch.setattr(service._store, "inspect_deletion", inspect)
+                if phase == "files":
+                    patch.setattr(service._files, "discard_session", fail_file)
+                if phase == "receipt":
+                    patch.setattr(service._files, "discard_deletion_intent", fail_file)
+                if code:
+                    with pytest.raises(AppError) as error:
+                        await service.delete(sid)
+                    assert error.value.code == code
+                else:
+                    await service.delete(sid)
+            exists = await original_inspect(sid) is not None
+            assert exists is (phase in {"intent", "rollback"})
+            if phase in {"intent", "rollback", "unknown", "files"}:
+                assert (service._files.root / paths.source_path).read_bytes() == b"docx"
+            if phase in {"unknown", "files", "receipt"}:
+                assert service._files.read_deletion_intent(sid) is not None
+            await service.delete(sid)
+            assert await original_inspect(sid) is None
+            assert not (service._files.root / paths.source_path).exists()
+            assert service._files.read_deletion_intent(sid) is None
+        finally:
+            await service.aclose()
+    asyncio.run(scenario())
+
+
+def test_delete_rejects_terminal_run_before_task_exit():
+    from app.schemas.conversation_session import RunCompletion, SessionSubmission
+
+    async def scenario():
+        service = await make_service()
+        sid = (await service.create()).session_id
+        run = await service._store.submit(sid, SessionSubmission("one", "hi"))
+        try:
+            with pytest.raises(AppError) as error:
+                await service.delete(sid)
+            assert error.value.code == "CONVERSATION_BUSY"
+            await service._store.finish(sid, run.run.run_id, RunCompletion("succeeded", "done"))
+            task = asyncio.create_task(asyncio.Event().wait())
+            service._tasks[run.run.run_id] = task
+            with pytest.raises(AppError) as error:
+                await service.delete(sid)
+            assert error.value.code == "CONVERSATION_BUSY"
+            service._tasks.pop(run.run.run_id)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await service.delete(sid)
+        finally:
+            await service.aclose()
+    asyncio.run(scenario())
+
+
+def test_delete_waiter_cancel_and_shutdown_drain_worker(monkeypatch):
+    async def scenario():
+        service = await make_service()
+        sid = (await service.create()).session_id
+        entered, finish = threading.Event(), threading.Event()
+        original = service._files.discard_session
+        def blocked(*args):
+            entered.set()
+            finish.wait(5)
+            original(*args)
+        monkeypatch.setattr(service._files, "discard_session", blocked)
+        waiter = asyncio.create_task(service.delete(sid))
+        assert await asyncio.to_thread(entered.wait, 3)
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+        closing = asyncio.create_task(service.aclose())
+        await asyncio.sleep(0)
+        assert not closing.done()
+        finish.set()
+        await closing
+        assert not service._deletion_tasks
+        assert not service._active._locks
+        assert service._files.read_deletion_intent(sid) is None
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_recovery_after_each_delete_boundary(committed):
+    async def scenario():
+        service = await make_service()
+        sid = (await service.create()).session_id
+        paths = service._files.publish(service._files.stage(
+            "conversation_assistant", sid, str(uuid4()), b"docx", "body"
+        ))
+        service._files.write_deletion_intent("conversation_assistant", sid)
+        if committed:
+            await service._store.delete_session(sid)
+        await service.aclose()
+        service = await make_service()
+        await service.recover_deletions()
+        assert service._files.read_deletion_intent(sid) is None
+        assert (service._files.root / paths.source_path).exists() is not committed
+        await service.aclose()
+    asyncio.run(scenario())
+
+
+def test_delete_unknown_uuid_does_not_remove_untracked_directory():
+    async def scenario():
+        service = await make_service()
+        sid = str(uuid4())
+        paths = service._files.publish(service._files.stage(
+            "conversation_assistant", sid, str(uuid4()), b"keep", "body"
+        ))
+        await service.delete(sid)
+        assert (service._files.root / paths.source_path).read_bytes() == b"keep"
+        await service.aclose()
+    asyncio.run(scenario())
+
+
+def test_delete_busy_upload_and_race_with_submit(monkeypatch):
+    async def scenario():
+        service = await make_service()
+        sid = (await service.create()).session_id
+        service._uploads[sid] = asyncio.current_task()
+        with pytest.raises(AppError) as error:
+            await service.delete(sid)
+        assert error.value.code == "CONVERSATION_BUSY"
+        assert service._files.read_deletion_intent(sid) is None
+        service._uploads.pop(sid)
+        entered, finish = threading.Event(), threading.Event()
+        original = service._files.write_deletion_intent
+        def block(*args):
+            entered.set()
+            finish.wait(5)
+            return original(*args)
+        monkeypatch.setattr(service._files, "write_deletion_intent", block)
+        deletion = asyncio.create_task(service.delete(sid))
+        assert await asyncio.to_thread(entered.wait, 3)
+        submit = asyncio.create_task(service.submit(
+            sid, MessageCreate(client_message_id="late", content="late")
+        ))
+        await asyncio.sleep(0)
+        assert not submit.done()
+        finish.set()
+        await deletion
+        with pytest.raises(AppError) as missing:
+            await submit
+        assert missing.value.status_code == 404
+        await service.aclose()
+    asyncio.run(scenario())
+
+
 def test_stream_snapshot_delta_reconnect_and_multiple_readers_share_one_task():
     async def scenario():
         first, finish = asyncio.Event(), asyncio.Event()

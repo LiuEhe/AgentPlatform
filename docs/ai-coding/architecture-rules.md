@@ -61,6 +61,8 @@ flowchart LR
 
 ## 已有目录职责
 
+会话永久删除属于 ConversationService 应用用例：复用同会话操作锁，拒绝上传、活动运行及仍在收尾的任务；PostgresConversationStore 在事务中按外键顺序删除关联记录，LocalFileStore 管理 `.deletions` 最小凭据和精确附件目录清理。数据库删除前落盘凭据，提交确认后才清理附件；启动只核对凭据所指会话，不扫描附件库。客户端断开不撤回已接纳删除，服务关闭等待删除收尾。该能力不进入 Agent 图或 runtime，不新增数据库结构或队列。
+
 会话助手使用完整的 `agents/conversation_assistant/graph/` LangGraph，依次准备材料、构造上下文、识别意图和门控，再进入普通回复、澄清或审核子调用。参数合并、模式校验和目标白名单归 Agent；`ConversationService` 每轮只调用一次会话 Agent，负责后台任务、幂等、容量、超时、取消、上传用例和 HTTP 映射，不再解释意图或审核参数。
 
 `infrastructure/conversation/postgres_store.py` 以 asyncpg 官方连接池和事务保存 agents 元数据、chat_sessions、messages、files 路径、runs、agent_calls 及版本化续接数据；初始化 SQL 独立放在 `backend/database/`，由部署者显式执行，应用启动不建表。事务内分配消息序号、约束幂等和每会话唯一活动运行，模型/解析调用不持有长事务。`active_runs.py` 只保存进程内活动事件、临时文本、互斥与额度，不维护第二份可修改持久历史。中立 DTO 位于 `schemas/conversation_session.py`，Agent 业务状态和本轮输入输出契约保持独立。未启用 checkpointer 或长期记忆 Store。
@@ -73,7 +75,7 @@ DOCX 上传可选，粘贴正文引用当前会话用户消息。消息、结果
 
 会话适配器使用官方 LangGraph astream 单次驱动图，白名单输出 reply_chat 的文本，保留最终状态的校验和评估投影。应用服务接收文本/阶段事件，临时累计文本、变更通知与容量归活动运行状态，不放入 Agent 业务状态。SSE 订阅从同一运行读取 snapshot/delta/state/done，不重新调用模型，不建立事件日志或无界队列；终态回收临时文本占用。API 使用 FastAPI 官方 EventSourceResponse 与 ServerSentEvent；框架处理协议编码、心跳及响应头，应用服务只等待业务状态变化。依赖在开始流响应前校验运行，断开时通过标准库 aclosing 关闭订阅迭代器，不取消后台任务。
 
-前端导航为宣传首页 → 智能体目录 → 独立智能体页面。App 使用 Vue KeepAlive 保留助手页面；会话 feature 在页面内存中持有已访问会话的消息、材料元数据、草稿、附件选择与失败重试快照，左栏展示会话记录。激活后读取会话并订阅活动任务，停用时中止客户端请求与 SSE，不取消后端任务；响应代次、会话/运行 ID 和订阅实例防止迟到事件串入新会话。原生 EventSource 限定错误重连，失败可进行一次状态读取并提示手动恢复，不回退周期轮询。现有 sessionStorage 仅保存当前会话和客户端消息 ID，不写入正文，不构成持久会话存储或新的全局状态管理层。
+前端导航为宣传首页 → 智能体目录 → 独立智能体页面。App 使用 Vue KeepAlive 保留助手页面；会话 feature 在页面内存中持有已访问会话的消息、材料元数据、草稿、附件选择与失败重试快照，左栏展示会话记录。激活后读取会话并订阅活动任务，停用时中止客户端请求与 SSE，不取消后端任务；响应代次、会话/运行 ID 和订阅实例防止迟到事件串入新会话。原生 EventSource 限定错误重连，失败可进行一次状态读取并提示手动恢复，不回退周期轮询。现有 sessionStorage 仅保存当前会话、客户端消息 ID，以及 agent-platform-session-deletions 中待重试删除的 ID/phase 数组，不写入正文，不构成持久会话存储或新的全局状态管理层。
 
 助手上传文件在输入框中预览，发送后随对应消息展示，不设右侧材料模块。独立审核仍走同步接口，停止等待仅使用 AbortSignal 中止客户端等待；报告以完整 Markdown 为真源，用 marked Renderer 生成章节定位，经 DOMPurify 清理后呈现，复制与 Word 导出使用原始完整内容。
 

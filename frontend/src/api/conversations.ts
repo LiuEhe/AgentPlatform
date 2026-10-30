@@ -9,6 +9,7 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
   try {
     const response = await fetch(`${getApiBaseUrl()}${url}`, init)
     if (!response.ok) throw await createApiError(response, '会话操作失败，请稍后重试。')
+    if (response.status === 204) return undefined as T
     return await response.json() as T
   } catch (error) {
     if (error instanceof ApiError || init.signal?.aborted) throw error
@@ -18,6 +19,8 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
 
 export const createSession = (signal?: AbortSignal) =>
   request<SessionView>(root, { method: 'POST', signal })
+export const deleteSession = (id: string, signal?: AbortSignal) =>
+  request<void>(path(id), { method: 'DELETE', signal })
 export interface MessagePageOptions { limit?: number; beforeSequence?: number; afterSequence?: number }
 export const getSession = (id: string, options: MessagePageOptions = {}, signal?: AbortSignal) => {
   const query = new URLSearchParams()

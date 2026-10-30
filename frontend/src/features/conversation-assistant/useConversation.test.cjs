@@ -8,10 +8,14 @@ const ts = require('typescript')
 const vue = require('vue')
 
 class ApiError extends Error {
-  constructor(status) { super('simulated request failure'); this.status = status }
+  constructor(status, code) { super('simulated request failure'); this.status = status; this.code = code }
 }
-function fixture(overrides = {}) {
-  const storage = new Map()
+async function openInitialSession(f) {
+  await f.hook.initialize()
+  if (!f.hook.sessionId.value && !f.hook.retryable.value) await f.hook.newSession()
+}
+function fixture(overrides = {}, initialStorage = []) {
+  const storage = new Map(initialStorage)
   global.sessionStorage = { getItem: key => storage.get(key) ?? null,
     setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) }
   global.document = { hidden: false }
@@ -21,6 +25,7 @@ function fixture(overrides = {}) {
   const api = {
     listSessions: async () => ({ items: [], next_cursor: null }),
     createSession: async () => structuredClone(view),
+    deleteSession: async () => {},
     getSession: async () => structuredClone(view),
     sendSessionMessage: async (_id, payload) => {
       calls.push({ ...payload })
@@ -74,6 +79,36 @@ function fixture(overrides = {}) {
   return { hook: loaded.exports.useConversation(), cleanup: () => cleanup.forEach(fn => fn()), calls, api, completed, storage, subscriptions }
 }
 
+test('empty history stays empty across initialization and activation', async () => {
+  let created = 0
+  const f = fixture({ createSession: async () => { created++; return { session_id: 'c1', messages: [], files: [], active_run_id: null, last_sequence: 0 } } })
+  try {
+    await f.hook.initialize()
+    f.hook.suspend()
+    await f.hook.initialize()
+    assert.equal(f.hook.sessionId.value, null)
+    assert.deepEqual(f.hook.sessions.value, [])
+    assert.equal(created, 0)
+    await f.hook.newSession()
+    assert.equal(f.hook.sessionId.value, 'c1')
+    assert.equal(created, 1)
+  } finally { f.cleanup() }
+})
+
+test('delete API accepts an empty 204 response', async () => {
+  const f = streamApiFixture()
+  const previous = global.fetch
+  let request
+  global.fetch = async (url, init) => { request = { url, ...init }; return { ok: true, status: 204, json: () => { throw Error('204 must not parse JSON') } } }
+  try {
+    const controller = new AbortController()
+    assert.equal(await f.api.deleteSession('a/b', controller.signal), undefined)
+    assert.equal(request.method, 'DELETE')
+    assert.equal(request.url, '/api/v1/sessions/a%2Fb')
+    assert.equal(request.signal, controller.signal)
+  } finally { global.fetch = previous; f.cleanup() }
+})
+
 test('initialization restores server history instead of creating an empty conversation', async () => {
   let created = 0
   const view = { session_id: 'saved', title: 'Saved title', agent_id: 'conversation_assistant',
@@ -82,7 +117,7 @@ test('initialization restores server history instead of creating an empty conver
   const f = fixture({ listSessions: async () => ({ items: [view], next_cursor: null }),
     getSession: async () => view, createSession: async () => { created++; return view } })
   try {
-    await f.hook.initialize()
+    await openInitialSession(f)
     assert.equal(created, 0)
     assert.equal(f.hook.sessionId.value, 'saved')
     assert.equal(f.hook.sessions.value[0].title, 'Saved title')
@@ -95,7 +130,7 @@ test('repeated new conversation clicks reuse the current blank conversation', as
     session_id: 'c' + (++created), messages: [], files: [], active_run_id: null, last_sequence: 0,
   }) })
   try {
-    await f.hook.initialize()
+    await openInitialSession(f)
     await f.hook.newSession()
     await f.hook.newSession()
     assert.equal(created, 1)
@@ -114,7 +149,7 @@ test('new conversation clicks while creation is pending do not create extra sess
     return new Promise(resolve => responses.push(() => resolve(view(id))))
   } })
   try {
-    await f.hook.initialize()
+    await openInitialSession(f)
     f.hook.draft.value = 'keep this draft'
     const first = f.hook.newSession()
     const second = f.hook.newSession()
@@ -127,19 +162,19 @@ test('new conversation clicks while creation is pending do not create extra sess
   } finally { f.cleanup() }
 })
 
-test('retry creates a replacement when a restored blank conversation no longer exists', async () => {
+test('missing restored blank conversation becomes empty without creating a replacement', async () => {
   let created = 0
   const f = fixture({
     createSession: async () => ({ session_id: 'c' + (++created), messages: [], files: [], active_run_id: null, last_sequence: 0 }),
     getSession: async () => { throw new ApiError(404) },
   })
   try {
+    await openInitialSession(f)
     await f.hook.initialize()
-    await f.hook.initialize()
-    assert.equal(f.hook.retryable.value, true)
-    await f.hook.retry()
-    assert.equal(f.hook.sessionId.value, 'c2')
-    assert.equal(f.storage.get('agent-platform-session'), 'c2')
+    assert.equal(f.hook.retryable.value, false)
+    assert.equal(f.hook.sessionId.value, null)
+    assert.equal(f.storage.get('agent-platform-session'), undefined)
+    assert.equal(created, 1)
     assert.equal(f.hook.error.value, '')
   } finally { f.cleanup() }
 })
@@ -150,7 +185,7 @@ for (const content of ['draft', 'file']) {
     const view = id => ({ session_id: id, messages: [], files: [], active_run_id: null, last_sequence: 0 })
     const f = fixture({ createSession: async () => view('c' + (++created)), getSession: async id => view(id) })
     try {
-      await f.hook.initialize()
+      await openInitialSession(f)
       if (content === 'draft') f.hook.draft.value = 'unsent draft'
       else await f.hook.upload({ name: 'draft.docx' })
       await f.hook.newSession()
@@ -179,7 +214,7 @@ test('returning to a cached conversation fills the gap before the latest page', 
     return { ...base(id), messages: messages(51, 100), last_sequence: 100, has_more: true, next_before_sequence: 51 }
   } })
   try {
-    await f.hook.initialize()
+    await openInitialSession(f)
     await f.hook.newSession()
     await f.hook.switchSession('c1')
     assert.deepEqual(f.hook.messages.value.map(m => m.sequence), Array.from({ length: 100 }, (_, i) => i + 1))
@@ -201,7 +236,7 @@ test('older message pages stay merged when completion catches up across multiple
       return { ...view, messages: [message(100)], has_more: false }
     } })
   try {
-    await f.hook.initialize()
+    await openInitialSession(f)
     await f.hook.loadEarlierMessages()
     f.hook.activeRun.value = { run_id: 'r1', client_message_id: 'x', status: 'running', stage: '' }
     f.hook.retry()
@@ -211,6 +246,222 @@ test('older message pages stay merged when completion catches up across multiple
   } finally { f.cleanup() }
 })
 async function flush() { for (let i = 0; i < 30; i++) await Promise.resolve() }
+
+function deletionFixture(overrides = {}, initialStorage = []) {
+  const views = new Map()
+  let count = 0
+  const f = fixture({
+    createSession: async () => {
+      const id = 'c' + (++count)
+      const view = { session_id: id, title: id, agent_id: 'conversation_assistant', created_at: `2026-10-01T00:00:0${count}Z`, updated_at: `2026-10-01T00:00:0${count}Z`, messages: [], files: [], active_run_id: null, last_sequence: 0 }
+      views.set(id, view)
+      return structuredClone(view)
+    },
+    listSessions: async () => ({ items: [...views.values()].reverse(), next_cursor: null }),
+    getSession: async id => { if (!views.has(id)) throw new ApiError(404, 'CONVERSATION_NOT_FOUND'); return structuredClone(views.get(id)) },
+    deleteSession: async id => { views.delete(id) },
+    ...overrides,
+  }, initialStorage)
+  return { ...f, views }
+}
+
+test('deleting current session restores latest remaining draft', async () => {
+  const f = deletionFixture()
+  try {
+    await openInitialSession(f)
+    f.hook.draft.value = 'first draft'
+    await f.hook.newSession()
+    f.hook.draft.value = 'second draft'
+    await f.hook.switchSession('c1')
+    assert.equal(f.hook.hasDraft('c2'), true)
+    await f.hook.deleteSession('c1')
+    assert.equal(f.hook.sessionId.value, 'c2')
+    assert.equal(f.hook.draft.value, 'second draft')
+    assert.deepEqual(f.hook.sessions.value.map(s => s.session_id), ['c2'])
+    assert.deepEqual(f.hook.pendingDeletions.value, [])
+  } finally { f.cleanup() }
+})
+
+test('deleting last loaded item reloads server first page and remains empty if no history', async () => {
+  const f = deletionFixture()
+  try {
+    await openInitialSession(f)
+    f.views.set('c3', { ...f.views.get('c1'), session_id: 'c3', title: 'remaining' })
+    await f.hook.deleteSession('c1')
+    assert.equal(f.hook.sessionId.value, 'c3')
+    await f.hook.deleteSession('c3')
+    assert.equal(f.hook.sessionId.value, null)
+    assert.deepEqual(f.hook.sessions.value, [])
+    assert.equal(f.hook.hasMoreSessions.value, false)
+    await f.hook.initialize()
+    assert.equal(f.hook.sessionId.value, null)
+  } finally { f.cleanup() }
+})
+
+test('deleting another session preserves active SSE and draft', async () => {
+  let handlers, closed = 0
+  const run = { run_id: 'r1', client_message_id: '', status: 'running', message: null, error: null }
+  const f = deletionFixture({
+    sendSessionMessage: async (_id, body) => { run.client_message_id = body.client_message_id; return run },
+    subscribeSessionRun: (_id, _runId, callbacks) => { handlers = callbacks; return () => closed++ },
+  })
+  try {
+    await openInitialSession(f)
+    f.hook.draft.value = 'keep first'
+    await f.hook.newSession()
+    await f.hook.switchSession('c1')
+    await f.hook.send()
+    f.hook.draft.value = 'next draft'
+    await f.hook.deleteSession('c2')
+    handlers.onEvent({ event: 'delta', text: 'reply' })
+    assert.equal(f.hook.sessionId.value, 'c1')
+    assert.equal(f.hook.draft.value, 'next draft')
+    assert.equal(f.hook.streamingText.value, 'reply')
+    assert.equal(closed, 0)
+  } finally { f.cleanup() }
+})
+
+test('late history callbacks cannot resurrect deleted session', async () => {
+  let finish
+  const f = deletionFixture()
+  try {
+    await openInitialSession(f)
+    f.api.listSessions = async options => options.cursor ? new Promise(resolve => { finish = resolve }) : ({ items: [...f.views.values()], next_cursor: 'older' })
+    await f.hook.initialize()
+    const deleted = { ...f.views.get('c1'), session_id: 'c2' }
+    f.views.set('c2', deleted)
+    const older = f.hook.loadMoreSessions()
+    await f.hook.deleteSession('c2')
+    finish({ items: [deleted], next_cursor: null })
+    await older
+    assert.equal(f.hook.sessions.value.some(s => s.session_id === 'c2'), false)
+  } finally { f.cleanup() }
+})
+
+test('multiple deletion targets survive refresh independently', async () => {
+  const f = deletionFixture({ deleteSession: async id => { throw new ApiError(503, id === 'c1' ? 'STORAGE_UNAVAILABLE' : 'CONVERSATION_DELETE_INCOMPLETE') } })
+  let seed
+  try {
+    await openInitialSession(f)
+    await f.hook.deleteSession('c1')
+    await f.hook.deleteSession('c2')
+    assert.deepEqual(f.hook.pendingDeletions.value, [
+      { session_id: 'c1', phase: 'unconfirmed' }, { session_id: 'c2', phase: 'cleanup_pending' },
+    ])
+    seed = [...f.storage]
+  } finally { f.cleanup() }
+  const next = deletionFixture({}, seed)
+  try {
+    assert.equal(next.hook.pendingDeletions.value.length, 2)
+    await next.hook.initialize()
+    await next.hook.retryDeletion('c1')
+    assert.equal(next.hook.pendingDeletions.value.length, 1)
+    await next.hook.retryDeletion('c2')
+    assert.deepEqual(next.hook.pendingDeletions.value, [])
+    assert.equal(next.calls.length, 0)
+  } finally { next.cleanup() }
+})
+
+test('deletion outcomes distinguish busy incomplete and unconfirmed', async () => {
+  const f = deletionFixture()
+  try {
+    await openInitialSession(f)
+    f.hook.draft.value = 'keep input'
+    f.api.deleteSession = async () => { throw new ApiError(409, 'CONVERSATION_BUSY') }
+    await f.hook.deleteSession('c1')
+    assert.equal(f.hook.draft.value, 'keep input')
+    assert.deepEqual(f.hook.pendingDeletions.value, [])
+    f.api.deleteSession = async () => { f.views.delete('c1'); throw new ApiError(503, 'CONVERSATION_DELETE_INCOMPLETE') }
+    await f.hook.deleteSession('c1')
+    assert.equal(f.hook.sessionId.value, null)
+    assert.equal(f.hook.draft.value, '')
+    assert.equal(f.hook.pendingDeletions.value[0].phase, 'cleanup_pending')
+  } finally { f.cleanup() }
+})
+
+test('deletion request serializes page actions and survives suspension', async () => {
+  let finish, deleted = 0, reads = 0
+  const f = deletionFixture({ deleteSession: async (_id, signal) => {
+    deleted++
+    return new Promise((resolve, reject) => {
+      finish = resolve
+      signal.addEventListener('abort', () => reject(new ApiError(0)), { once: true })
+    })
+  } })
+  try {
+    await openInitialSession(f)
+    f.hook.draft.value = 'draft'
+    const pending = f.hook.deleteSession('c1')
+    await f.hook.deleteSession('c1')
+    f.api.getSession = async () => { reads++; throw Error('should not switch') }
+    await f.hook.newSession(); await f.hook.switchSession('c2'); await f.hook.send(); await f.hook.upload({ name: 'x.docx' })
+    assert.equal(f.hook.deleting.value, true)
+    assert.equal(reads, 0)
+    assert.equal(deleted, 1)
+    assert.equal(f.calls.length, 0)
+    f.hook.suspend()
+    finish()
+    await pending
+    assert.equal(f.hook.pendingDeletions.value[0].phase, 'unconfirmed')
+  } finally { f.cleanup() }
+})
+
+test('old deletion refresh cannot unlock a newer deletion', async () => {
+  const f = deletionFixture()
+  let finishOldList, finishNewDelete
+  try {
+    await openInitialSession(f)
+    f.hook.draft.value = 'first draft'
+    await f.hook.newSession()
+    await f.hook.switchSession('c1')
+    f.api.listSessions = () => new Promise(resolve => { finishOldList = resolve })
+    const old = f.hook.deleteSession('c1')
+    await flush()
+    assert.equal(typeof finishOldList, 'function')
+    f.hook.suspend()
+    f.api.listSessions = async () => ({ items: [...f.views.values()], next_cursor: null })
+    await f.hook.initialize()
+    f.api.deleteSession = id => new Promise(resolve => { finishNewDelete = () => { f.views.delete(id); resolve() } })
+    const next = f.hook.deleteSession('c2')
+    finishOldList({ items: [], next_cursor: null })
+    await old
+    assert.equal(f.hook.deleting.value, true)
+    assert.equal(f.hook.canDelete.value, false)
+    finishNewDelete()
+    await next
+  } finally { f.cleanup() }
+})
+
+for (const phase of ['success', 'cleanup_pending']) {
+  test(`known ${phase} after suspension still clears target cache`, async () => {
+    const f = deletionFixture()
+    let finish
+    try {
+      await openInitialSession(f)
+      f.hook.draft.value = 'first draft'
+      await f.hook.newSession()
+      f.hook.draft.value = 'second draft'
+      await f.hook.switchSession('c1')
+      f.api.deleteSession = () => new Promise((resolve, reject) => {
+        finish = () => {
+          f.views.delete('c2')
+          if (phase === 'success') resolve()
+          else reject(new ApiError(503, 'CONVERSATION_DELETE_INCOMPLETE'))
+        }
+      })
+      const request = f.hook.deleteSession('c2')
+      f.hook.suspend()
+      finish()
+      await request
+      assert.equal(f.hook.hasDraft('c2'), false)
+      assert.equal(f.hook.sessionId.value, 'c1')
+      assert.equal(f.hook.draft.value, 'first draft')
+      assert.deepEqual(f.hook.pendingDeletions.value, phase === 'success' ? [] : [{ session_id: 'c2', phase }])
+      await f.hook.initialize()
+      assert.equal(f.hook.hasDraft('c2'), false)
+    } finally { f.cleanup() }
+  })
+}
 
 function streamApiFixture() {
   const sources = []
@@ -280,7 +531,7 @@ test('SSE deltas appear before completion and reconnect snapshots replace partia
     subscribeSessionRun: (_id, _runId, callbacks) => { handlers = callbacks; return () => closed++ },
   })
   try {
-    await f.hook.initialize()
+    await openInitialSession(f)
     f.hook.draft.value = 'hello'
     await f.hook.send()
     handlers.onEvent({ event: 'snapshot', run, text: '你' })
@@ -308,7 +559,7 @@ test('a detached SSE cannot append to another conversation and reconnect never r
     subscribeSessionRun: (_id, _runId, callbacks) => { handlers = callbacks; return () => closed++ },
   })
   try {
-    await f.hook.initialize(); f.hook.draft.value = 'hello'; await f.hook.send()
+    await openInitialSession(f); f.hook.draft.value = 'hello'; await f.hook.send()
     const detached = handlers
     await f.hook.newSession()
     detached.onEvent({ event: 'delta', text: 'late' })
@@ -327,7 +578,7 @@ test('SSE connection failure uses one status read and retry subscribes without r
     getSessionRun: async () => { reads++; return run },
   })
   try {
-    await f.hook.initialize(); f.hook.draft.value = 'hello'; await f.hook.send()
+    await openInitialSession(f); f.hook.draft.value = 'hello'; await f.hook.send()
     handlers.onError(new ApiError(0)); await flush()
     assert.equal(reads, 1)
     assert.equal(f.hook.retryable.value, true)
@@ -346,8 +597,8 @@ test('retry reconnects an unconfirmed submission even when status recovery also 
     getSessionRun: async () => { throw new ApiError(0) },
   })
   try {
-    await f.hook.initialize(); f.hook.draft.value = 'hello'; await f.hook.send()
-    f.hook.suspend(); restored = true; await f.hook.initialize()
+    await openInitialSession(f); f.hook.draft.value = 'hello'; await f.hook.send()
+    f.hook.suspend(); restored = true; await openInitialSession(f)
     handlers.onError(new ApiError(0)); await flush()
     assert.equal(f.hook.busy.value, true)
     assert.equal(f.hook.retryable.value, true)
@@ -367,7 +618,7 @@ test('failed new conversation restores a completed reply without a stale partial
     subscribeSessionRun: (_id, _runId, callbacks) => { handlers = callbacks; return () => {} },
   })
   try {
-    await f.hook.initialize(); f.hook.draft.value = 'hello'; await f.hook.send()
+    await openInitialSession(f); f.hook.draft.value = 'hello'; await f.hook.send()
     handlers.onEvent({ event: 'snapshot', run, text: 'partial' })
     f.api.createSession = async () => { completed = true; throw new ApiError(0) }
     await f.hook.newSession()
@@ -380,7 +631,7 @@ test('failed new conversation restores a completed reply without a stale partial
 test('a lost response on a later turn retries that submission, not the previous run', async () => {
   const f = fixture()
   try {
-    await f.hook.initialize()
+    await openInitialSession(f)
     f.hook.draft.value = 'first'
     await f.hook.send(); await flush()
     const original = f.api.sendSessionMessage
@@ -402,7 +653,7 @@ test('a lost response on a later turn retries that submission, not the previous 
 test('an ambiguous HTTP 502 preserves the submission idempotency key', async () => {
   const f = fixture()
   try {
-    await f.hook.initialize()
+    await openInitialSession(f)
     const original = f.api.sendSessionMessage
     let lose = true
     f.api.sendSessionMessage = async (id, payload) => {
@@ -424,7 +675,7 @@ test('a failed initial connection can be retried without sending a message', asy
     return { session_id: 'c2', messages: [], files: [], active_run_id: null, last_sequence: 0 }
   } })
   try {
-    await f.hook.initialize()
+    await openInitialSession(f)
     assert.equal(f.hook.retryable.value, true)
     f.hook.retry(); await flush()
     assert.equal(f.hook.sessionId.value, 'c2')
@@ -435,7 +686,7 @@ test('a failed initial connection can be retried without sending a message', asy
 test('failed new conversation creation releases an aborted upload flag', async () => {
   const f = fixture()
   try {
-    await f.hook.initialize()
+    await openInitialSession(f)
     f.api.uploadSessionFile = async (_id, _file, signal) => new Promise((_resolve, reject) => {
       signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
     })
@@ -458,7 +709,7 @@ test('conversation switching restores its messages, draft and selected files', a
   }
   const f = fixture({ createSession: async () => views[++created === 1 ? 'c1' : 'c2'], getSession: async id => views[id] })
   try {
-    await f.hook.initialize()
+    await openInitialSession(f)
     await f.hook.upload({ name: 'draft.docx' })
     f.hook.draft.value = 'unsent draft'
     await f.hook.newSession()
@@ -475,7 +726,7 @@ test('conversation switching restores its messages, draft and selected files', a
 test('accepted attachments leave the composer and are not sent again on the next turn', async () => {
   const f = fixture()
   try {
-    await f.hook.initialize()
+    await openInitialSession(f)
     await f.hook.upload({ name: 'draft.docx' })
     f.hook.draft.value = 'use this file'
     await f.hook.send(); await flush()
@@ -493,7 +744,7 @@ test('switching away after an ambiguous response preserves the original idempote
   const view = id => ({ session_id: id, messages: [], files: [], active_run_id: null, last_sequence: 0 })
   const f = fixture({ createSession: async () => view(++created === 1 ? 'c1' : 'c2'), getSession: async id => view(id) })
   try {
-    await f.hook.initialize()
+    await openInitialSession(f)
     let lost = true
     f.api.sendSessionMessage = async (_id, payload) => {
       f.calls.push({ ...payload })
@@ -517,7 +768,7 @@ test('a failed switch keeps the current conversation and draft', async () => {
     return { session_id: id, messages: [], files: [], active_run_id: null, last_sequence: 0 }
   } })
   try {
-    await f.hook.initialize()
+    await openInitialSession(f)
     f.hook.draft.value = 'keep this draft'
     await f.hook.switchSession('missing')
     assert.equal(f.hook.sessionId.value, 'c1')
@@ -531,7 +782,7 @@ test('deactivated requests cannot append a late upload to the active conversatio
   let finishUpload
   const f = fixture({ uploadSessionFile: () => new Promise(resolve => { finishUpload = resolve }) })
   try {
-    await f.hook.initialize()
+    await openInitialSession(f)
     f.hook.draft.value = 'keep on return'
     const request = f.hook.upload({ name: 'draft.docx' })
     f.hook.suspend()
@@ -539,7 +790,7 @@ test('deactivated requests cannot append a late upload to the active conversatio
     await request
     assert.equal(f.hook.files.value.length, 0)
     assert.equal(f.hook.uploading.value, false)
-    await f.hook.initialize()
+    await openInitialSession(f)
     assert.equal(f.hook.draft.value, 'keep on return')
   } finally { f.cleanup() }
 })
@@ -547,7 +798,7 @@ test('deactivated requests cannot append a late upload to the active conversatio
 test('an attachment can be sent without inventing an empty backend message', async () => {
   const f = fixture()
   try {
-    await f.hook.initialize()
+    await openInitialSession(f)
     await f.hook.upload({ name: 'draft.docx' })
     await f.hook.send(); await flush()
     assert.equal(f.calls.length, 1)
@@ -568,7 +819,7 @@ test('stopping during a pending conversation switch cannot write the old run int
     cancelSessionRun: async () => { cancelCalls++; return cancellation },
   })
   try {
-    await f.hook.initialize()
+    await openInitialSession(f)
     const switching = f.hook.switchSession('c2')
     const stopping = f.hook.stop()
     finishSwitch(view('c2'))
@@ -592,7 +843,7 @@ test('a failed switch retry belongs to its own conversation snapshot', async () 
     getSession: async id => { requested.push(id); if (failures.has(id)) throw new ApiError(503); return view(id) },
   })
   try {
-    await f.hook.initialize()
+    await openInitialSession(f)
     for (let i = 1; i <= 3; i++) {
       f.hook.draft.value = `draft ${i}`
       await f.hook.newSession()

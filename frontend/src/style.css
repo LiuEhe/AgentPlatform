@@ -139,6 +139,13 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .history-item { display: flex; align-items: center; gap: 10px; min-height: 46px; padding: 10px 12px; border-radius: 8px; text-align: left; font-size: 12px; width: 100%; flex-shrink: 0; }
 .history-item svg { color: var(--muted); }
 .history-item span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.history-row { display: flex; align-items: center; border-radius: 8px; flex-shrink: 0; }
+.history-row .history-item { min-width: 0; flex: 1; width: auto; }
+.history-row.active { background: var(--selection); color: #854027; }
+.history-row.active .history-item svg { color: var(--accent); }
+.history-delete { flex-shrink: 0; margin-right: 6px; color: var(--muted); }
+.history-delete:hover:not(:disabled) { color: var(--error); background: var(--error-soft); }
+.deletion-title { overflow-wrap: anywhere; margin-bottom: 12px; }
 .history-item:hover:not(:disabled) { background: #e8e4db; }
 .history-item.active { background: var(--selection); color: #854027; }
 .history-item.active svg { color: var(--accent); }

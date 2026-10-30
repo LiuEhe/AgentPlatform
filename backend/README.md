@@ -16,6 +16,7 @@
 | --- | --- |
 | `GET /api/v1/agents` | 读取数据库中的 agent_id/name/description；不授予执行能力 |
 | `POST /api/v1/sessions` | 创建持久会话，返回 201 |
+| `DELETE /api/v1/sessions/{session_id}` | 永久删除空闲会话及关联消息、结果和附件；空 204 表示全部完成，重复请求幂等 |
 | `GET /api/v1/sessions/{session_id}?after_sequence=0` | 读取 session_id、消息 message_id 和文件元数据，支持按消息序号增量获取 |
 | `POST /api/v1/sessions/{session_id}/files` | multipart 字段 `file` 上传一份 DOCX，返回 file_id/original_name/size_bytes/content_chars/created_at，不暴露路径；不自动触发审核 |
 | `POST /api/v1/sessions/{session_id}/messages` | JSON `{client_message_id, content, file_ids: []}`，返回 202 及 run_id |
@@ -34,6 +35,10 @@ SSE 使用已锁定 FastAPI 0.141.1 的官方 `EventSourceResponse` 与 `ServerS
 运行和 DOCX 解析仍受并发控制。原始 DOCX 与解析 Markdown 通过 `infrastructure/documents/local_file_store.py` 保存到 `backend/documents/<agent_id>/<session_id>/<file_id>/`，数据库只保存路径和元数据。`DOCUMENTS_DIR` 可指定其他根目录，相对路径按 backend 解析；数据库和文件目录必须共同备份。应用关闭先取消并收尾任务，再关闭数据库及外部客户端。使用单工作进程；没有用户认证或权限隔离。固定 PostgreSQL advisory lock 防止同库第二实例启动，锁连接丢失或终态提交失败后拒绝新写入并结束订阅，需要重启服务；已提交历史保留，未提交临时结果可能丢失。
 
 ### SQL 初始化与配置
+
+会话删除不依赖模型配置。上传、排队、运行或本地执行收尾期间返回 `CONVERSATION_BUSY`（409），不隐式取消任务。数据库已删除但附件或凭据清理失败返回 `CONVERSATION_DELETE_INCOMPLETE`（503），重复同一 DELETE 可继续清理；提交结果无法确认返回 `STORAGE_UNAVAILABLE`（503），保留材料与凭据等待重试。合法且不存在的 ID 返回 204，非法 ID 返回 404。
+
+附件根目录下 `.deletions/<session_id>.json` 仅保存版本、Agent 与会话 ID。在数据库事务删除前落盘，数据库提交确认后精确清理会话目录，完成后移除凭据。启动取得运行权并恢复中断任务后逐项核对：会话不存在才清理文件；会话尚存则保留其文件并移除未提交删除的凭据。单项 IO 失败保留待处理项，不扫描附件库或运行常驻清理任务。DELETE 在服务端接纳后不因客户端断开而撤回，关闭服务会等待删除收尾。
 
 数据库设计与操作说明统一见 [数据库设计与初始化](../docs/database.md)，包括表关系、字段、约束、索引及完整初始化命令。
 

@@ -77,6 +77,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             await conversation_store.initialize()
             await conversation_store.recover_interrupted()
+            await conversation_service.recover_deletions()
             await export_service.initialize()
             if not app_settings.readiness_issues():
                 timeout = httpx.Timeout(60.0, connect=5.0)
@@ -142,7 +143,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=app_settings.cors_origins,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
     )
     install_request_logging(app)

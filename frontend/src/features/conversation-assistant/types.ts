@@ -1,4 +1,5 @@
 export type RunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+export interface PendingSessionDeletion { session_id: string; phase: 'unconfirmed' | 'cleanup_pending' }
 export interface SafeError { code: string; message: string }
 export interface FileView { file_id: string; original_name: string; size_bytes: number; content_chars: number; created_at: string }
 export interface AgentCallView {

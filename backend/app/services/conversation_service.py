@@ -5,7 +5,7 @@ import logging
 from collections.abc import AsyncIterator
 from dataclasses import asdict
 from pathlib import PurePath
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from app.core.config import Settings
 from app.core.errors import AppError
@@ -69,6 +69,7 @@ class ConversationService:
         self._uploads: dict[str, asyncio.Task] = {}
         self._submissions: set[asyncio.Task] = set()
         self._run_sessions: dict[str, str] = {}
+        self._deletion_tasks: dict[str, asyncio.Task[None]] = {}
         self._closed = False
         self._unavailable = False
 
@@ -126,6 +127,87 @@ class ConversationService:
         self._check_open()
         page = await self._store.create("conversation_assistant")
         return self._page_view(page)
+
+    async def delete(self, session_id: str) -> None:
+        self._check_open()
+        try:
+            session_id = str(UUID(session_id))
+        except (ValueError, TypeError, AttributeError):
+            raise AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404) from None
+        task = self._deletion_tasks.get(session_id)
+        if task is None or task.done():
+            task = asyncio.create_task(self._delete_session(session_id))
+            self._deletion_tasks[session_id] = task
+            def finished(done):
+                if self._deletion_tasks.get(session_id) is done:
+                    self._deletion_tasks.pop(session_id, None)
+                if not done.cancelled():
+                    done.exception()
+            task.add_done_callback(finished)
+        await asyncio.shield(task)
+
+    async def _delete_session(self, session_id: str) -> None:
+        async with self._active.operation(session_id):
+            if session_id in self._uploads:
+                raise AppError("CONVERSATION_BUSY", "请等待当前上传结束后再删除", 409)
+            target = await self._store.inspect_deletion(session_id)
+            if target:
+                if target.active_run_id or any(
+                    key in self._tasks and not self._tasks[key].done() for key in target.run_ids
+                ):
+                    raise AppError("CONVERSATION_BUSY", "请等待当前操作结束后再删除", 409)
+                try:
+                    intent = await asyncio.to_thread(
+                        self._files.write_deletion_intent, target.agent_id, session_id
+                    )
+                except (AppError, OSError):
+                    raise AppError("STORAGE_UNAVAILABLE", "无法准备删除，请稍后重试", 503) from None
+                try:
+                    await self._store.delete_session(session_id)
+                except Exception as failure:
+                    # 新事务等待原写入结束；查询失败时保留凭据，绝不据超时清理文件。
+                    remaining = await self._store.inspect_deletion(session_id)
+                    if remaining is not None:
+                        try:
+                            await asyncio.to_thread(self._files.discard_deletion_intent, session_id)
+                        except (AppError, OSError):
+                            logger.warning("deletion_intent_retained session_id=%s", session_id)
+                        raise failure
+            else:
+                try:
+                    intent = await asyncio.to_thread(self._files.read_deletion_intent, session_id)
+                except (AppError, OSError):
+                    raise AppError("STORAGE_UNAVAILABLE", "无法核实删除，请稍后重试", 503) from None
+                if intent is None:
+                    return
+            try:
+                await asyncio.to_thread(self._files.discard_session, intent.agent_id, session_id)
+                await asyncio.to_thread(self._files.discard_deletion_intent, session_id)
+            except (AppError, OSError):
+                raise AppError(
+                    "CONVERSATION_DELETE_INCOMPLETE", "对话已删除，附件清理未完成，请重试清理", 503
+                ) from None
+
+    async def recover_deletions(self) -> None:
+        try:
+            intents = await asyncio.to_thread(self._files.list_deletion_intents)
+        except (AppError, OSError) as exc:
+            logger.warning("deletion_recovery_unavailable error_type=%s", type(exc).__name__)
+            return
+        for intent in intents:
+            try:
+                async with self._active.operation(intent.session_id):
+                    target = await self._store.inspect_deletion(intent.session_id)
+                    if target is None:
+                        await asyncio.to_thread(
+                            self._files.discard_session, intent.agent_id, intent.session_id
+                        )
+                    await asyncio.to_thread(self._files.discard_deletion_intent, intent.session_id)
+            except (AppError, OSError) as exc:
+                logger.warning(
+                    "deletion_recovery_pending session_id=%s error_type=%s",
+                    intent.session_id, type(exc).__name__,
+                )
 
     async def list(self, agent_id="conversation_assistant", *, limit=20, cursor=None):
         page = await self._store.list(agent_id, limit=limit, cursor=cursor)
@@ -519,6 +601,7 @@ class ConversationService:
 
     async def aclose(self):
         self._closed = True
+        await asyncio.gather(*list(self._deletion_tasks.values()), return_exceptions=True)
         tasks = list(self._tasks.values()) + list(self._uploads.values()) + list(self._submissions)
         for task in tasks:
             task.cancel()

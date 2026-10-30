@@ -46,7 +46,7 @@ psql -X -h 127.0.0.1 -p 5432 -U postgres -d agent_platform_test -v ON_ERROR_STOP
 
 ## 表结构
 
-业务 UUID 由应用生成；时间均为非空 timestamptz，created_at/updated_at 默认 now()，下列可空时间例外。外键均 NO ACTION，无级联删除、自动过期或历史删除接口。
+业务 UUID 由应用生成；时间均为非空 timestamptz，created_at/updated_at 默认 now()，下列可空时间例外。外键均 NO ACTION，无级联删除或自动过期；历史通过显式 DELETE 用例永久删除，不修改结构版本。
 
 ### agents：智能体元数据
 
@@ -130,6 +130,7 @@ singleton boolean PRIMARY KEY CHECK(singleton)，version integer NOT NULL CHECK(
 
 ```text
 backend/documents/
+  .deletions/<session_id>.json
   .staging/<upload_id>/
   <agent_id>/<session_id>/<file_id>/
     source.docx
@@ -152,6 +153,12 @@ backend/documents/
 - 启动将遗留 queued/running 收为 CONVERSATION_INTERRUPTED，不重做模型。提交 ACK 丢失后的重复请求若无本地任务，收为中断失败并返回原 run_id。
 - 每会话最多 100 消息、8 文件，正文合计 100000 字符，消息及子结果合计 1000000 字符；提交时为容量失败的终态提示预留 10 字符。模型输入预算仍为 24000 序列化字符，历史子结果片段最多 4000 字符。
 - HTTP 前缀为 /api/v1/sessions，字段 session_id/message_id/run_id/file_id，文件引用 file_ids；旧 conversations 路由没有别名。列表游标版本 2，消息按 sequence 前后分页，last_sequence 不能代表客户端已收位置。
+
+## 显式永久删除
+
+`DELETE /api/v1/sessions/{session_id}` 由应用服务取得同会话操作锁，拒绝上传、活动运行及本地执行收尾中的目标。仓储通过会话行锁在单个事务依次删除 message_files/agent_calls、messages、files、runs、chat_sessions；不更改 agents 或外键。提交响应丢失时通过新的 read-committed 锁定查询等待原事务结束，确认无会话后才清理附件。
+
+`.deletions` 凭据在数据库删除前以标准库原子替换落盘，仅含 version=1/agent_id/session_id。提交后清理对应会话目录，再移除凭据，全部完成才返回204。部分清理失败保留凭据并返回专用503；未知提交保留文件和凭据。启动只恢复凭据所指目标：数据库无会话则完成清理，仍有会话则保留材料并移除凭据。备份须同时包含数据库、附件与凭据；该机制不清理已有备份、Langfuse、模型供应商记录或用户下载副本。
 
 ## 未来个人私有会话
 

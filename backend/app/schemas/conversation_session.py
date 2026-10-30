@@ -77,6 +77,14 @@ class ChatSessionSummary:
 
 
 @dataclass(frozen=True)
+class SessionDeletionTarget:
+    session_id: str
+    agent_id: str
+    run_ids: tuple[str, ...]
+    active_run_id: str | None
+
+
+@dataclass(frozen=True)
 class ChatSessionListPage:
     items: list[ChatSessionSummary]
     next_cursor: str | None

@@ -1,5 +1,7 @@
 """本地附件存储；仅接受服务生成的标识，不解释 HTTP 或 Agent 材料。"""
 
+import json
+import logging
 import os
 import re
 import shutil
@@ -11,6 +13,14 @@ from uuid import UUID, uuid4
 from app.core.errors import AppError
 
 BACKEND_ROOT = Path(__file__).resolve().parents[3]
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SessionDeletionIntent:
+    version: int
+    agent_id: str
+    session_id: str
 
 
 @dataclass(frozen=True)
@@ -131,3 +141,69 @@ class LocalFileStore:
         if filename != "source.docx" or paths.content_path != f"{directory}/content.md":
             raise self._error()
         self._discard(self._published_dir(directory))
+
+    def _session_dir(self, agent_id: str, session_id: str) -> Path:
+        try:
+            if agent_id != "conversation_assistant" or str(UUID(session_id)) != session_id:
+                raise ValueError
+        except (ValueError, TypeError, AttributeError):
+            raise self._error() from None
+        return self._safe(f"{agent_id}/{session_id}")
+
+    def _intent_path(self, session_id: str) -> Path:
+        self._session_dir("conversation_assistant", session_id)
+        return self._safe(f".deletions/{session_id}.json")
+
+    def validate_session_deletion(self, agent_id: str, session_id: str) -> None:
+        directory = self._session_dir(agent_id, session_id)
+        self._intent_path(session_id)
+        if directory.exists():
+            for child in directory.rglob("*"):
+                self._safe(child.relative_to(self.root).as_posix())
+
+    def write_deletion_intent(self, agent_id: str, session_id: str) -> SessionDeletionIntent:
+        self.validate_session_deletion(agent_id, session_id)
+        target = self._intent_path(session_id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self._safe(f".deletions/{uuid4()}.tmp")
+        try:
+            with temporary.open("x", encoding="utf-8") as stream:
+                json.dump({"version": 1, "agent_id": agent_id, "session_id": session_id}, stream)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return SessionDeletionIntent(1, agent_id, session_id)
+
+    def read_deletion_intent(self, session_id: str) -> SessionDeletionIntent | None:
+        path = self._intent_path(session_id)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (ValueError, UnicodeError):
+            raise self._error() from None
+        if (not isinstance(payload, dict)
+                or set(payload) != {"version", "agent_id", "session_id"}
+                or type(payload["version"]) is not int or payload["version"] != 1
+                or payload["session_id"] != session_id):
+            raise self._error()
+        self._session_dir(payload["agent_id"], payload["session_id"])
+        return SessionDeletionIntent(**payload)
+
+    def list_deletion_intents(self) -> list[SessionDeletionIntent]:
+        directory = self._safe(".deletions")
+        intents = []
+        for path in directory.glob("*.json"):
+            try:
+                intent = self.read_deletion_intent(path.stem)
+                if intent:
+                    intents.append(intent)
+            except (AppError, OSError) as exc:
+                logger.warning("deletion_intent_invalid error_type=%s", type(exc).__name__)
+        return intents
+
+    def discard_session(self, agent_id: str, session_id: str) -> None:
+        self._discard(self._session_dir(agent_id, session_id))
+
+    def discard_deletion_intent(self, session_id: str) -> None:
+        self._intent_path(session_id).unlink(missing_ok=True)

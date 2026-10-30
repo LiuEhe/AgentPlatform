@@ -15,6 +15,33 @@ from app.schemas.conversation_session import RunCompletion, SessionFile, Session
 from app.services.conversation_service import ConversationService
 
 
+def test_startup_recovers_only_admitted_deletions(monkeypatch):
+    from uuid import uuid4
+
+    from app.infrastructure.documents.local_file_store import LocalFileStore
+
+    settings = Settings(_env_file=None)
+    files = LocalFileStore(settings.documents_root)
+    ids = []
+    with TestClient(create_app(settings)) as client:
+        for _ in range(2):
+            sid = client.post("/api/v1/sessions").json()["session_id"]
+            files.publish(files.stage("conversation_assistant", sid, str(uuid4()), b"docx", "body"))
+            files.write_deletion_intent("conversation_assistant", sid)
+            client.portal.call(client.app.state.conversation_service._store.delete_session, sid)
+            ids.append(sid)
+    original = LocalFileStore.discard_session
+    def fail_one(self, agent, sid):
+        if sid == ids[0]:
+            raise OSError("temporarily unavailable")
+        original(self, agent, sid)
+    monkeypatch.setattr(LocalFileStore, "discard_session", fail_one)
+    with TestClient(create_app(settings)) as client:
+        assert client.get("/api/v1/sessions").status_code == 200
+        assert files.read_deletion_intent(ids[0]) is not None
+        assert files.read_deletion_intent(ids[1]) is None
+
+
 def test_restart_restores_history_and_interrupts_once():
     settings = Settings(_env_file=None)
     with TestClient(create_app(settings)) as client:

@@ -17,6 +17,7 @@ from app.schemas.conversation_session import (
     ChatSessionPage,
     ChatSessionSummary,
     RunCompletion,
+    SessionDeletionTarget,
     SessionFile,
     SessionMessage,
     SessionRun,
@@ -129,6 +130,44 @@ class PostgresConversationStore:
         if not row:
             raise AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404)
         return row
+
+    async def inspect_deletion(self, session_id: str) -> SessionDeletionTarget | None:
+        async with self._connection(write=True) as conn:
+            row = await conn.fetchrow(
+                "SELECT agent_id FROM chat_sessions WHERE session_id=$1 FOR UPDATE",
+                identifier(session_id),
+            )
+            if row is None:
+                return None
+            runs = await conn.fetch(
+                "SELECT run_id,status FROM runs WHERE session_id=$1", identifier(session_id)
+            )
+            return SessionDeletionTarget(
+                session_id, row["agent_id"], tuple(str(run["run_id"]) for run in runs),
+                next((str(run["run_id"]) for run in runs if run["status"] not in TERMINAL), None),
+            )
+
+    async def delete_session(self, session_id: str) -> None:
+        sid = identifier(session_id)
+        async with self._connection(write=True) as conn:
+            exists = await conn.fetchval(
+                "SELECT session_id FROM chat_sessions WHERE session_id=$1 FOR UPDATE", sid
+            )
+            if exists is None:
+                return
+            active = await conn.fetchval(
+                "SELECT run_id FROM runs WHERE session_id=$1 AND status IN ('queued','running')",
+                sid,
+            )
+            if active:
+                raise AppError("CONVERSATION_BUSY", "请等待当前操作结束后再删除", 409)
+            await conn.execute("DELETE FROM message_files WHERE session_id=$1", sid)
+            await conn.execute(
+                "DELETE FROM agent_calls WHERE message_id IN "
+                "(SELECT message_id FROM messages WHERE session_id=$1)", sid,
+            )
+            for table in ("messages", "files", "runs", "chat_sessions"):
+                await conn.execute(f"DELETE FROM {table} WHERE session_id=$1", sid)
 
     async def _messages(
         self,

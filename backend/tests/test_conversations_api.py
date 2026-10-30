@@ -10,6 +10,43 @@ from app.main import create_app
 from app.schemas.conversation import MessageCreate, RunEvent, RunView
 
 
+def test_delete_contract_errors_and_no_model(monkeypatch):
+    from app.core.errors import AppError
+
+    with TestClient(create_app(Settings(_env_file=None))) as client:
+        sid = client.post("/api/v1/sessions").json()["session_id"]
+        assert client.delete("/api/v1/sessions/invalid").status_code == 404
+        for code, status in (("CONVERSATION_BUSY", 409),
+                             ("CONVERSATION_DELETE_INCOMPLETE", 503),
+                             ("STORAGE_UNAVAILABLE", 503)):
+            async def fail(_sid, code=code, status=status):
+                raise AppError(code, "safe error", status)
+            with monkeypatch.context() as patch:
+                patch.setattr(client.app.state.conversation_service, "delete", fail)
+                response = client.delete(f"/api/v1/sessions/{sid}")
+                assert response.status_code == status
+                assert response.json()["error"]["code"] == code
+                assert response.json()["error"]["request_id"]
+        response = client.delete(f"/api/v1/sessions/{sid}")
+        assert response.status_code == 204
+        assert response.content == b""
+        assert client.get(f"/api/v1/sessions/{sid}").status_code == 404
+        assert client.delete(f"/api/v1/sessions/{sid}").status_code == 204
+
+
+def test_delete_cors_preflight_keeps_origin_policy():
+    with TestClient(create_app(Settings(_env_file=None))) as client:
+        origin = client.app.state.settings.cors_origins[0]
+        response = client.options("/api/v1/sessions/example", headers={
+            "Origin": origin, "Access-Control-Request-Method": "DELETE",
+        })
+        assert response.status_code == 200
+        assert "DELETE" in response.headers["access-control-allow-methods"]
+        assert client.options("/api/v1/sessions/example", headers={
+            "Origin": "https://untrusted.invalid", "Access-Control-Request-Method": "DELETE",
+        }).status_code == 400
+
+
 def settings(**updates):
     return Settings(_env_file=None, llm_model="test", llm_api_key="test", **updates)
 

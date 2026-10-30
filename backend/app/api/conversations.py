@@ -5,7 +5,7 @@ from contextlib import aclosing
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from pydantic import ValidationError
 
@@ -52,6 +52,12 @@ async def read_conversation(
         before_sequence=before_sequence,
         limit=limit,
     )
+
+
+@router.delete("/{session_id}", status_code=204, response_class=Response)
+async def delete_conversation(session_id: str, request: Request) -> Response:
+    await service(request).delete(session_id)
+    return Response(status_code=204)
 
 
 @router.get("", response_model=SessionListView)
