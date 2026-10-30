@@ -29,7 +29,7 @@ def install_request_logging(app: FastAPI) -> None:
         request.state.request_id = request_id
         observer = getattr(app.state, "observer", NullObserver())
         selected = request.method == "POST" and (
-            request.url.path.startswith(f"{app.state.settings.api_prefix}/conversations")
+            request.url.path.startswith(f"{app.state.settings.api_prefix}/sessions")
             or request.url.path == f"{app.state.settings.api_prefix}/reviews"
         )
         active = observer if selected else NullObserver()

@@ -17,13 +17,16 @@ from app.core.config import Settings, get_settings
 from app.core.errors import install_error_handlers
 from app.core.logging import configure_logging, install_request_logging
 from app.core.observability import NullObserver
-from app.infrastructure.conversation.in_memory_store import InMemoryConversationStore
+from app.infrastructure.conversation.active_runs import ActiveRunRegistry
+from app.infrastructure.conversation.postgres_store import PostgresConversationStore
+from app.infrastructure.documents.local_file_store import LocalFileStore
 from app.infrastructure.langfuse.client import create_observer, shutdown_observer
 from app.infrastructure.langfuse.prompts import LangfusePromptResolver
 from app.infrastructure.pandoc import PandocRunner
 from app.infrastructure.ragflow.client import RagFlowClient
 from app.nodes.llm.prompts import PromptResolver
 from app.runtime.agent_runtime import AgentRegistry, AgentRuntime
+from app.services.agent_catalog_service import AgentCatalogService
 from app.services.conversation_service import ConversationService
 from app.services.document_export_service import DocumentExportService
 from app.services.llm_service import create_llm_service
@@ -55,22 +58,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             async with resolver.session():
                 yield
 
-        conversation_store = InMemoryConversationStore(
-            idle_seconds=app_settings.conversation_idle_seconds,
-            lifetime_seconds=app_settings.conversation_lifetime_seconds,
-            max_sessions=app_settings.conversation_max_sessions,
-            max_bytes=app_settings.conversation_max_bytes,
+        conversation_store = PostgresConversationStore(
+            app_settings,
+            on_unavailable=lambda: conversation_service.storage_unavailable(),
         )
         conversation_service = ConversationService(
             app_settings,
             None,
             store=conversation_store,
+            active_runs=ActiveRunRegistry(max_bytes=app_settings.conversation_transient_max_bytes),
             observer=observer,
+            files=LocalFileStore(app_settings.documents_root),
         )
         app.state.conversation_service = conversation_service
+        app.state.agent_catalog_service = AgentCatalogService(conversation_store.list_agents)
         export_service = DocumentExportService(app_settings, PandocRunner(app_settings))
         app.state.document_export_service = export_service
         try:
+            await conversation_store.initialize()
+            await conversation_store.recover_interrupted()
             await export_service.initialize()
             if not app_settings.readiness_issues():
                 timeout = httpx.Timeout(60.0, connect=5.0)
@@ -107,9 +113,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             else:
                 yield
         finally:
-            await conversation_service.aclose()
+            try:
+                await conversation_service.aclose()
+            finally:
+                await conversation_store.aclose()
             await shutdown_observer(observer)
             app.state.conversation_service = None
+            app.state.agent_catalog_service = None
             app.state.agent_runtime = None
             try:
                 await export_service.aclose()
@@ -126,6 +136,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.agent_runtime = None
     app.state.document_export_service = None
     app.state.conversation_service = None
+    app.state.agent_catalog_service = None
     app.state.observer = NullObserver()
     app.add_middleware(
         CORSMiddleware,

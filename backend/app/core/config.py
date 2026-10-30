@@ -54,10 +54,12 @@ class Settings(BaseSettings):
         default=DEFAULT_INSTITUTION_REVIEW_CONCURRENCY,
         ge=1,
     )
-    conversation_idle_seconds: float = Field(default=7200, gt=0, allow_inf_nan=False)
-    conversation_lifetime_seconds: float = Field(default=28800, gt=0, allow_inf_nan=False)
-    conversation_max_sessions: int = Field(default=100, gt=0)
-    conversation_max_bytes: int = Field(default=134217728, gt=0)
+    database_url: SecretStr | None = None
+    database_pool_min_size: int = Field(default=1, ge=1)
+    database_pool_max_size: int = Field(default=5, ge=1)
+    database_timeout_seconds: float = Field(default=5, gt=0, allow_inf_nan=False)
+    documents_dir: Path | None = None
+    conversation_transient_max_bytes: int = Field(default=134217728, gt=0)
     conversation_concurrency: int = Field(default=3, gt=0)
     conversation_queue_size: int = Field(default=6, ge=0)
     conversation_run_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
@@ -72,6 +74,11 @@ class Settings(BaseSettings):
     ragflow_base_url: str | None = "http://localhost:9380"
     ragflow_api_key: str | None = None
     ragflow_dataset_id: str | None = None
+
+    @property
+    def documents_root(self) -> Path:
+        root = Path(__file__).resolve().parents[2]
+        return (root / (self.documents_dir or "documents")).resolve()
 
     @field_validator("api_prefix")
     @classmethod

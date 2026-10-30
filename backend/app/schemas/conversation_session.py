@@ -1,33 +1,51 @@
-"""临时会话记录，独立于 HTTP 展示和 Agent 的业务状态。"""
+"""持久会话记录，独立于 HTTP 展示和 Agent 的业务状态。"""
 
-import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal
 
-from app.schemas.conversation_turn import ContinuationState, TurnDocument, TurnMessage
+from pydantic import BaseModel, Field
+
+from app.schemas.conversation_turn import (
+    ChildAgentResult,
+    ContinuationState,
+)
 
 SessionRunStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 
 
-class SessionDocument(TurnDocument):
-    pass
+class SessionFile(BaseModel):
+    file_id: str
+    session_id: str
+    original_name: str
+    source_path: str
+    content_path: str
+    size_bytes: int
+    content_chars: int
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-class SessionMessage(TurnMessage):
+class SessionMessage(BaseModel):
+    message_id: str
+    role: Literal["user", "assistant"]
+    content: str
+    file_ids: tuple[str, ...] = ()
+    agent_call: ChildAgentResult | None = None
     sequence: int
     run_id: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 @dataclass(frozen=True)
 class SessionSubmission:
     client_message_id: str
     content: str
-    document_ids: tuple[str, ...] = ()
+    file_ids: tuple[str, ...] = ()
 
 
 @dataclass
 class SessionRun:
-    id: str
+    run_id: str
     request: SessionSubmission
     request_id: str | None = None
     status: SessionRunStatus = "queued"
@@ -35,30 +53,58 @@ class SessionRun:
     message: SessionMessage | None = None
     error_code: str | None = None
     error_message: str | None = None
-    stream_text: str = ""
-    stream_bytes: int = 0
-    stream_revision: int = 0
-    stream_changed: asyncio.Event = field(default_factory=asyncio.Event)
-
-
-@dataclass
-class ConversationSession:
-    id: str
-    created: float
-    interacted: float
-    messages: list[SessionMessage] = field(default_factory=list)
-    documents: dict[str, SessionDocument] = field(default_factory=dict)
-    runs: dict[str, SessionRun] = field(default_factory=dict)
-    active_run_id: str | None = None
-    continuation: ContinuationState | None = None
-    uploading: bool = False
-    bytes_used: int = 0
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
 
 
 @dataclass(frozen=True)
 class SessionSnapshot:
-    id: str
+    session_id: str
     latest_message_id: str
     messages: tuple[SessionMessage, ...]
-    documents: dict[str, SessionDocument]
+    files: dict[str, SessionFile]
+    continuation: ContinuationState | None = None
+
+
+@dataclass(frozen=True)
+class ChatSessionSummary:
+    session_id: str
+    agent_id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class ChatSessionListPage:
+    items: list[ChatSessionSummary]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True)
+class ChatSessionPage:
+    summary: ChatSessionSummary
+    messages: list[SessionMessage]
+    files: list[SessionFile]
+    active_run_id: str | None
+    last_sequence: int
+    has_more: bool = False
+    next_before_sequence: int | None = None
+    next_after_sequence: int | None = None
+
+
+@dataclass(frozen=True)
+class SubmissionResult:
+    run: SessionRun
+    created: bool
+
+
+@dataclass(frozen=True)
+class RunCompletion:
+    status: SessionRunStatus
+    text: str
+    child_call: ChildAgentResult | None = None
+    error_code: str | None = None
+    error_message: str | None = None
     continuation: ContinuationState | None = None

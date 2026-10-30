@@ -1,41 +1,41 @@
-"""会话应用服务：临时记录、上传、任务生命周期及 HTTP 契约映射。"""
+"""会话应用用例：持久事务、解析、后台任务、取消和 SSE。"""
 
 import asyncio
 import logging
 from collections.abc import AsyncIterator
+from dataclasses import asdict
 from pathlib import PurePath
 from uuid import uuid4
 
 from app.core.config import Settings
 from app.core.errors import AppError
-from app.core.observability import (
-    NullObserver,
-    bind_observation_attributes,
-    observation_attributes,
-)
-from app.infrastructure.conversation.in_memory_store import InMemoryConversationStore
+from app.core.observability import NullObserver, bind_observation_attributes, observation_attributes
+from app.infrastructure.conversation.active_runs import ActiveRunRegistry
+from app.infrastructure.conversation.postgres_store import PostgresConversationStore
+from app.infrastructure.documents.local_file_store import LocalFileStore
 from app.nodes.document.parse import DocumentParseError, parse_docx
 from app.runtime.agent_runtime import AgentEvent, AgentRuntime
 from app.schemas.conversation import (
     TERMINAL_STATUSES,
     AgentCallView,
-    ConversationView,
-    DocumentView,
+    FileView,
     MessageCreate,
     MessageView,
     RunEvent,
     RunView,
     SafeError,
+    SessionListView,
+    SessionSummaryView,
+    SessionView,
 )
 from app.schemas.conversation_session import (
-    SessionDocument,
+    RunCompletion,
+    SessionFile,
     SessionMessage,
     SessionRun,
     SessionSubmission,
 )
 from app.schemas.conversation_turn import (
-    ChildAgentResult,
-    ContinuationState,
     ConversationTurnInput,
     ConversationTurnResult,
     TurnDocument,
@@ -51,80 +51,112 @@ class ConversationService:
         settings: Settings,
         runtime: AgentRuntime | None,
         *,
-        store: InMemoryConversationStore,
+        store: PostgresConversationStore,
+        active_runs: ActiveRunRegistry,
         observer=None,
+        files: LocalFileStore | None = None,
     ):
-        self.settings = settings
-        self.runtime = runtime
-        self._store = store
+        self.settings, self.runtime = settings, runtime
+        self._store, self._active = store, active_runs
         self._observer = observer or NullObserver()
+        self._files = files or LocalFileStore(settings.documents_root)
         self._slots = asyncio.Semaphore(settings.conversation_concurrency)
+        self._admission = asyncio.Semaphore(
+            settings.conversation_concurrency + settings.conversation_queue_size
+        )
         self._parse_slots = asyncio.Semaphore(2)
         self._tasks: dict[str, asyncio.Task] = {}
         self._uploads: dict[str, asyncio.Task] = {}
-        self._stop = asyncio.Event()
-        self._reaper: asyncio.Task | None = None
+        self._submissions: set[asyncio.Task] = set()
+        self._run_sessions: dict[str, str] = {}
         self._closed = False
+        self._unavailable = False
 
-    def _check_open(self) -> None:
-        if self._closed:
-            raise AppError("SERVICE_NOT_READY", "会话服务正在关闭", 503)
-        if self._reaper is None:
-            self._reaper = asyncio.create_task(self._reap())
+    def _check_open(self):
+        if self._closed or self._unavailable:
+            raise AppError("STORAGE_UNAVAILABLE", "会话服务不可用，请重启服务", 503)
+
+    def storage_unavailable(self):
+        self._unavailable = True
+        self._active.fail_unavailable()
+        current = asyncio.current_task()
+        for task in (*self._tasks.values(), *self._uploads.values(), *self._submissions):
+            if task is not current:
+                task.cancel()
 
     @staticmethod
-    def _document_view(document: SessionDocument) -> DocumentView:
-        return DocumentView(
-            id=document.id, filename=document.filename, chars=len(document.markdown)
-        )
+    def _file_view(file):
+        return FileView(**file.model_dump(exclude={"session_id", "source_path", "content_path"}))
 
     @staticmethod
-    def _message_view(message: SessionMessage) -> MessageView:
+    def _message_view(message: SessionMessage):
         call = (
-            AgentCallView(**message.agent_call.model_dump(), status="succeeded")
+            AgentCallView(
+                **message.agent_call.model_dump(exclude={"id"}),
+                call_id=message.agent_call.id, status="succeeded"
+            )
             if message.agent_call
             else None
         )
         return MessageView(
-            id=message.id,
+            message_id=message.message_id,
             sequence=message.sequence,
             role=message.role,
             content=message.content,
-            document_ids=list(message.document_ids),
+            file_ids=list(message.file_ids),
             run_id=message.run_id,
             agent_call=call,
+            created_at=message.created_at,
         )
 
-    def _run_view(self, run: SessionRun) -> RunView:
+    def _run_view(self, run: SessionRun):
+        state = self._active.snapshot(run.run_id)
         return RunView(
-            id=run.id,
+            run_id=run.run_id,
             client_message_id=run.request.client_message_id,
             status=run.status,
-            stage=run.stage,
+            stage=state.stage if state else run.stage,
             message=self._message_view(run.message) if run.message else None,
             error=SafeError(code=run.error_code, message=run.error_message)
             if run.error_code
             else None,
         )
 
-    async def create(self) -> ConversationView:
+    async def create(self):
         self._check_open()
-        return await self.read(self._store.create().id)
+        page = await self._store.create("conversation_assistant")
+        return self._page_view(page)
 
-    async def read(self, id: str, *, after_sequence: int = 0) -> ConversationView:
-        record = self._store.record(id)
-        return ConversationView(
-            id=id,
-            expires_in_seconds=self._store.remaining_seconds(id),
-            messages=[
-                self._message_view(m) for m in record.messages if m.sequence > after_sequence
-            ],
-            documents=[self._document_view(d) for d in record.documents.values()],
-            active_run_id=record.active_run_id,
-            last_sequence=record.messages[-1].sequence if record.messages else 0,
+    async def list(self, agent_id="conversation_assistant", *, limit=20, cursor=None):
+        page = await self._store.list(agent_id, limit=limit, cursor=cursor)
+        return SessionListView(
+            items=[SessionSummaryView(**asdict(s)) for s in page.items],
+            next_cursor=page.next_cursor,
         )
 
-    async def _parse_upload(self, filename: str, content: bytes) -> SessionDocument:
+    def _page_view(self, page):
+        return SessionView(
+            **asdict(page.summary),
+            messages=[self._message_view(m) for m in page.messages],
+            files=[self._file_view(f) for f in page.files],
+            active_run_id=page.active_run_id,
+            last_sequence=page.last_sequence,
+            has_more=page.has_more,
+            next_before_sequence=page.next_before_sequence,
+            next_after_sequence=page.next_after_sequence,
+        )
+
+    async def read(self, session_id, *, limit=50, before_sequence=None, after_sequence=None):
+        return self._page_view(
+            await self._store.read(
+                session_id,
+                limit=limit,
+                before_sequence=before_sequence,
+                after_sequence=after_sequence,
+            )
+        )
+
+    async def _parse_upload(self, filename: str, content: bytes) -> TurnDocument:
         if PurePath(filename).suffix.casefold() != ".docx":
             raise AppError("UNSUPPORTED_DOCUMENT_TYPE", "只支持 DOCX 文档", 415)
         if not content:
@@ -157,329 +189,341 @@ class ConversationService:
             status = 413 if exc.code in {"UPLOAD_TOO_LARGE", "REVIEW_CONTENT_TOO_LONG"} else 422
             raise AppError(exc.code, exc.message, status) from exc
         name = " ".join(filename.replace("\\", "/").split("/")[-1].split())[:200]
-        return SessionDocument(id=str(uuid4()), filename=name or "文档.docx", markdown=markdown)
+        return TurnDocument(id=str(uuid4()), filename=name or "文档.docx", markdown=markdown)
 
-    async def upload(self, id: str, filename: str, content: bytes) -> DocumentView:
+    async def upload(self, session_id: str, filename: str, content: bytes):
         self._check_open()
-        async with self._store.locked(id) as record:
-            if record.active_run_id or record.uploading:
+        async with self._active.operation(session_id):
+            self._check_open()
+            if session_id in self._uploads:
+                raise AppError("CONVERSATION_BUSY", "请等待当前上传完成", 409)
+            self._active.reserve(len(content))
+            self._uploads[session_id] = asyncio.current_task()
+        try:
+            page = await self._store.read(session_id)
+            self._check_open()
+            if page.active_run_id:
                 raise AppError("CONVERSATION_BUSY", "请等待当前操作完成", 409)
-            if len(record.documents) >= 8:
-                raise AppError("CONVERSATION_CAPACITY", "每个会话最多上传 8 份材料", 413)
-            self._store.reserve(len(content))
-            record.uploading = True
-            self._uploads[id] = asyncio.current_task()
+            cancelled = asyncio.Event()
+            task = asyncio.create_task(
+                self._save_upload(session_id, page, filename, content, cancelled)
+            )
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled.set()
+                # 文件写入与解析线程无法强制终止，反复取消也必须等待清理结束。
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if not task.cancelled():
+                    task.exception()
+                raise
+        finally:
+            self._active.release(len(content))
+            self._uploads.pop(session_id, None)
+
+    async def _save_upload(self, session_id, page, filename, content, cancelled):
+        staged, paths, document = None, None, None
+        confirmed = False
         try:
             async with self._parse_slots:
                 document = await self._parse_upload(filename, content)
-            async with self._store.locked(id) as record:
-                if (
-                    sum(len(d.markdown) for d in record.documents.values()) + len(document.markdown)
-                    > 100000
+                self._check_open()
+                if cancelled.is_set():
+                    raise asyncio.CancelledError
+                if len(page.files) >= 8 or (
+                    sum(f.content_chars for f in page.files) + len(document.markdown) > 100000
                 ):
-                    raise AppError("CONVERSATION_CAPACITY", "会话材料正文合计超过限制", 413)
-                amount = len(document.markdown.encode("utf-8"))
-                self._store.reserve(amount)
-                record.bytes_used += amount
-                record.documents[document.id] = document
-                self._store.touch(id)
-                return self._document_view(document)
+                    raise AppError("CONVERSATION_CAPACITY", "会话材料超过限制", 413)
+                staged = await asyncio.to_thread(
+                    self._files.stage,
+                    page.summary.agent_id,
+                    session_id,
+                    document.id,
+                    content,
+                    document.markdown,
+                )
+                if cancelled.is_set():
+                    raise asyncio.CancelledError
+                paths = await asyncio.to_thread(self._files.publish, staged)
+                if cancelled.is_set():
+                    raise asyncio.CancelledError
+                metadata = SessionFile(
+                    file_id=document.id, session_id=session_id, original_name=document.filename,
+                    source_path=paths.source_path, content_path=paths.content_path,
+                    size_bytes=len(content), content_chars=len(document.markdown),
+                )
+                saved = await self._store.add_file(session_id, metadata)
+                confirmed = True
+                return self._file_view(saved)
         finally:
-            self._store.release(len(content))
-            record = self._store.peek(id)
-            if record:
-                record.uploading = False
-            self._uploads.pop(id, None)
+            if paths and not confirmed:
+                try:
+                    await self._store.get_file(session_id, document.id)
+                except AppError as exc:
+                    if exc.code == "MATERIAL_NOT_FOUND":
+                        await asyncio.to_thread(self._files.discard_published, paths)
+                    else:
+                        logger.warning("upload_commit_unconfirmed file_id=%s", document.id)
+                except Exception:
+                    logger.warning("upload_commit_unconfirmed file_id=%s", document.id)
+            if staged:
+                await asyncio.to_thread(self._files.discard_staged, staged)
 
-    async def submit(self, id: str, payload: MessageCreate) -> RunView:
+    async def submit(self, session_id: str, payload: MessageCreate):
         self._check_open()
         if self.runtime is None:
             raise AppError("SERVICE_NOT_READY", "聊天模型尚未配置就绪", 503)
         request = SessionSubmission(
-            payload.client_message_id,
-            payload.content,
-            tuple(payload.document_ids),
+            payload.client_message_id, payload.content, tuple(payload.file_ids)
         )
-        async with self._store.locked(id) as record:
-            for run in record.runs.values():
-                if run.request.client_message_id == payload.client_message_id:
-                    if run.request != request:
-                        raise AppError("MESSAGE_CONFLICT", "消息标识已用于其他内容", 409)
-                    return self._run_view(run)
-            if record.active_run_id or record.uploading:
-                raise AppError("CONVERSATION_BUSY", "请等待当前操作完成", 409)
-            if len(record.messages) > 98:
-                raise AppError("CONVERSATION_CAPACITY", "本会话消息已满，请新建会话", 413)
-            if any(doc_id not in record.documents for doc_id in payload.document_ids):
-                raise AppError("MATERIAL_NOT_FOUND", "会话材料不存在", 404)
-            if (
-                len(self._tasks)
-                >= self.settings.conversation_concurrency + self.settings.conversation_queue_size
-            ):
-                raise AppError("CONVERSATION_BUSY", "会话执行繁忙，请稍后重试", 503)
-            chars = sum(
-                len(m.content) + (len(m.agent_call.output) if m.agent_call else 0)
-                for m in record.messages
-            )
-            if chars + len(payload.content) > 1000000:
-                raise AppError("CONVERSATION_CAPACITY", "会话文字容量已满", 413)
-            amount = len(payload.content.encode("utf-8")) + 1088
-            self._store.reserve(amount)
-            record.bytes_used += amount
-            run = SessionRun(
-                id=str(uuid4()),
-                request=request,
-                request_id=observation_attributes.get().get("request_id"),
-            )
-            record.messages.append(
-                SessionMessage(
-                    id=str(uuid4()),
-                    sequence=len(record.messages) + 1,
-                    role="user",
-                    content=payload.content,
-                    document_ids=tuple(payload.document_ids),
-                    run_id=run.id,
-                )
-            )
-            record.runs[run.id] = run
-            record.active_run_id = run.id
-            self._store.touch(id)
-            self._tasks[run.id] = asyncio.create_task(self._execute(id, run.id))
-            return self._run_view(run)
+        async with self._active.operation(session_id):
+            self._check_open()
+            if session_id in self._uploads:
+                raise AppError("CONVERSATION_BUSY", "请等待当前上传完成", 409)
+            reserved = not self._admission.locked()
+            if reserved:
+                await self._admission.acquire()
+            created = False
+            submitting = asyncio.current_task()
+            self._submissions.add(submitting)
+            try:
+                result = await self._store.submit(session_id, request, allow_create=reserved)
+                self._check_open()
+                created = result.created
+                if (
+                    not created
+                    and result.run.status not in TERMINAL_STATUSES
+                    and result.run.run_id not in self._tasks
+                    and result.run.run_id not in self._run_sessions
+                ):
+                    text = "服务中断，本次处理未完成，请重新提交"
+                    recovered = await self._store.finish(
+                        session_id,
+                        result.run.run_id,
+                        RunCompletion(
+                            "failed",
+                            text,
+                            error_code="CONVERSATION_INTERRUPTED",
+                            error_message=text,
+                        ),
+                    )
+                    return self._run_view(recovered)
+                if created:
+                    run = result.run
+                    run.request_id = observation_attributes.get().get("request_id")
+                    self._active.attach(session_id, run)
+                    self._run_sessions[run.run_id] = session_id
+                    task = asyncio.create_task(self._execute(session_id, run))
+                    self._tasks[run.run_id] = task
+                    task.add_done_callback(lambda done, key=run.run_id: self._task_done(key, done))
+                return self._run_view(result.run)
+            finally:
+                self._submissions.discard(submitting)
+                if reserved and not created:
+                    self._admission.release()
 
-    async def read_run(self, id: str, run_id: str) -> RunView:
-        run = self._store.record(id).runs.get(run_id)
-        if run is None:
-            raise AppError("RUN_NOT_FOUND", "会话运行不存在", 404)
-        return self._run_view(run)
+    def _task_done(self, run_id, task):
+        self._tasks.pop(run_id, None)
+        self._admission.release()
+        if not task.cancelled():
+            task.exception()  # _execute reports errors; consume cancellation-cleanup exceptions.
 
-    def stream_run(self, id: str, run_id: str) -> AsyncIterator[RunEvent]:
-        # 在返回 HTTP 流之前校验；捕获本次记录，TTL 清理后仍能送出它的终态。
-        run = self._store.record(id).runs.get(run_id)
-        if run is None:
-            raise AppError("RUN_NOT_FOUND", "会话运行不存在", 404)
+    async def read_run(self, session_id, run_id):
+        return self._run_view(await self._store.read_run(session_id, run_id))
+
+    async def stream_run(self, session_id, run_id) -> AsyncIterator[RunEvent]:
+        persisted = await self._store.read_run(session_id, run_id)
+        notification = self._active.subscribe(run_id)
+        initial = self._active.snapshot(run_id)
+        if notification is None and persisted.status not in TERMINAL_STATUSES:
+            persisted = await self._store.read_run(session_id, run_id)
 
         async def events():
-            offset = len(run.stream_text)
-            state = (run.status, run.stage)
-            yield RunEvent(event="snapshot", run=self._run_view(run), text=run.stream_text)
+            offset = len(initial.text) if initial else 0
+            state = (persisted.status, initial.stage if initial else persisted.stage)
+            yield RunEvent(
+                event="snapshot",
+                run=self._run_view(persisted),
+                text=initial.text if initial else "",
+            )
             while True:
-                run.stream_changed.clear()
-                revision = run.stream_revision
+                if self._unavailable:
+                    raise AppError("STORAGE_UNAVAILABLE", "回答保存状态未确认，请重新连接", 503)
+                active = notification
+                run = active.run if active else persisted
                 if run.status in TERMINAL_STATUSES:
                     yield RunEvent(event="done", run=self._run_view(run))
                     return
-                if state != (run.status, run.stage):
-                    state = (run.status, run.stage)
+                if active is None:
+                    raise AppError("STORAGE_UNAVAILABLE", "运行状态不可用，请重新连接", 503)
+                revision = active.revision
+                if state != (run.status, active.stage):
+                    state = (run.status, active.stage)
                     yield RunEvent(event="state", run=self._run_view(run))
-                text = run.stream_text[offset:]
-                offset += len(text)
+                text = active.text[offset:]
+                offset = len(active.text)
                 if text:
                     yield RunEvent(event="delta", text=text)
-                # yield 期间生产者可能已更新；先检查版本再等待，避免慢读者丢唤醒。
-                if run.stream_revision != revision:
-                    continue
-                await run.stream_changed.wait()
+                active.changed.clear()
+                if active.revision == revision:
+                    await active.changed.wait()
 
         return events()
 
-    def _receive_event(self, id: str, run_id: str, event: AgentEvent) -> None:
+    def _receive_event(self, run_id, event: AgentEvent):
+        self._check_open()
         if event.kind == "text_delta":
-            self._store.append_run_text(id, run_id, event.text)
+            self._active.append_text(run_id, event.text)
         elif event.kind == "stage":
-            run = self._store.record(id).runs[run_id]
-            if run.status not in TERMINAL_STATUSES and run.stage != event.text:
-                run.stage = event.text
-                self._store.notify_run(run)
+            self._active.set_stage(run_id, event.text)
 
-    async def cancel(self, id: str, run_id: str) -> RunView:
-        run = await self.read_run(id, run_id)
+    async def _finish(self, session_id, run_id, completion):
+        if self._unavailable:
+            return
+        try:
+            committed = await self._store.finish(session_id, run_id, completion)
+        except Exception:
+            self.storage_unavailable()
+            raise
+        self._active.complete(run_id, committed)
+        self._active.discard(run_id)
+        self._run_sessions.pop(run_id, None)
+        return committed
+
+    async def _cleanup_run(self, session_id, run_id, completion):
+        if self._unavailable:
+            return
+
+        async def finish():
+            async with asyncio.timeout(10):
+                await self._finish(session_id, run_id, completion)
+
+        cleanup = asyncio.create_task(finish())
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                continue
+        cleanup.result()
+
+    async def cancel(self, session_id, run_id):
+        run = await self._store.read_run(session_id, run_id)
         if run.status not in TERMINAL_STATUSES:
             task = self._tasks.get(run_id)
             if task:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
-            self._finish(id, run_id, "cancelled", "已停止。")
-            self._tasks.pop(run_id, None)
-        return await self.read_run(id, run_id)
+            await self._cleanup_run(session_id, run_id, RunCompletion("cancelled", "已停止。"))
+        return await self.read_run(session_id, run_id)
 
-    def _finish(
-        self,
-        id: str,
-        run_id: str,
-        status: str,
-        text: str,
-        *,
-        call: ChildAgentResult | None = None,
-        error: SafeError | None = None,
-        continuation: ContinuationState | None = None,
-    ) -> None:
-        record = self._store.peek(id)
-        if record is None:
-            return
-        run = record.runs[run_id]
-        if run.status in TERMINAL_STATUSES:
-            return
-        self._store.clear_run_text(record, run)
-        amount = len(text.encode("utf-8")) + (len(call.output.encode("utf-8")) if call else 0)
-        total_chars = (
-            sum(
-                len(m.content) + (len(m.agent_call.output) if m.agent_call else 0)
-                for m in record.messages
+    async def _load_materials(self, files):
+        documents = []
+        for file in files:
+            markdown = await asyncio.to_thread(self._files.read_markdown, file.content_path)
+            if len(markdown) != file.content_chars:
+                raise AppError("FILE_UNAVAILABLE", "材料文件不可用，请重新上传", 503)
+            documents.append(
+                TurnDocument(id=file.file_id, filename=file.original_name, markdown=markdown)
             )
-            + len(text)
-            + (len(call.output) if call else 0)
-        )
-        try:
-            if total_chars > 1000000:
-                raise AppError("CONVERSATION_CAPACITY", "会话输出超过容量限制", 413)
-            self._store.reserve(max(0, amount - 1024))
-        except AppError as exc:
-            status, text, call, continuation = "failed", exc.message, None, None
-            error = SafeError(code=exc.code, message=exc.message)
-            amount = len(text.encode("utf-8"))
-        if amount < 1024:
-            self._store.release(1024 - amount)
-        record.bytes_used += amount - 1024
-        message = SessionMessage(
-            id=str(uuid4()),
-            sequence=len(record.messages) + 1,
-            role="assistant",
-            content=text,
-            run_id=run_id,
-            agent_call=call,
-        )
-        record.messages.append(message)
-        run.status, run.stage, run.message = (
-            status,
-            text if status != "succeeded" else "已完成",
-            message,
-        )
-        run.error_code = error.code if error else None
-        run.error_message = error.message if error else None
-        record.active_run_id = None
-        record.continuation = (
-            continuation.model_copy(deep=True, update={"question_message_id": message.id})
-            if continuation
-            else None
-        )
-        self._store.notify_run(run)
+        return tuple(documents)
 
-    async def _execute(self, id: str, run_id: str) -> None:
-        run = self._store.record(id).runs[run_id]
-        attrs = {"session_id": id, "run_id": run_id, "request_id": run.request_id or ""}
+    async def _execute(self, session_id, run):
+        acquired = False
+        attrs = {"session_id": session_id, "run_id": run.run_id, "request_id": run.request_id or ""}
         with bind_observation_attributes(attrs):
             with self._observer.scope("conversation.run", attributes=attrs, detached=True) as span:
                 try:
-                    await self._execute_run(id, run_id)
+                    async with asyncio.timeout(self.settings.conversation_queue_timeout_seconds):
+                        await self._slots.acquire()
+                        acquired = True
+                    async with asyncio.timeout(self.settings.conversation_run_timeout_seconds):
+                        started = await self._store.start(session_id, run.run_id)
+                        self._active.update_run(started)
+                        self._active.set_stage(run.run_id, "正在处理你的请求")
+                        snapshot = await self._store.snapshot(session_id)
+                        turn = ConversationTurnInput(
+                            latest_message_id=snapshot.latest_message_id,
+                            messages=tuple(
+                                TurnMessage(
+                                    id=m.message_id, role=m.role, content=m.content,
+                                    document_ids=m.file_ids, agent_call=m.agent_call,
+                                )
+                                for m in snapshot.messages
+                            ),
+                            documents=await self._load_materials(snapshot.files.values()),
+                            continuation=snapshot.continuation,
+                        )
+                        execution = await self.runtime.invoke(
+                            "conversation_assistant",
+                            turn.model_dump(),
+                            on_event=lambda event: self._receive_event(run.run_id, event),
+                        )
+                        if asyncio.current_task().cancelling():
+                            raise asyncio.CancelledError
+                        result = ConversationTurnResult.model_validate(execution.output)
+                        final = await self._finish(
+                            session_id,
+                            run.run_id,
+                            RunCompletion(
+                                "succeeded",
+                                result.reply,
+                                child_call=result.child_call,
+                                continuation=result.continuation,
+                            ),
+                        )
+                        if final:
+                            run.status = final.status
+                except asyncio.CancelledError:
+                    await self._cleanup_run(
+                        session_id, run.run_id, RunCompletion("cancelled", "已停止。")
+                    )
+                    run.status = "cancelled"
+                    raise
+                except Exception as exc:
+                    code = (
+                        "CONVERSATION_TIMEOUT"
+                        if isinstance(exc, TimeoutError)
+                        else exc.code
+                        if isinstance(exc, AppError)
+                        else "CONVERSATION_FAILED"
+                    )
+                    message = (
+                        "处理超时，请稍后重新提交。"
+                        if isinstance(exc, TimeoutError)
+                        else exc.message
+                        if isinstance(exc, AppError)
+                        else "本次处理失败，请稍后重试。"
+                    )
+                    logger.warning(
+                        "conversation_failed run_id=%s code=%s error_type=%s",
+                        run.run_id,
+                        code,
+                        type(exc).__name__,
+                    )
+                    await self._cleanup_run(
+                        session_id,
+                        run.run_id,
+                        RunCompletion("failed", message, error_code=code, error_message=message),
+                    )
+                    run.status = "failed"
                 finally:
+                    if acquired:
+                        self._slots.release()
                     span.update(attributes={"status": run.status})
 
-    async def _execute_run(self, id: str, run_id: str) -> None:
-        acquired = False
-        try:
-            async with asyncio.timeout(self.settings.conversation_queue_timeout_seconds):
-                await self._slots.acquire()
-                acquired = True
-            async with asyncio.timeout(self.settings.conversation_run_timeout_seconds):
-                record = self._store.record(id)
-                run = record.runs[run_id]
-                run.status, run.stage = "running", "正在处理你的请求"
-                self._store.notify_run(run)
-                snapshot = self._store.snapshot(record)
-                turn = ConversationTurnInput(
-                    latest_message_id=snapshot.latest_message_id,
-                    messages=tuple(
-                        TurnMessage.model_validate(
-                            m.model_dump(
-                                exclude={"sequence", "run_id"},
-                            )
-                        )
-                        for m in snapshot.messages
-                    ),
-                    documents=tuple(
-                        TurnDocument.model_validate(d.model_dump())
-                        for d in snapshot.documents.values()
-                    ),
-                    continuation=snapshot.continuation,
-                )
-                execution = await self.runtime.invoke(
-                    "conversation_assistant",
-                    turn.model_dump(),
-                    on_event=lambda event: self._receive_event(id, run_id, event),
-                )
-                if asyncio.current_task().cancelling():
-                    raise asyncio.CancelledError
-                result = ConversationTurnResult.model_validate(execution.output)
-                self._finish(
-                    id,
-                    run_id,
-                    "succeeded",
-                    result.reply,
-                    call=result.child_call,
-                    continuation=result.continuation,
-                )
-        except asyncio.CancelledError:
-            self._finish(id, run_id, "cancelled", "已停止。")
-            raise
-        except TimeoutError:
-            self._finish(
-                id,
-                run_id,
-                "failed",
-                "处理超时，请稍后重新提交。",
-                error=SafeError(code="CONVERSATION_TIMEOUT", message="处理超时"),
-            )
-        except Exception as exc:
-            code = exc.code if isinstance(exc, AppError) else "CONVERSATION_FAILED"
-            message = exc.message if isinstance(exc, AppError) else "本次处理失败，请稍后重试。"
-            logger.warning(
-                "conversation_failed run_id=%s code=%s error_type=%s",
-                run_id,
-                code,
-                type(exc).__name__,
-            )
-            self._finish(id, run_id, "failed", message, error=SafeError(code=code, message=message))
-        finally:
-            if acquired:
-                self._slots.release()
-            self._tasks.pop(run_id, None)
-
-    async def _reap(self) -> None:
-        while not self._stop.is_set():
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=60)
-            except TimeoutError:
-                await self._expire_sessions()
-
-    async def _expire_sessions(self) -> None:
-        for id in self._store.expire():
-            record = self._store.peek(id)
-            if record and record.active_run_id:
-                run_id = record.active_run_id
-                task = self._tasks.get(run_id)
-                if task:
-                    task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
-                self._finish(id, run_id, "cancelled", "会话已到期。")
-            upload = self._uploads.get(id)
-            if upload:
-                upload.cancel()
-                await asyncio.gather(upload, return_exceptions=True)
-        self._store.expire()
-
-    async def aclose(self) -> None:
+    async def aclose(self):
         self._closed = True
-        self._stop.set()
-        tasks = list(self._tasks.values()) + list(self._uploads.values())
+        tasks = list(self._tasks.values()) + list(self._uploads.values()) + list(self._submissions)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        # 尚未首次调度的 task 被取消时不会进入 _execute_run，必须显式发布终态。
-        for id, run_id in self._store.active_runs():
-            self._finish(id, run_id, "cancelled", "服务已关闭。")
-        if self._reaper:
-            await self._reaper
-        self._tasks.clear()
-        self._uploads.clear()
-        self._store.clear()
+        for run_id, session_id in list(self._run_sessions.items()):
+            await self._cleanup_run(session_id, run_id, RunCompletion("cancelled", "服务已关闭。"))
+        await self._active.aclose()
+        await self._store.aclose()

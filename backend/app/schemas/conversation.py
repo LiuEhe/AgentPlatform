@@ -1,5 +1,6 @@
 """会话 HTTP 数据契约；附件可选，业务输出与聊天消息分开。"""
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -12,16 +13,16 @@ class MessageCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     client_message_id: str = Field(min_length=1, max_length=128)
     content: str = Field(min_length=1, max_length=12000)
-    document_ids: list[str] = Field(default_factory=list, max_length=8)
+    file_ids: list[str] = Field(default_factory=list, max_length=8)
 
     @field_validator("content", "client_message_id")
     @classmethod
     def nonblank(cls, value: str) -> str:
-        if not value.strip():
+        if not value.strip() or "\x00" in value:
             raise ValueError("内容不能为空")
         return value
 
-    @field_validator("document_ids")
+    @field_validator("file_ids")
     @classmethod
     def unique_ids(cls, value: list[str]) -> list[str]:
         if len(value) != len(set(value)) or any(not item for item in value):
@@ -34,14 +35,16 @@ class SafeError(BaseModel):
     message: str
 
 
-class DocumentView(BaseModel):
-    id: str
-    filename: str
-    chars: int
+class FileView(BaseModel):
+    file_id: str
+    original_name: str
+    size_bytes: int
+    content_chars: int
+    created_at: datetime
 
 
 class AgentCallView(BaseModel):
-    id: str
+    call_id: str
     agent_id: str
     agent_name: str
     invocation_id: str | None = None
@@ -52,17 +55,18 @@ class AgentCallView(BaseModel):
 
 
 class MessageView(BaseModel):
-    id: str
+    message_id: str
     sequence: int
     role: Literal["user", "assistant"]
     content: str
-    document_ids: list[str] = Field(default_factory=list)
+    file_ids: list[str] = Field(default_factory=list)
     run_id: str | None = None
     agent_call: AgentCallView | None = None
+    created_at: datetime
 
 
 class RunView(BaseModel):
-    id: str
+    run_id: str
     client_message_id: str
     status: RunStatus
     stage: str
@@ -70,13 +74,27 @@ class RunView(BaseModel):
     error: SafeError | None = None
 
 
-class ConversationView(BaseModel):
-    id: str
-    expires_in_seconds: int
+class SessionSummaryView(BaseModel):
+    session_id: str
+    agent_id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class SessionListView(BaseModel):
+    items: list[SessionSummaryView]
+    next_cursor: str | None
+
+
+class SessionView(SessionSummaryView):
     messages: list[MessageView]
-    documents: list[DocumentView]
+    files: list[FileView]
     active_run_id: str | None
     last_sequence: int
+    has_more: bool = False
+    next_before_sequence: int | None = None
+    next_after_sequence: int | None = None
 
 
 class RunEvent(BaseModel):
