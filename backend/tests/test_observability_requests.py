@@ -10,9 +10,9 @@ def test_poll_and_health_do_not_create_remote_traces(monkeypatch):
     monkeypatch.setattr("app.main.create_observer", lambda _: observer)
     with TestClient(create_app(Settings(_env_file=None))) as client:
         assert client.get("/health/live").status_code == 200
-        assert client.get("/api/v1/conversations/missing").status_code == 404
+        assert client.get("/api/v1/sessions/missing").status_code == 404
         assert observer.records == []
-        result = client.post("/api/v1/conversations")
+        result = client.post("/api/v1/sessions")
         assert result.status_code == 201
         assert result.headers["X-Request-ID"]
         assert len(observer.records) == 1

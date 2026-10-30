@@ -1,11 +1,13 @@
 import asyncio
 import threading
+from uuid import UUID, uuid4
 
 import pytest
 
 from app.core.config import Settings
 from app.core.errors import AppError
-from app.infrastructure.conversation.in_memory_store import InMemoryConversationStore
+from app.infrastructure.conversation.active_runs import ActiveRunRegistry
+from app.infrastructure.conversation.postgres_store import PostgresConversationStore
 from app.runtime.agent_runtime import AgentEvent, AgentExecution
 from app.schemas.conversation import MessageCreate
 from app.schemas.conversation_turn import (
@@ -50,34 +52,32 @@ def test_stream_snapshot_delta_reconnect_and_multiple_readers_share_one_task():
                 return AgentExecution("stream", agent_id, ConversationTurnResult(reply="你好"))
 
         runtime = StreamingRuntime()
-        service = make_service(runtime)
+        service = await make_service(runtime)
         session = await service.create()
         run = await service.submit(
-            session.id, MessageCreate(client_message_id="s1", content="你好")
+            session.session_id, MessageCreate(client_message_id="s1", content="你好")
         )
         await asyncio.wait_for(first.wait(), 1)
-        reader = service.stream_run(session.id, run.id)
+        reader = await service.stream_run(session.session_id, run.run_id)
         snapshot = await anext(reader)
         assert snapshot.event == "snapshot" and snapshot.text == "你"
         assert snapshot.run.status == "running"
-        assert service._store.record(session.id).runs[run.id].stream_bytes == len("你".encode())
-        second = service.stream_run(session.id, run.id)
+        assert service._active.used_bytes == len("你".encode())
+        second = await service.stream_run(session.session_id, run.run_id)
         assert (await anext(second)).text == "你"
         # 关闭一个订阅不会取消任务；新订阅直接取得累计文本，不重跑模型。
         await second.aclose()
-        reconnect = service.stream_run(session.id, run.id)
+        reconnect = await service.stream_run(session.session_id, run.run_id)
         assert (await anext(reconnect)).text == "你"
         finish.set()
         events = [event async for event in reader]
         assert events[-1].event == "done" and events[-1].run.message.content == "你好"
         assert (await anext(reconnect)).event == "done"
         assert len(runtime.calls) == 1
-        stored = service._store.record(session.id)
-        assert stored.runs[run.id].stream_text == "" and stored.runs[run.id].stream_bytes == 0
-        assert service._store.used_bytes == stored.bytes_used
+        assert service._active.used_bytes == 0
         await reconnect.aclose()
         await service.aclose()
-        assert service._store.used_bytes == 0
+        assert service._active.used_bytes == 0
 
     asyncio.run(scenario())
 
@@ -92,12 +92,12 @@ def test_stream_delta_arrives_before_completion_and_cancel_wakes_reader():
                 on_event(AgentEvent("text_delta", "第一段"))
                 await finish.wait()
 
-        service = make_service(StreamingRuntime())
+        service = await make_service(StreamingRuntime())
         session = await service.create()
         run = await service.submit(
-            session.id, MessageCreate(client_message_id="s1", content="你好")
+            session.session_id, MessageCreate(client_message_id="s1", content="你好")
         )
-        reader = service.stream_run(session.id, run.id)
+        reader = await service.stream_run(session.session_id, run.run_id)
         assert (await anext(reader)).event == "snapshot"
         emitted.set()
         delta = None
@@ -105,8 +105,8 @@ def test_stream_delta_arrives_before_completion_and_cancel_wakes_reader():
             event = await asyncio.wait_for(anext(reader), 1)
             if event.event == "delta":
                 delta = event
-        assert delta.text == "第一段" and not service._tasks[run.id].done()
-        await service.cancel(session.id, run.id)
+        assert delta.text == "第一段" and not service._tasks[run.run_id].done()
+        await service.cancel(session.session_id, run.run_id)
         done = await asyncio.wait_for(anext(reader), 1)
         assert done.event == "done" and done.run.status == "cancelled"
         assert "第一段" not in done.run.message.content
@@ -123,17 +123,18 @@ def test_stream_capacity_failure_releases_partial_text_and_wakes_subscriber():
                 on_event(AgentEvent("text_delta", "x" * 30))
                 on_event(AgentEvent("text_delta", "x" * 100))
 
-        service = make_service(
-            OverflowRuntime(), settings=Settings(_env_file=None, conversation_max_bytes=1140)
+        service = await make_service(
+            OverflowRuntime(),
+            settings=Settings(_env_file=None, conversation_transient_max_bytes=100),
         )
         session = await service.create()
-        run = await service.submit(session.id, MessageCreate(client_message_id="s1", content="hi"))
+        run = await service.submit(
+            session.session_id, MessageCreate(client_message_id="s1", content="hi")
+        )
         result = await complete(service, session, run)
         assert result.status == "failed" and result.error.code == "CONVERSATION_CAPACITY"
-        record = service._store.record(session.id)
-        assert record.runs[run.id].stream_text == "" and record.runs[run.id].stream_bytes == 0
-        assert record.bytes_used == service._store.used_bytes <= 1140
-        reader = service.stream_run(session.id, run.id)
+        assert service._active.used_bytes == 0
+        reader = await service.stream_run(session.session_id, run.run_id)
         assert (await anext(reader)).event == "snapshot"
         assert (await anext(reader)).event == "done"
         await reader.aclose()
@@ -142,78 +143,82 @@ def test_stream_capacity_failure_releases_partial_text_and_wakes_subscriber():
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("ending", ["expiry", "shutdown"])
-def test_stream_lifecycle_wakes_waiters_after_record_cleanup(ending):
+def test_shutdown_wakes_existing_subscriber():
     async def scenario():
-        clock = [0.0]
-        runtime = Runtime(gate=asyncio.Event())
-        service = make_service(
-            runtime,
-            clock=lambda: clock[0],
-            settings=Settings(_env_file=None, conversation_lifetime_seconds=1),
-        )
+        service = await make_service(Runtime(gate=asyncio.Event()))
         session = await service.create()
-        run = await service.submit(session.id, MessageCreate(client_message_id="m1", content="hi"))
-        await runtime.entered.wait()
-        reader = service.stream_run(session.id, run.id)
-        assert (await anext(reader)).event == "snapshot"
+        run = await service.submit(
+            session.session_id, MessageCreate(client_message_id="shutdown", content="hi")
+        )
+        await service.runtime.entered.wait()
+        reader = await service.stream_run(session.session_id, run.run_id)
+        await anext(reader)
         waiting = asyncio.create_task(anext(reader))
         await asyncio.sleep(0)
-        if ending == "expiry":
-            clock[0] = 2
-            await service._expire_sessions()
-        else:
-            await service.aclose()
+        await service.aclose()
         event = await asyncio.wait_for(waiting, 1)
         assert event.event == "done" and event.run.status == "cancelled"
-        assert service._store.used_bytes == 0
+        assert service._active.used_bytes == 0
         await reader.aclose()
-        await service.aclose()
 
     asyncio.run(scenario())
 
 
 def test_shutdown_publishes_terminal_event_for_a_task_not_scheduled_yet():
     async def scenario():
-        service = make_service(Runtime(gate=asyncio.Event()))
+        service = await make_service(Runtime(gate=asyncio.Event()))
         session = await service.create()
-        run = await service.submit(session.id, MessageCreate(client_message_id="m1", content="hi"))
-        reader = service.stream_run(session.id, run.id)
-        assert (await anext(reader)).run.status == "queued"
+        run = await service.submit(
+            session.session_id, MessageCreate(client_message_id="m1", content="hi")
+        )
+        reader = await service.stream_run(session.session_id, run.run_id)
+        assert (await anext(reader)).run.status in {"queued", "running"}
         # 没有让 _execute 获得调度；取消未启动的 task 不会执行它的 finally。
         await service.aclose()
         done = await asyncio.wait_for(anext(reader), 0.1)
         assert done.event == "done" and done.run.status == "cancelled"
-        assert service._store.used_bytes == 0
+        assert service._active.used_bytes == 0
         await reader.aclose()
 
     asyncio.run(scenario())
 
 
-def make_service(runtime=None, *, settings=None, clock=lambda: 0.0):
+POSTGRES_TARGET = ("", "")
+
+
+@pytest.fixture(autouse=True)
+def service_target(postgres_target, monkeypatch):
+    monkeypatch.setitem(globals(), "POSTGRES_TARGET", postgres_target)
+
+
+async def make_service(runtime=None, *, settings=None):
+    from pydantic import SecretStr
+
     settings = settings or Settings(_env_file=None)
-    store = InMemoryConversationStore(
-        idle_seconds=settings.conversation_idle_seconds,
-        lifetime_seconds=settings.conversation_lifetime_seconds,
-        max_sessions=settings.conversation_max_sessions,
-        max_bytes=settings.conversation_max_bytes,
-        clock=clock,
+    dsn, schema = POSTGRES_TARGET
+    settings = settings.model_copy(update={"database_url": SecretStr(dsn)})
+    store = PostgresConversationStore(settings, _schema=schema)
+    await store.initialize()
+    return ConversationService(
+        settings,
+        runtime or Runtime(),
+        store=store,
+        active_runs=ActiveRunRegistry(max_bytes=settings.conversation_transient_max_bytes),
     )
-    return ConversationService(settings, runtime or Runtime(), store=store)
 
 
 async def complete(service, session, run):
-    await service._tasks[run.id]
-    return await service.read_run(session.id, run.id)
+    await service._tasks[run.run_id]
+    return await service.read_run(session.session_id, run.run_id)
 
 
 def test_chat_without_upload_never_calls_child():
     async def scenario():
         runtime = Runtime()
-        service = make_service(runtime)
+        service = await make_service(runtime)
         session = await service.create()
         run = await service.submit(
-            session.id, MessageCreate(client_message_id="m1", content="你好")
+            session.session_id, MessageCreate(client_message_id="m1", content="你好")
         )
         result = await complete(service, session, run)
         assert result.status == "succeeded" and result.message.content == "你好"
@@ -233,19 +238,19 @@ def test_continuation_is_opaque_and_linked_to_saved_message():
                 ConversationTurnResult(reply="完成"),
             ]
         )
-        service = make_service(runtime)
+        service = await make_service(runtime)
         session = await service.create()
         for index in range(2):
             run = await service.submit(
-                session.id, MessageCreate(client_message_id=str(index), content="输入")
+                session.session_id, MessageCreate(client_message_id=str(index), content="输入")
             )
             result = await complete(service, session, run)
             if index == 0:
-                continuation = service._store.record(session.id).continuation
+                continuation = (await service._store.snapshot(session.session_id)).continuation
                 assert continuation.payload == {"task": {"x": 1}}
-                assert continuation.question_message_id == result.message.id
+                assert continuation.question_message_id == result.message.message_id
         assert runtime.calls[1][1]["continuation"]["payload"] == {"task": {"x": 1}}
-        assert service._store.record(session.id).continuation is None
+        assert (await service._store.snapshot(session.session_id)).continuation is None
         await service.aclose()
 
     asyncio.run(scenario())
@@ -254,18 +259,20 @@ def test_continuation_is_opaque_and_linked_to_saved_message():
 def test_same_client_message_id_reuses_run():
     async def scenario():
         runtime = Runtime()
-        service = make_service(runtime)
+        service = await make_service(runtime)
         session = await service.create()
         payload = MessageCreate(client_message_id="m1", content="你好")
-        first = await service.submit(session.id, payload)
-        second = await service.submit(session.id, payload)
-        assert first.id == second.id
+        first = await service.submit(session.session_id, payload)
+        second = await service.submit(session.session_id, payload)
+        assert first.run_id == second.run_id
         with pytest.raises(AppError) as error:
-            await service.submit(session.id, payload.model_copy(update={"content": "不同正文"}))
+            await service.submit(
+                session.session_id, payload.model_copy(update={"content": "不同正文"})
+            )
         assert error.value.status_code == 409
         await complete(service, session, first)
         assert len(runtime.calls) == 1
-        assert len((await service.read(session.id)).messages) == 2
+        assert len((await service.read(session.session_id)).messages) == 2
         await service.aclose()
 
     asyncio.run(scenario())
@@ -274,17 +281,17 @@ def test_same_client_message_id_reuses_run():
 def test_cancel_releases_capacity():
     async def scenario():
         runtime = Runtime(gate=asyncio.Event())
-        service = make_service(runtime)
+        service = await make_service(runtime)
         session = await service.create()
         run = await service.submit(
-            session.id, MessageCreate(client_message_id="m1", content="你好")
+            session.session_id, MessageCreate(client_message_id="m1", content="你好")
         )
         await runtime.entered.wait()
-        assert (await service.cancel(session.id, run.id)).status == "cancelled"
-        assert (await service.read(session.id)).active_run_id is None
+        assert (await service.cancel(session.session_id, run.run_id)).status == "cancelled"
+        assert (await service.read(session.session_id)).active_run_id is None
         runtime.gate.set()
         second = await service.submit(
-            session.id, MessageCreate(client_message_id="m2", content="你好")
+            session.session_id, MessageCreate(client_message_id="m2", content="你好")
         )
         await complete(service, session, second)
         await service.aclose()
@@ -295,14 +302,14 @@ def test_cancel_releases_capacity():
 def test_close_waits_for_tasks():
     async def scenario():
         runtime = Runtime(gate=asyncio.Event())
-        service = make_service(runtime)
+        service = await make_service(runtime)
         session = await service.create()
         run = await service.submit(
-            session.id, MessageCreate(client_message_id="m1", content="你好")
+            session.session_id, MessageCreate(client_message_id="m1", content="你好")
         )
-        task = service._tasks[run.id]
+        task = service._tasks[run.run_id]
         await service.aclose()
-        assert task.done() and service._store.peek(session.id) is None
+        assert task.done() and not service._tasks
 
     asyncio.run(scenario())
 
@@ -310,7 +317,7 @@ def test_close_waits_for_tasks():
 def test_child_result_is_displayed_without_service_dispatch():
     async def scenario():
         child = ChildAgentResult(
-            id="c",
+            id=str(uuid4()),
             agent_id="institution_review",
             agent_name="制度审核助手",
             invocation_id="child-id",
@@ -318,10 +325,10 @@ def test_child_result_is_displayed_without_service_dispatch():
             output="# 原始报告",
         )
         runtime = Runtime(results=[ConversationTurnResult(reply="完成", child_call=child)])
-        service = make_service(runtime)
+        service = await make_service(runtime)
         session = await service.create()
         run = await service.submit(
-            session.id, MessageCreate(client_message_id="m1", content="审核")
+            session.session_id, MessageCreate(client_message_id="m1", content="审核")
         )
         result = await complete(service, session, run)
         assert result.message.agent_call.output == "# 原始报告"
@@ -336,20 +343,20 @@ def test_child_result_is_displayed_without_service_dispatch():
 def test_uploaded_doc_then_smalltalk_never_reparses_or_calls_child(docx_bytes_factory, monkeypatch):
     async def scenario():
         runtime = Runtime()
-        service = make_service(runtime)
+        service = await make_service(runtime)
         session = await service.create()
-        document = await service.upload(session.id, "制度.docx", docx_bytes_factory())
+        document = await service.upload(session.session_id, "制度.docx", docx_bytes_factory())
         assert runtime.calls == []
         monkeypatch.setattr(
             "app.services.conversation_service.parse_docx",
             lambda *a, **k: pytest.fail("聊天不能重复解析"),
         )
         run = await service.submit(
-            session.id,
+            session.session_id,
             MessageCreate(
                 client_message_id="m1",
                 content="你好",
-                document_ids=[document.id],
+                file_ids=[document.file_id],
             ),
         )
         await complete(service, session, run)
@@ -361,13 +368,13 @@ def test_uploaded_doc_then_smalltalk_never_reparses_or_calls_child(docx_bytes_fa
 
 def test_success_is_not_overwritten_by_cancel():
     async def scenario():
-        service = make_service()
+        service = await make_service()
         session = await service.create()
         run = await service.submit(
-            session.id, MessageCreate(client_message_id="m1", content="你好")
+            session.session_id, MessageCreate(client_message_id="m1", content="你好")
         )
         await complete(service, session, run)
-        assert (await service.cancel(session.id, run.id)).status == "succeeded"
+        assert (await service.cancel(session.session_id, run.run_id)).status == "succeeded"
         await service.aclose()
 
     asyncio.run(scenario())
@@ -375,7 +382,7 @@ def test_success_is_not_overwritten_by_cancel():
 
 def test_queue_capacity_is_bounded():
     async def scenario():
-        service = make_service(
+        service = await make_service(
             Runtime(gate=asyncio.Event()),
             settings=Settings(
                 _env_file=None,
@@ -384,9 +391,13 @@ def test_queue_capacity_is_bounded():
             ),
         )
         first, second = await service.create(), await service.create()
-        await service.submit(first.id, MessageCreate(client_message_id="m1", content="你好"))
+        await service.submit(
+            first.session_id, MessageCreate(client_message_id="m1", content="你好")
+        )
         with pytest.raises(AppError) as raised:
-            await service.submit(second.id, MessageCreate(client_message_id="m2", content="你好"))
+            await service.submit(
+                second.session_id, MessageCreate(client_message_id="m2", content="你好")
+            )
         assert raised.value.status_code == 503
         await service.aclose()
 
@@ -396,34 +407,42 @@ def test_queue_capacity_is_bounded():
 def test_output_capacity_failure_does_not_commit_partial_result():
     async def scenario():
         child = ChildAgentResult(
-            id="c",
+            id=str(uuid4()),
             agent_id="institution_review",
             agent_name="制度审核助手",
             invocation_id="i",
             output_type="markdown",
-            output="x" * 4000,
+            output="x" * 200000,
         )
-        service = make_service(
+        service = await make_service(
             Runtime(
+                gate=asyncio.Event(),
                 results=[
                     ConversationTurnResult(
                         reply="完成",
                         child_call=child,
                         continuation=ContinuationState(payload={"task": 1}),
                     )
-                ]
+                ],
             ),
-            settings=Settings(_env_file=None, conversation_max_bytes=1100),
+            settings=Settings(_env_file=None, conversation_transient_max_bytes=1100),
         )
         session = await service.create()
         run = await service.submit(
-            session.id, MessageCreate(client_message_id="m1", content="你好")
+            session.session_id, MessageCreate(client_message_id="m1", content="你好")
         )
+        async with service._store._connection(write=True) as conn:
+            await conn.execute(
+                "UPDATE messages SET content=repeat('x',900000) "
+                "WHERE session_id=$1",
+                UUID(session.session_id),
+            )
+        service.runtime.gate.set()
         result = await complete(service, session, run)
         assert result.status == "failed" and result.error.code == "CONVERSATION_CAPACITY"
         assert result.message.agent_call is None
-        assert service._store.record(session.id).continuation is None
-        assert service._store.used_bytes <= 1100
+        assert (await service._store.snapshot(session.session_id)).continuation is None
+        assert service._active.used_bytes <= 1100
         await service.aclose()
 
     asyncio.run(scenario())
@@ -431,7 +450,7 @@ def test_output_capacity_failure_does_not_commit_partial_result():
 
 def test_run_timeout_has_one_terminal_message():
     async def scenario():
-        service = make_service(
+        service = await make_service(
             Runtime(gate=asyncio.Event()),
             settings=Settings(
                 _env_file=None,
@@ -440,32 +459,11 @@ def test_run_timeout_has_one_terminal_message():
         )
         session = await service.create()
         run = await service.submit(
-            session.id, MessageCreate(client_message_id="m1", content="你好")
+            session.session_id, MessageCreate(client_message_id="m1", content="你好")
         )
         result = await complete(service, session, run)
         assert result.error.code == "CONVERSATION_TIMEOUT"
-        assert len((await service.read(session.id)).messages) == 2
-        await service.aclose()
-
-    asyncio.run(scenario())
-
-
-def test_expired_active_session_can_be_cancelled_and_reclaimed():
-    async def scenario():
-        now = [0.0]
-        runtime = Runtime(gate=asyncio.Event())
-        service = make_service(runtime, clock=lambda: now[0])
-        session = await service.create()
-        run = await service.submit(
-            session.id, MessageCreate(client_message_id="m1", content="你好")
-        )
-        record = service._store.record(session.id)
-        await runtime.entered.wait()
-        now[0] = 28801
-        await service._expire_sessions()
-        assert record.runs[run.id].status == "cancelled"
-        assert service._store.peek(session.id) is None and service._store.used_bytes == 0
-        assert service._slots._value == 3
+        assert len((await service.read(session.session_id)).messages) == 2
         await service.aclose()
 
     asyncio.run(scenario())
@@ -474,7 +472,7 @@ def test_expired_active_session_can_be_cancelled_and_reclaimed():
 @pytest.mark.parametrize("close", [False, True])
 def test_parse_cancellation_waits_for_thread_and_releases_once(monkeypatch, close):
     async def scenario():
-        service = make_service()
+        service = await make_service()
         session = await service.create()
         entered = asyncio.Event()
         release = threading.Event()
@@ -486,7 +484,7 @@ def test_parse_cancellation_waits_for_thread_and_releases_once(monkeypatch, clos
             return "# 正文"
 
         monkeypatch.setattr("app.services.conversation_service.parse_docx", parse)
-        upload = asyncio.create_task(service.upload(session.id, "x.docx", b"input"))
+        upload = asyncio.create_task(service.upload(session.session_id, "x.docx", b"input"))
         await entered.wait()
         stopping = asyncio.create_task(service.aclose()) if close else upload
         if not close:
@@ -506,8 +504,282 @@ def test_parse_cancellation_waits_for_thread_and_releases_once(monkeypatch, clos
         else:
             with pytest.raises(asyncio.CancelledError):
                 await upload
-            assert service._store.used_bytes == 0
+            assert service._active.used_bytes == 0
             await service.aclose()
         assert service._parse_slots._value == 2 and upload.done()
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_upload_cannot_replace_tracked_upload(monkeypatch):
+    from app.schemas.conversation_turn import TurnDocument
+
+    async def scenario():
+        service = await make_service()
+        session = await service.create()
+        read_entered, read_release = asyncio.Event(), asyncio.Event()
+        parse_entered, parse_release = asyncio.Event(), asyncio.Event()
+        original = service._store.read
+        first_read = True
+
+        async def read(*args, **kwargs):
+            nonlocal first_read
+            if first_read:
+                first_read = False
+                read_entered.set()
+                await read_release.wait()
+            return await original(*args, **kwargs)
+
+        async def parse(*args):
+            parse_entered.set()
+            await parse_release.wait()
+            return TurnDocument(id=str(uuid4()), filename="x.docx", markdown="正文")
+
+        monkeypatch.setattr(service._store, "read", read)
+        monkeypatch.setattr(service, "_parse_upload", parse)
+        first = asyncio.create_task(service.upload(session.session_id, "x.docx", b"x"))
+        await read_entered.wait()
+        second = asyncio.create_task(service.upload(session.session_id, "y.docx", b"y"))
+        await asyncio.sleep(0)
+        read_release.set()
+        await parse_entered.wait()
+        try:
+            with pytest.raises(AppError) as raised:
+                await asyncio.wait_for(asyncio.shield(second), 0.5)
+            assert raised.value.status_code == 409
+            assert service._uploads[session.session_id] is first
+        finally:
+            parse_release.set()
+            await asyncio.gather(first, second, return_exceptions=True)
+            await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_cancels_upload_waiting_for_session_read(monkeypatch):
+    async def scenario():
+        service = await make_service()
+        session = await service.create()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        page = await service._store.read(session.session_id)
+        parse_calls = []
+
+        async def read(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return page
+
+        async def parse(*args):
+            parse_calls.append(args)
+            raise AssertionError("关闭后不得启动解析")
+
+        monkeypatch.setattr(service._store, "read", read)
+        monkeypatch.setattr(service, "_parse_upload", parse)
+        upload = asyncio.create_task(service.upload(session.session_id, "x.docx", b"x"))
+        await entered.wait()
+        try:
+            await service.aclose()
+            release.set()
+            result = (await asyncio.gather(upload, return_exceptions=True))[0]
+            assert isinstance(result, asyncio.CancelledError)
+            assert not parse_calls
+            assert not service._uploads and service._active.used_bytes == 0
+        finally:
+            release.set()
+            await asyncio.gather(upload, return_exceptions=True)
+            await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_lost_commit_ack_is_reconciled_without_model_reexecution(monkeypatch):
+    async def scenario():
+        service = await make_service()
+        session = await service.create()
+        original = service._store.submit
+
+        async def commit_then_lose_ack(*args, **kwargs):
+            await original(*args, **kwargs)
+            raise AppError("STORAGE_UNAVAILABLE", "提交结果未确认", 503)
+
+        payload = MessageCreate(client_message_id="lost-commit", content="不可重做")
+        monkeypatch.setattr(service._store, "submit", commit_then_lose_ack)
+        with pytest.raises(AppError):
+            await service.submit(session.session_id, payload)
+        monkeypatch.setattr(service._store, "submit", original)
+        try:
+            recovered = await service.submit(session.session_id, payload)
+            assert recovered.status == "failed"
+            assert recovered.error.code == "CONVERSATION_INTERRUPTED"
+            assert not service.runtime.calls
+            assert (await service.read(session.session_id)).active_run_id is None
+            later = await service.submit(
+                session.session_id, MessageCreate(client_message_id="later", content="下一条")
+            )
+            await complete(service, session, later)
+            assert len(service.runtime.calls) == 1
+        finally:
+            await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_does_not_schedule_pending_message_submission(monkeypatch):
+    async def scenario():
+        runtime = Runtime()
+        service = await make_service(runtime)
+        session = await service.create()
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = service._store.submit
+
+        async def submit(*args, **kwargs):
+            result = await original(*args, **kwargs)
+            entered.set()
+            await release.wait()
+            return result
+
+        monkeypatch.setattr(service._store, "submit", submit)
+        request = asyncio.create_task(service.submit(
+            session.session_id, MessageCreate(client_message_id="shutdown", content="你好")
+        ))
+        await entered.wait()
+        try:
+            await service.aclose()
+            release.set()
+            result = (await asyncio.gather(request, return_exceptions=True))[0]
+            assert isinstance(result, asyncio.CancelledError)
+            assert not service._tasks and not service._run_sessions
+            assert not runtime.calls
+            assert service._admission._value == (
+                service.settings.conversation_concurrency + service.settings.conversation_queue_size
+            )
+        finally:
+            release.set()
+            await asyncio.gather(request, return_exceptions=True)
+            await service.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", ["rollback", "lost_ack", "unknown"])
+def test_file_commit_failure_never_removes_referenced_file(
+    docx_bytes_factory, monkeypatch, failure
+):
+    async def scenario():
+        service = await make_service()
+        session = await service.create()
+        original = service._store.add_file
+        captured = []
+
+        async def failing(session_id, file):
+            captured.append(file)
+            if failure == "lost_ack":
+                await original(session_id, file)
+            raise AppError("STORAGE_UNAVAILABLE", "保存结果未确认", 503)
+
+        async def unavailable(*args):
+            raise AppError("STORAGE_UNAVAILABLE", "核实失败", 503)
+
+        monkeypatch.setattr(service._store, "add_file", failing)
+        if failure == "unknown":
+            monkeypatch.setattr(service._store, "get_file", unavailable)
+        try:
+            with pytest.raises(AppError):
+                await service.upload(session.session_id, "材料.docx", docx_bytes_factory())
+            file = captured[0]
+            assert (service._files.root / file.content_path).exists() == (failure != "rollback")
+            assert len((await service.read(session.session_id)).files) == (failure == "lost_ack")
+            assert not list((service._files.root / ".staging").glob("*"))
+        finally:
+            await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_restart_reads_saved_markdown_without_parsing_again(docx_bytes_factory, monkeypatch):
+    async def scenario():
+        service = await make_service()
+        session = await service.create()
+        raw = docx_bytes_factory(body="第一条 应保留完整材料")
+        file = await service.upload(session.session_id, "../../材料.docx", raw)
+        saved = await service._store.get_file(session.session_id, file.file_id)
+        original = service._files.read_markdown(saved.content_path)
+        assert (service._files.root / saved.source_path).read_bytes() == raw
+        assert file.original_name == "材料.docx"
+        assert set(file.model_dump()) == {
+            "file_id", "original_name", "size_bytes", "content_chars", "created_at",
+        }
+        await service.aclose()
+
+        def no_parse(*args, **kwargs):
+            raise AssertionError("已保存材料不得重复解析")
+
+        monkeypatch.setattr("app.services.conversation_service.parse_docx", no_parse)
+        service = await make_service()
+        try:
+            run = await service.submit(
+                session.session_id,
+                MessageCreate(
+                    client_message_id="read", content="阅读材料", file_ids=[file.file_id]
+                ),
+            )
+            result = await complete(service, session, run)
+            assert result.status == "succeeded"
+            material = service.runtime.calls[0][1]["documents"][0]
+            assert material["id"] == file.file_id and material["markdown"] == original
+            (service._files.root / saved.content_path).write_text("被改动", encoding="utf-8")
+            run = await service.submit(
+                session.session_id, MessageCreate(client_message_id="bad", content="继续"),
+            )
+            result = await complete(service, session, run)
+            assert result.error.code == "FILE_UNAVAILABLE"
+            assert len(service.runtime.calls) == 1
+        finally:
+            await service.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("operation", ["stage", "publish"])
+def test_cancel_waits_for_file_thread_and_cleans_only_its_upload(
+    docx_bytes_factory, monkeypatch, operation,
+):
+    async def scenario():
+        service = await make_service()
+        session = await service.create()
+        entered = asyncio.Event()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+        original = getattr(service._files, operation)
+
+        def blocked(*args):
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5)
+            return original(*args)
+
+        monkeypatch.setattr(service._files, operation, blocked)
+        upload = asyncio.create_task(
+            service.upload(session.session_id, "x.docx", docx_bytes_factory())
+        )
+        await asyncio.wait_for(entered.wait(), 5)
+        upload.cancel()
+        await asyncio.sleep(0)
+        upload.cancel()
+        try:
+            assert not upload.done()
+            assert service._uploads[session.session_id] is upload
+            assert service._parse_slots._value == 1
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await upload
+        try:
+            assert not (await service.read(session.session_id)).files
+            assert not list(service._files.root.rglob("source.docx"))
+            assert service._active.used_bytes == 0
+            assert service._parse_slots._value == 2
+        finally:
+            await service.aclose()
 
     asyncio.run(scenario())

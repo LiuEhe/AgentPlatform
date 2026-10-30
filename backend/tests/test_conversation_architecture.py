@@ -34,7 +34,7 @@ def test_common_context_is_domain_independent():
 
 def test_store_does_not_import_http_views():
     assert "app.schemas.conversation" not in imports(
-        APP / "infrastructure" / "conversation" / "in_memory_store.py"
+        APP / "infrastructure" / "conversation" / "postgres_store.py"
     )
     assert "app.schemas.conversation" not in imports(APP / "schemas" / "conversation_session.py")
 

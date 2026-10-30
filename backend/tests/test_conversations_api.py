@@ -20,17 +20,17 @@ def test_create_and_chat_without_multipart(monkeypatch, fake_model_factory):
 
     monkeypatch.setattr("app.main.create_llm_service", lambda _: fake_model_factory(handler))
     with TestClient(create_app(settings())) as client:
-        created = client.post("/api/v1/conversations")
+        created = client.post("/api/v1/sessions")
         assert created.status_code == 201
-        id = created.json()["id"]
+        id = created.json()["session_id"]
         sent = client.post(
-            f"/api/v1/conversations/{id}/messages",
+            f"/api/v1/sessions/{id}/messages",
             json={"client_message_id": "m1", "content": "你好"},
         )
         assert sent.status_code == 202
-        run_id = sent.json()["id"]
+        run_id = sent.json()["run_id"]
         for _ in range(100):
-            run = client.get(f"/api/v1/conversations/{id}/runs/{run_id}").json()
+            run = client.get(f"/api/v1/sessions/{id}/runs/{run_id}").json()
             if run["status"] in {"succeeded", "failed"}:
                 break
         assert run["status"] == "succeeded"
@@ -42,13 +42,13 @@ def test_no_model_allows_session_but_not_execution():
     with TestClient(
         create_app(Settings(_env_file=None, llm_model=None, llm_api_key=None))
     ) as client:
-        id = client.post("/api/v1/conversations").json()["id"]
+        id = client.post("/api/v1/sessions").json()["session_id"]
         response = client.post(
-            f"/api/v1/conversations/{id}/messages",
+            f"/api/v1/sessions/{id}/messages",
             json={"client_message_id": "m1", "content": "你好"},
         )
         assert response.status_code == 503
-        assert client.get("/api/v1/conversations/missing").status_code == 404
+        assert client.get("/api/v1/sessions/missing").status_code == 404
 
 
 def test_sse_uses_standard_events_and_prevalidates_unknown_runs(monkeypatch, fake_model_factory):
@@ -59,15 +59,15 @@ def test_sse_uses_standard_events_and_prevalidates_unknown_runs(monkeypatch, fak
 
     monkeypatch.setattr("app.main.create_llm_service", lambda _: fake_model_factory(handler))
     with TestClient(create_app(settings())) as client:
-        assert client.get("/api/v1/conversations/missing/runs/missing/events").status_code == 404
-        id = client.post("/api/v1/conversations").json()["id"]
-        assert client.get(f"/api/v1/conversations/{id}/runs/missing/events").status_code == 404
+        assert client.get("/api/v1/sessions/missing/runs/missing/events").status_code == 404
+        id = client.post("/api/v1/sessions").json()["session_id"]
+        assert client.get(f"/api/v1/sessions/{id}/runs/missing/events").status_code == 404
         run = client.post(
-            f"/api/v1/conversations/{id}/messages",
+            f"/api/v1/sessions/{id}/messages",
             json={"client_message_id": "sse", "content": "你好"},
         ).json()
         with client.stream(
-            "GET", f"/api/v1/conversations/{id}/runs/{run['id']}/events"
+            "GET", f"/api/v1/sessions/{id}/runs/{run['run_id']}/events"
         ) as response:
             assert response.status_code == 200
             assert response.headers["content-type"].startswith("text/event-stream")
@@ -89,7 +89,7 @@ def test_sse_idle_ping_keeps_iterator_alive_and_closes_on_end_or_disconnect(monk
         ping_received = asyncio.Event()
         disconnected = asyncio.Event()
         closed = False
-        run = RunView(id="run", client_message_id="m1", status="running", stage="正在回答")
+        run = RunView(run_id="run", client_message_id="m1", status="running", stage="正在回答")
 
         async def events():
             nonlocal closed
@@ -103,7 +103,9 @@ def test_sse_idle_ping_keeps_iterator_alive_and_closes_on_end_or_disconnect(monk
                 closed = True
 
         app = create_app(Settings(_env_file=None, llm_model=None, llm_api_key=None))
-        app.state.conversation_service = SimpleNamespace(stream_run=lambda *args: events())
+        async def prepare_events(*args):
+            return events()
+        app.state.conversation_service = SimpleNamespace(stream_run=prepare_events)
         bodies = []
 
         async def send(message):
@@ -127,7 +129,7 @@ def test_sse_idle_ping_keeps_iterator_alive_and_closes_on_end_or_disconnect(monk
                     "http_version": "1.1",
                     "method": "GET",
                     "scheme": "http",
-                    "path": "/api/v1/conversations/session/runs/run/events",
+                    "path": "/api/v1/sessions/session/runs/run/events",
                     "query_string": b"",
                     "headers": [],
                     "server": ("test", 80),
@@ -149,28 +151,30 @@ def test_upload_and_input_boundaries(docx_bytes_factory):
     with TestClient(
         create_app(Settings(_env_file=None, llm_model=None, llm_api_key=None))
     ) as client:
-        id = client.post("/api/v1/conversations").json()["id"]
+        id = client.post("/api/v1/sessions").json()["session_id"]
         response = client.post(
-            f"/api/v1/conversations/{id}/documents",
+            f"/api/v1/sessions/{id}/files",
             files={"file": ("草稿.docx", docx_bytes_factory())},
         )
         assert response.status_code == 201
-        assert response.json()["filename"] == "草稿.docx" and response.json()["chars"] > 0
-        assert client.get(f"/api/v1/conversations/{id}").json()["messages"] == []
+        assert (
+            response.json()["original_name"] == "草稿.docx" and response.json()["content_chars"] > 0
+        )
+        assert client.get(f"/api/v1/sessions/{id}").json()["messages"] == []
         assert (
             client.post(
-                f"/api/v1/conversations/{id}/documents", files={"file": ("x.doc", b"bad")}
+                f"/api/v1/sessions/{id}/files", files={"file": ("x.doc", b"bad")}
             ).status_code
             == 415
         )
         assert (
-            client.post(f"/api/v1/conversations/{id}/messages", json={"content": " "}).status_code
+            client.post(f"/api/v1/sessions/{id}/messages", json={"content": " "}).status_code
             == 422
         )
 
 
 def test_message_accepts_no_documents():
-    assert MessageCreate(client_message_id="m1", content="你好").document_ids == []
+    assert MessageCreate(client_message_id="m1", content="你好").file_ids == []
 
 
 @pytest.mark.parametrize("updates", [{"content": "  "}, {"extra": True}, {"content": "x" * 12001}])
@@ -191,9 +195,9 @@ def test_invalid_uploaded_document_rejected(filename, content, code):
     with TestClient(
         create_app(Settings(_env_file=None, llm_model=None, llm_api_key=None))
     ) as client:
-        id = client.post("/api/v1/conversations").json()["id"]
+        id = client.post("/api/v1/sessions").json()["session_id"]
         response = client.post(
-            f"/api/v1/conversations/{id}/documents", files={"file": (filename, content)}
+            f"/api/v1/sessions/{id}/files", files={"file": (filename, content)}
         )
         assert response.status_code in {415, 422}
         assert response.json()["error"]["code"] == code

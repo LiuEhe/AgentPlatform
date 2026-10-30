@@ -65,17 +65,17 @@ def app():
 
 def send(client, id, text, index, documents=None):
     response = client.post(
-        f"/api/v1/conversations/{id}/messages",
+        f"/api/v1/sessions/{id}/messages",
         json={
             "client_message_id": str(index),
             "content": text,
-            "document_ids": documents or [],
+            "file_ids": documents or [],
         },
     )
     assert response.status_code == 202
-    run_id = response.json()["id"]
+    run_id = response.json()["run_id"]
     for _ in range(100):
-        run = client.get(f"/api/v1/conversations/{id}/runs/{run_id}").json()
+        run = client.get(f"/api/v1/sessions/{id}/runs/{run_id}").json()
         if run["status"] in {"succeeded", "failed", "cancelled"}:
             break
     assert run["status"] == "succeeded", run
@@ -105,18 +105,18 @@ def test_chat_then_standard_review_through_registered_agents(
     monkeypatch.setattr(review_package, "build_review_graph", counted_build)
     model = install_model(monkeypatch, fake_model_factory, ["chat", "documents", "documents"])
     with TestClient(app()) as client:
-        id = client.post("/api/v1/conversations").json()["id"]
+        id = client.post("/api/v1/sessions").json()["session_id"]
         assert send(client, id, "你好", 1)["message"]["agent_call"] is None
         ids = []
         for filename in ("draft.docx", "standard.docx"):
             response = client.post(
-                f"/api/v1/conversations/{id}/documents",
+                f"/api/v1/sessions/{id}/files",
                 files={
                     "file": (filename, docx_bytes_factory(title=filename, body="第一条 适用范围")),
                 },
             )
             assert response.status_code == 201
-            ids.append(response.json()["id"])
+            ids.append(response.json()["file_id"])
         result = send(client, id, "按标准审核草稿", 2, ids)
         call = result["message"]["agent_call"]
         assert call["agent_id"] == "institution_review"
@@ -134,25 +134,30 @@ def test_chat_then_standard_review_through_registered_agents(
 def test_pending_review_then_smalltalk_never_executes_review(monkeypatch, fake_model_factory):
     model = install_model(monkeypatch, fake_model_factory, ["clarify", "chat"])
     with TestClient(app()) as client:
-        id = client.post("/api/v1/conversations").json()["id"]
+        id = client.post("/api/v1/sessions").json()["session_id"]
         send(client, id, "请审核制度", 1)
         result = send(client, id, "先不审核了，聊点别的", 2)
         assert result["message"]["agent_call"] is None
         assert all(
             schema is None or schema.__name__ == "IntentDecision" for schema, _ in model.calls
         )
-        assert client.app.state.conversation_service._store.record(id).continuation is None
+        assert (
+            client.portal.call(
+                client.app.state.conversation_service._store.snapshot, id
+            ).continuation
+            is None
+        )
 
 
 def test_plain_text_review_without_file_upload(monkeypatch, fake_model_factory):
     install_model(monkeypatch, fake_model_factory, ["chat", "chat", "text"])
     with TestClient(app()) as client:
-        id = client.post("/api/v1/conversations").json()["id"]
+        id = client.post("/api/v1/sessions").json()["session_id"]
         send(client, id, "第一条 草稿须履行复核程序", 1)
         send(client, id, "第一条 标准要求双人复核", 2)
         result = send(client, id, "以上分别为草稿和标准，请进行制度审核", 3)
         assert "一. 简述" in result["message"]["agent_call"]["output"]
-        assert client.get(f"/api/v1/conversations/{id}").json()["documents"] == []
+        assert client.get(f"/api/v1/sessions/{id}").json()["files"] == []
 
 
 def test_cancel_conversation_waits_for_review_chunk_cleanup(
@@ -197,26 +202,26 @@ def test_cancel_conversation_waits_for_review_chunk_cleanup(
         controls = client.portal.call(make_controls)
         sessions = {}
         for key in active:
-            id = client.post("/api/v1/conversations").json()["id"]
+            id = client.post("/api/v1/sessions").json()["session_id"]
             ids = []
             for filename in ("draft.docx", "standard.docx"):
                 body = "\n".join(f"第{i}条 {key}原文" for i in range(1, 5))
                 response = client.post(
-                    f"/api/v1/conversations/{id}/documents",
+                    f"/api/v1/sessions/{id}/files",
                     files={"file": (filename, docx_bytes_factory(title=filename, body=body))},
                 )
                 assert response.status_code == 201
-                ids.append(response.json()["id"])
+                ids.append(response.json()["file_id"])
             sessions[key] = (id, ids)
 
         def submit(key):
             id, ids = sessions[key]
             response = client.post(
-                f"/api/v1/conversations/{id}/messages",
-                json={"client_message_id": key, "content": "按标准审核", "document_ids": ids},
+                f"/api/v1/sessions/{id}/messages",
+                json={"client_message_id": key, "content": "按标准审核", "file_ids": ids},
             )
             assert response.status_code == 202
-            return response.json()["id"]
+            return response.json()["run_id"]
 
         async def wait_entered(key):
             async with asyncio.timeout(5):
@@ -234,18 +239,18 @@ def test_cancel_conversation_waits_for_review_chunk_cleanup(
         other_id = submit("OTHER")
         client.portal.call(asyncio.wait_for, controls["other_terminology"].wait(), 5)
         id = sessions["FIRST"][0]
-        response = client.post(f"/api/v1/conversations/{id}/runs/{first_id}/cancel")
+        response = client.post(f"/api/v1/sessions/{id}/runs/{first_id}/cancel")
         assert response.status_code == 202
         assert response.json()["status"] == "cancelled"
         assert client.portal.call(lambda: active["FIRST"]) == 0
-        messages = client.get(f"/api/v1/conversations/{id}").json()["messages"]
+        messages = client.get(f"/api/v1/sessions/{id}").json()["messages"]
         assert all(not m.get("agent_call") for m in messages)
 
         client.portal.call(wait_entered, "OTHER")
         client.portal.call(release_and_wait, "OTHER", other_id)
         other_session = sessions["OTHER"][0]
         assert (
-            client.get(f"/api/v1/conversations/{other_session}/runs/{other_id}").json()["status"]
+            client.get(f"/api/v1/sessions/{other_session}/runs/{other_id}").json()["status"]
             == "succeeded"
         )
         next_id = submit("NEXT")
