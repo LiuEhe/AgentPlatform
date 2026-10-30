@@ -8,7 +8,7 @@
 | 后端测试 | `backend/tests/` 使用 pytest 覆盖双文档输入、DOCX 解析、条款分组、跨请求并发额度与取消清理、发现定位、报告、完整审核图和 ASGI 入口及启动就绪 | 在 `backend/` 运行 `uv run pytest`。通过假运行时、假模型和假检索器隔离外部服务，不消耗真实账户额度。 |
 | 前端类型检查与构建 | `frontend/package.json` 的 `build` 脚本运行 `vue-tsc -b && vite build` | 在 `frontend/` 运行 `pnpm build`。当前没有单独 lint 或前端测试脚本。 |
 | 依赖锁定 | `backend/uv.lock`、`frontend/pnpm-lock.yaml` 已跟踪 | 依赖声明变化时检查对应锁文件；不得只改锁文件来掩盖依赖决策。 |
-| CI | `.github/workflows/ci.yml` 在 Pull Request 和推送到 `main` 时运行检查 | 后端覆盖 Python 3.12/3.13；前端执行冻结锁文件安装和生产构建。 |
+| CI | `.github/workflows/ci.yml` 在 Pull Request 和推送到 `main`、`dev` 时运行检查 | 后端覆盖 Python 3.12/3.13；前端执行冻结锁文件安装和生产构建。 |
 
 ## 代码任务的检查要求
 

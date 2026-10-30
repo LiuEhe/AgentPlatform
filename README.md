@@ -152,7 +152,7 @@ uv run pytest
 pnpm build
 ```
 
-GitHub Actions 会在 Pull Request 和推送到 `main` 时运行后端检查与测试，以及前端生产构建。
+GitHub Actions 会在 Pull Request 和推送到 `main`、`dev` 时运行后端检查与测试，以及前端生产构建。
 
 ---
 
