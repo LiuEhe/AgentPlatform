@@ -129,7 +129,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="智能体平台后端",
-        description="基于 LangGraph 的同步制度审核服务",
+        description="基于 LangGraph 的制度审核与会话助手服务，支持同步审核和 SSE 会话运行。",
         version="0.1.0",
         lifespan=lifespan,
     )

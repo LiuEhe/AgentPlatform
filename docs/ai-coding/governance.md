@@ -4,7 +4,7 @@
 
 本规则用于让 Codex 在 AgentPlatform 中持续遵守项目已有结构，并让新增约束可审查、可验证。本文件记录的现状依据仓库代码、锁文件、项目说明和配置；规则中标为“治理要求”的内容是本项目采用的执行约束，不表示相关自动化已经存在。
 
-项目当前由 `backend/` Python 服务和 `frontend/` Vue 应用组成。仓库没有发现 CI 工作流、代码测试目录或 Agent 专用规则文件。根 `.gitignore` 当前不再忽略 `docs/`，因此本目录中的治理文档可纳入版本管理。
+项目当前由 `backend/` Python 服务和 `frontend/` Vue 应用组成。仓库包含 `.github/workflows/ci.yml`，后端使用 pytest，前端使用 Node 内置测试；除根目录 `AGENTS.md` 外，未发现额外的目录级 Agent 规则文件。根 `.gitignore` 当前不再忽略 `docs/`，因此本目录中的治理文档可纳入版本管理。
 
 ## 规则优先级与冲突处理
 
