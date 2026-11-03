@@ -14,12 +14,13 @@ const downloadError = ref('')
 const copyState = ref<'idle' | 'copied' | 'manual'>('idle')
 const activeHeading = ref('')
 const paper = ref<HTMLElement>()
+const urls = new Set<string>()
 let downloadController: AbortController | undefined
 watch(() => props.markdown, () => {
   downloadController?.abort(); downloadController = undefined
   isDownloading.value = false; downloadError.value = ''; copyState.value = 'idle'; activeHeading.value = ''
 })
-onBeforeUnmount(() => downloadController?.abort())
+onBeforeUnmount(() => { downloadController?.abort(); urls.forEach(url => URL.revokeObjectURL(url)); urls.clear() })
 
 const rendered = computed(() => {
   let sequence = 0
@@ -59,10 +60,11 @@ async function downloadWord() {
     const blob = await exportReviewToWord(props.markdown, controller.signal)
     if (controller.signal.aborted) return
     const url = URL.createObjectURL(blob)
+    urls.add(url)
     const link = document.createElement('a')
     link.href = url; link.download = '制度审核报告.docx'
     try { document.body.append(link); link.click() }
-    finally { link.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 1000) }
+    finally { link.remove(); window.setTimeout(() => { URL.revokeObjectURL(url); urls.delete(url) }, 1000) }
   } catch (error) {
     if (!controller.signal.aborted) downloadError.value = error instanceof ApiError ? error.message : 'Word 文件下载失败，请稍后重试。'
   } finally {

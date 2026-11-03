@@ -6,13 +6,15 @@ import ConversationComposer from '../features/conversation-assistant/Conversatio
 import ConversationMessages from '../features/conversation-assistant/ConversationMessages.vue'
 import ConversationAttachments from '../features/conversation-assistant/ConversationAttachments.vue'
 import ConversationHistory from '../features/conversation-assistant/ConversationHistory.vue'
+import AccountMenu from '../features/auth/AccountMenu.vue'
+import { useAuth } from '../features/auth/useAuth'
 import { useConversation } from '../features/conversation-assistant/useConversation'
 
 defineOptions({ name: 'AgentConversationView' })
 const { sessionId, sessions, messages, files, selectedFileIds, draft, activeRun, streamingText, busy,
   initializing, uploading, error, retryable, initialize, send, upload, stop, newSession,
   deleting, canDelete, pendingDeletions, deletionError, deleteSession, retryDeletion, hasDraft,
-  switchSession, suspend, retry, loadMoreSessions, loadEarlierMessages, hasMoreSessions, hasEarlierMessages, loadingHistory, loadingEarlier } = useConversation()
+  switchSession, suspend, retry, loadMoreSessions, loadEarlierMessages, hasMoreSessions, hasEarlierMessages, loadingHistory, loadingEarlier } = useConversation({ auth: useAuth() })
 const fileInput = ref<HTMLInputElement>()
 const historyDialog = ref<HTMLDialogElement>()
 const deletionDialog = ref<HTMLDialogElement>()
@@ -65,7 +67,7 @@ async function confirmDeletion() {
           <button class="icon-button mobile-history" type="button" aria-label="打开会话记录" @click="historyDialog?.showModal()"><Menu :size="20" aria-hidden="true" /></button>
           <RouterLink class="back-link" to="/agents"><ArrowLeft :size="16" aria-hidden="true" />智能体</RouterLink><span class="breadcrumb-separator">/</span><span>会话助手</span>
         </div>
-        <span class="badge">会话助手</span>
+        <AccountMenu />
       </header>
       <div class="chat-column" :class="{ 'is-empty': !messages.length }">
         <div v-if="!messages.length" class="chat-welcome">

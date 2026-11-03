@@ -1,6 +1,7 @@
 import { computed, onBeforeUnmount, ref } from 'vue'
 import * as api from '../../api/conversations'
 import { ApiError } from '../../api/client'
+import type { AuthController } from '../auth/types'
 import { isTerminal } from './types'
 import type { SessionSummary, SessionView, FileView, MessageCreate, MessageView, RunView, PendingSessionDeletion } from './types'
 
@@ -23,7 +24,10 @@ interface ConversationSnapshot {
   receivedSequence: number
 }
 
-export function useConversation() {
+export function useConversation(options?: { auth: AuthController }) {
+  const owner = options?.auth.capture()
+  const storageKey = (key: string) => owner ? `${key}:${owner.userId}` : key
+  let identityCleared = false
   const sessionId = ref<string | null>(null)
   const sessions = ref<SessionSummary[]>([])
   const messages = ref<MessageView[]>([])
@@ -179,10 +183,12 @@ export function useConversation() {
   }
 
   function remember(key: string, value: string | null) {
+    if (identityCleared || (owner && !options?.auth.isCurrent(owner))) return
+    key = storageKey(key)
     try { if (value === null) sessionStorage.removeItem(key); else sessionStorage.setItem(key, value) } catch { /* storage may be disabled */ }
   }
   function stored(key: string) {
-    try { return sessionStorage.getItem(key) } catch { return null }
+    try { return sessionStorage.getItem(storageKey(key)) } catch { return null }
   }
   function merge(incoming: MessageView[]) {
     const indexed = new Map(messages.value.map(message => [message.message_id, message]))
@@ -560,8 +566,19 @@ export function useConversation() {
     resetRequests()
     initializing.value = false
   }
-  onBeforeUnmount(suspend)
-  return { sessionId, sessions, messages, files, selectedFileIds, draft, activeRun, streamingText, busy,
+  function resetForIdentityChange() {
+    identityCleared = true
+    suspend()
+    snapshots.clear(); deletedSessionIds.clear(); deletionRequests.clear()
+    sessionId.value = null; sessions.value = []; messages.value = []; files.value = []
+    selectedFileIds.value = []; draft.value = ''; activeRun.value = null; streamingText.value = ''
+    pending = null; retryAction = null; retryTarget = null
+    pendingDeletions.value = []; error.value = ''; deletionError.value = ''; retryable.value = false
+    uploading.value = false; sending.value = false; listCursor.value = null; earlierCursor.value = null
+  }
+  const unregister = options?.auth.registerCleanup(resetForIdentityChange)
+  onBeforeUnmount(() => { unregister?.(); resetForIdentityChange() })
+  return { resetForIdentityChange, sessionId, sessions, messages, files, selectedFileIds, draft, activeRun, streamingText, busy,
     deleting, canDelete, pendingDeletions, deletionError, deleteSession, retryDeletion, hasDraft,
     initializing, uploading, error, retryable, initialize, send, upload, stop, newSession, switchSession, suspend, retry,
     loadMoreSessions, loadEarlierMessages, hasMoreSessions, hasEarlierMessages, loadingHistory, loadingEarlier }

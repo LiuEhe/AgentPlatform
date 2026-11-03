@@ -1,4 +1,4 @@
-import { ApiError, createApiError, getApiBaseUrl } from './client'
+import { ApiError, apiRequest, authStreamContext, getApiBaseUrl } from './client'
 import { isTerminal } from '../features/conversation-assistant/types'
 import type { SessionListView, SessionView, FileView, MessageCreate, RunEvent, RunView } from '../features/conversation-assistant/types'
 
@@ -7,10 +7,7 @@ const path = (id: string) => `${root}/${encodeURIComponent(id)}`
 
 async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
   try {
-    const response = await fetch(`${getApiBaseUrl()}${url}`, init)
-    if (!response.ok) throw await createApiError(response, '会话操作失败，请稍后重试。')
-    if (response.status === 204) return undefined as T
-    return await response.json() as T
+    return await apiRequest<T>(url, init)
   } catch (error) {
     if (error instanceof ApiError || init.signal?.aborted) throw error
     throw new ApiError({ status: 0, message: '会话连接中断，请检查网络后重试。' })
@@ -57,7 +54,8 @@ export interface RunSubscriptionHandlers {
 
 export function subscribeSessionRun(id: string, runId: string, handlers: RunSubscriptionHandlers, signal?: AbortSignal): () => void {
   if (signal?.aborted) return () => {}
-  const source = new EventSource(`${getApiBaseUrl()}${path(id)}/runs/${encodeURIComponent(runId)}/events`)
+  const context = authStreamContext()
+  const source = new EventSource(`${getApiBaseUrl()}${path(id)}/runs/${encodeURIComponent(runId)}/events?auth_session_id=${encodeURIComponent(context.ticket.authSessionId)}`, { withCredentials: true })
   let closed = false
   let failures = 0
   function close() {
@@ -72,7 +70,7 @@ export function subscribeSessionRun(id: string, runId: string, handlers: RunSubs
   }
   for (const kind of ['snapshot', 'delta', 'state', 'done'] as const) {
     source.addEventListener(kind, (message: MessageEvent<string>) => {
-      if (closed) return
+      if (closed || !context.isCurrent()) { close(); return }
       let event: RunEvent
       try {
         event = JSON.parse(message.data) as RunEvent

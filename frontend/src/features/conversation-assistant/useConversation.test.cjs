@@ -484,7 +484,7 @@ function streamApiFixture() {
   const loaded = new Module(filename, module)
   loaded.filename = filename; loaded.paths = module.paths
   loaded.require = id => {
-    if (id === './client') return { ApiError, getApiBaseUrl: () => '' }
+    if (id === './client') return { ApiError, getApiBaseUrl: () => '', authStreamContext: () => ({ ticket: { authSessionId: 'test-session' }, isCurrent: () => true }), apiRequest: async (url, init) => { const response = await fetch(url, init); if (!response.ok) throw new ApiError(response.status); return response.status === 204 ? undefined : response.json() } }
     if (id.endsWith('/types')) return { isTerminal: status => ['succeeded', 'failed', 'cancelled'].includes(status) }
     return require(id)
   }
@@ -500,7 +500,7 @@ test('native EventSource reconnects only within the bound and closes on abort or
     const controller = new AbortController()
     f.api.subscribeSessionRun('会话', 'r1', handlers, controller.signal)
     const source = f.sources[0]
-    assert.ok(source.url.endsWith('/runs/r1/events'))
+    assert.ok(source.url.endsWith('/runs/r1/events?auth_session_id=test-session'))
     source.onerror(); source.onerror()
     assert.equal(source.closed, false); assert.equal(reconnects.length, 2)
     source.emit('snapshot', { event: 'snapshot', run: { run_id: 'r1', status: 'running' }, text: '你好' })

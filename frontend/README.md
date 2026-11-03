@@ -75,6 +75,19 @@ pnpm build
 | `features/institution-review/` | 审核方式、草稿/标准选择、材料摘要与完整报告 |
 | `api/` | 现有 HTTP 契约、错误映射与客户端中止 |
 
-前端未引入全局状态管理库、认证或新业务 Agent；历史由后端 PostgreSQL 提供。真实模型效果、文件解析、知识库与 Word/WPS 版式需在对应后端可用时另行验收。
+前端通过Vue provide/inject共享账号控制器，未引入全局状态管理库或新业务Agent；历史由后端 PostgreSQL 提供。真实模型效果、文件解析、知识库与 Word/WPS 版式需在对应后端可用时另行验收。
 
-智能体目录通过 `GET /api/v1/agents` 读取名称和描述，图标及已知工作入口由前端定义；加载失败显示错误并允许重试。会话响应统一使用 session_id/message_id/run_id/file_id，附件字段为 files/file_ids。sessionStorage 只写 `agent-platform-session`、`agent-platform-session-pending-id` 和 `agent-platform-session-deletions`，不使用旧会话指针或保存正文。当前没有登录和个人归属校验。
+智能体目录通过 `GET /api/v1/agents` 读取名称和描述，图标及已知工作入口由前端定义；加载失败显示错误并允许重试。会话响应统一使用 session_id/message_id/run_id/file_id，附件字段为 files/file_ids。sessionStorage中的会话指针、幂等消息指针和待删除数组按已核验user_id区分；旧三个无归属键在身份清理时移除，不保存正文、Cookie或CSRF。
+
+
+## 账号、身份切换与页面清理
+
+`/login`、`/register` 公开；注册无需邀请或审批，成功后主动登录，不替换已有登录。`/account` 修改显示名称，`/account/password` 修改密码，admin通过 `/admin/users` 分页管理普通账号。临时密码用户先改密；成功后所有登录失效，重新登录。
+
+`features/auth/useAuth.ts` 提供单个认证控制器，`api/client.ts` 为JSON、Markdown、Blob和204统一绑定credentials、CSRF、登录上下文与身份代次。旧请求即使晚到，也不能交付旧内容或使新账号退出；认证恢复不重放业务请求。SSE只在URL带公开上下文ID。
+
+私有RouterView与KeepAlive整体按身份代次卸载；退出、换号、401或上下文冲突清除所有会话快照、草稿、文件选择、待重试/待删除项、位置及报告Blob URL。同身份内普通导航仍保留草稿。隐藏/pagehide先遮蔽，恢复/pageshow核验me后才展示；网络或数据库故障时保持遮蔽并禁写，确认同一登录可恢复内存。
+
+退出先清空本地私有内容，再撤销原登录。网络失败显示未确认并保留同源非敏感退出锁，刷新不自动恢复；可重试或显式输入密码登录。重试核对原上下文，不撤销其他标签页新登录。跨标签页通过随机storage信号重新核验；禁用浏览器存储时提示降级，不能保证跨刷新锁定。
+
+前端检查：`node --test src/features/conversation-assistant/useConversation.test.cjs src/features/auth/useAuth.test.cjs src/features/auth/appLifecycle.test.cjs src/api/auth.test.cjs` 与 `pnpm build`。实际多标签页、浏览器后退和文档版式需浏览器/真实环境验收。

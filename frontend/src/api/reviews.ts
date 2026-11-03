@@ -1,4 +1,4 @@
-import { ApiError, createApiError, getApiBaseUrl } from './client'
+import { ApiError, apiRequest } from './client'
 import type { ReviewSubmission } from '../features/institution-review/types'
 
 export async function submitReview(submission: ReviewSubmission, signal?: AbortSignal): Promise<string> {
@@ -9,45 +9,20 @@ export async function submitReview(submission: ReviewSubmission, signal?: AbortS
     body.append('standard_file', submission.standardFile)
   }
 
-  let response: Response
-  try {
-    response = await fetch(`${getApiBaseUrl()}/api/v1/reviews`, {
-      method: 'POST',
-      body,
-      headers: { Accept: 'text/markdown' },
-      signal,
-    })
-  } catch (error) {
-    if (signal?.aborted) throw error
-    throw new ApiError({
-      status: 0,
-      message: '无法连接审核服务，请确认服务已启动后重试。',
-    })
-  }
-
-  if (!response.ok) throw await createApiError(response)
-  return response.text()
+  return apiRequest<string>('/api/v1/reviews', {
+    method: 'POST', body, headers: { Accept: 'text/markdown' }, signal,
+  }, 'text')
 }
 
 const DOCX_MEDIA_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 
 export async function exportReviewToWord(markdown: string, signal?: AbortSignal): Promise<Blob> {
-  try {
-    const response = await fetch(`${getApiBaseUrl()}/api/v1/documents/export/docx`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: DOCX_MEDIA_TYPE },
-      body: JSON.stringify({ markdown }),
-      signal,
-    })
-    if (!response.ok) {
-      throw await createApiError(response, 'Word 导出失败，请稍后重试。')
-    }
-    if (response.headers.get('Content-Type')?.split(';')[0]?.trim() !== DOCX_MEDIA_TYPE) {
-      throw new ApiError({ status: response.status, message: '导出服务未返回 Word 文件，请稍后重试。' })
-    }
-    return await response.blob()
-  } catch (error) {
-    if (error instanceof ApiError || signal?.aborted) throw error
-    throw new ApiError({ status: 0, message: 'Word 文件下载中断，请确认网络连接后重试。' })
+  const blob = await apiRequest<Blob>('/api/v1/documents/export/docx', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Accept: DOCX_MEDIA_TYPE },
+    body: JSON.stringify({ markdown }), signal,
+  }, 'blob')
+  if (blob.type.split(';')[0]?.trim() !== DOCX_MEDIA_TYPE) {
+    throw new ApiError({ status: 200, message: '导出服务未返回 Word 文件，请稍后重试。' })
   }
+  return blob
 }
