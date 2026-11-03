@@ -53,8 +53,8 @@ jobs:
       - name: Initialize test database with SQL
         run: |
           psql -X -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE agent_platform_test WITH ENCODING = 'UTF8' TEMPLATE = template0"
-          psql -X -h 127.0.0.1 -U postgres -d agent_platform_test -v ON_ERROR_STOP=1 -f database/schema_v2.sql
-      - run: uv run ruff check app tests
+          # Tests initialize isolated schemas with the current structure and a real test identity.
+      - run: uv run ruff check app scripts tests
       - run: uv run pytest
 
   frontend:
@@ -73,5 +73,5 @@ jobs:
           version: 10.32.1
           run_install: false
       - run: pnpm install --frozen-lockfile
-      - run: node --test src/features/conversation-assistant/useConversation.test.cjs
+      - run: node --test src/features/conversation-assistant/useConversation.test.cjs src/features/auth/useAuth.test.cjs src/features/auth/appLifecycle.test.cjs src/api/auth.test.cjs
       - run: pnpm build
