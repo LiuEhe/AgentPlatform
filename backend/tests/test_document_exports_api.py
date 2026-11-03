@@ -91,6 +91,13 @@ def test_chunked_body_limit_without_trusting_content_length(fake_export, declare
         async with app.router.lifespan_context(app):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                          base_url='http://test') as client:
+                login = await client.post('/api/v1/auth/login', json={
+                    'username': 'admin', 'password': 'test-pass123',
+                }, headers={'Origin': 'http://localhost:5173'})
+                context = login.json()
+                client.headers.update({'Origin': 'http://localhost:5173',
+                    'X-Auth-Session-ID': context['auth_session_id'],
+                    'X-CSRF-Token': context['csrf_token']})
                 response = await client.post('/api/v1/documents/export/docx',
                                              content=chunks(), headers=headers)
         assert response.status_code == 413

@@ -14,11 +14,13 @@ logger = logging.getLogger(__name__)
 class AppError(Exception):
     """可安全返回给 API 调用方的应用异常。"""
 
-    def __init__(self, code: str, message: str, status_code: int) -> None:
+    def __init__(self, code: str, message: str, status_code: int, *,
+                 retry_after_seconds: int | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
 
 
 def request_id_for(request: Request) -> str:
@@ -33,6 +35,8 @@ def install_error_handlers(app: FastAPI) -> None:
     async def handle_app_error(request: Request, exc: AppError) -> JSONResponse:
         return JSONResponse(
             status_code=exc.status_code,
+            headers={"Retry-After": str(exc.retry_after_seconds)}
+            if exc.retry_after_seconds is not None else None,
             content={
                 "error": {
                     "code": exc.code,

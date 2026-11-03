@@ -32,17 +32,17 @@ SSE 使用已锁定 FastAPI 0.141.1 的官方 `EventSourceResponse` 与 `ServerS
 
 会话历史不自动过期。每会话最多 8 文档/100 消息，用户消息 12000 字符，材料累计 100000 字符，消息与子结果累计 1000000 字符，输出单次最多 200000 字符。进程默认 3 个运行、6 个等待，排队 30 秒、运行 600 秒超时；原有并发与超时配置保留。`CONVERSATION_TRANSIENT_MAX_BYTES` 默认 134217728，仅限制临时流式文本及解析中的上传字节，不统计全库历史，也不等于 RSS 上限。旧 TTL、MAX_SESSIONS、MAX_BYTES 配置不再使用。
 
-运行和 DOCX 解析仍受并发控制。原始 DOCX 与解析 Markdown 通过 `infrastructure/documents/local_file_store.py` 保存到 `backend/documents/<agent_id>/<session_id>/<file_id>/`，数据库只保存路径和元数据。`DOCUMENTS_DIR` 可指定其他根目录，相对路径按 backend 解析；数据库和文件目录必须共同备份。应用关闭先取消并收尾任务，再关闭数据库及外部客户端。使用单工作进程；没有用户认证或权限隔离。固定 PostgreSQL advisory lock 防止同库第二实例启动，锁连接丢失或终态提交失败后拒绝新写入并结束订阅，需要重启服务；已提交历史保留，未提交临时结果可能丢失。
+运行和 DOCX 解析仍受并发控制。原始 DOCX 与解析 Markdown 通过 `infrastructure/documents/local_file_store.py` 保存到 `backend/documents/<agent_id>/<session_id>/<file_id>/`，数据库只保存路径和元数据。`DOCUMENTS_DIR` 可指定其他根目录，相对路径按 backend 解析；数据库和文件目录必须共同备份。应用关闭先取消并收尾任务，再关闭数据库及外部客户端。使用单工作进程；所有业务入口验证登录，会话按拥有者隔离。固定 PostgreSQL advisory lock 防止同库第二实例启动，锁连接丢失或终态提交失败后拒绝新写入并结束订阅，需要重启服务；已提交历史保留，未提交临时结果可能丢失。
 
 ### SQL 初始化与配置
 
 会话删除不依赖模型配置。上传、排队、运行或本地执行收尾期间返回 `CONVERSATION_BUSY`（409），不隐式取消任务。数据库已删除但附件或凭据清理失败返回 `CONVERSATION_DELETE_INCOMPLETE`（503），重复同一 DELETE 可继续清理；提交结果无法确认返回 `STORAGE_UNAVAILABLE`（503），保留材料与凭据等待重试。合法且不存在的 ID 返回 204，非法 ID 返回 404。
 
-附件根目录下 `.deletions/<session_id>.json` 仅保存版本、Agent 与会话 ID。在数据库事务删除前落盘，数据库提交确认后精确清理会话目录，完成后移除凭据。启动取得运行权并恢复中断任务后逐项核对：会话不存在才清理文件；会话尚存则保留其文件并移除未提交删除的凭据。单项 IO 失败保留待处理项，不扫描附件库或运行常驻清理任务。DELETE 在服务端接纳后不因客户端断开而撤回，关闭服务会等待删除收尾。
+附件根目录下 `.deletions/<session_id>.json` 保存version2、user_id、Agent与会话ID。在数据库事务删除前落盘，数据库提交确认后精确清理会话目录，完成后移除凭据。启动取得运行权并恢复中断任务后逐项核对：会话不存在才清理文件；会话尚存则保留其文件并移除未提交删除的凭据。单项 IO 失败保留待处理项，不扫描附件库或运行常驻清理任务。DELETE 在服务端接纳后不因客户端断开而撤回，关闭服务会等待删除收尾。
 
 数据库设计与操作说明统一见 [数据库设计与初始化](../docs/database.md)，包括表关系、字段、约束、索引及完整初始化命令。
 
-建库和建表 SQL 位于 `backend/database/`：先在 postgres 管理库执行 `database/create_databases.sql`，再分别连接应用库和专用测试库执行 `database/schema_v2.sql`。在后端 `.env` 配置 `DATABASE_URL` 后启动单工作进程服务；应用启动只验证结构版本，不自动建库或建表。本地旧会话表已按用户授权清理并初始化为 v2，旧建表和一次性清理脚本已移除；不提供迁移或旧接口兼容。已有 v2 库不要重复执行初始化。
+数据库v3和管理命令见[数据库说明](../docs/database.md)。新环境在 `backend/` 执行 `uv run python -m scripts.manage_users initialize`，管理员密码由隐藏提示输入；已有库不重复初始化；旧版升级和续做命令已移除。应用启动不读取或限制数据库结构版本号，仍检查admin，不自动迁移。维护命令另保留 `reset-admin` 用于恢复内置管理员密码。
 
 ### 历史查询
 
@@ -53,8 +53,18 @@ SSE 使用已锁定 FastAPI 0.141.1 的官方 `EventSourceResponse` 与 `ServerS
 
 ### PostgreSQL 测试
 
-执行测试前在当前终端显式提供指向专用 `agent_platform_test` 的 `TEST_DATABASE_URL`。真实数据库测试与 CI 统一使用 `database/schema_v2.sql`；测试 schema 隔离及清理范围见 [数据库测试与维护](../docs/database.md#测试与维护)。模型和检索仍使用替身。
+执行测试前在当前终端显式提供指向专用 `agent_platform_test` 的 `TEST_DATABASE_URL`。真实数据库测试统一通过当前v3初始化流程准备账号和结构；测试 schema 隔离及清理范围见 [数据库测试与维护](../docs/database.md#测试与维护)。模型和检索仍使用替身。
 
+
+## 账号接口与浏览器约束
+
+公开接口为 `POST /auth/register`、`POST /auth/login` 和 `GET /agents`，路径均带api_prefix；健康检查继续公开。注册201只返回用户资料，不签发Cookie。其余业务接口要求有效登录；普通用户不能访问 `/admin/users`。
+
+`GET /auth/me` 返回 user、auth_session_id、csrf_token、expires_at。所有其他私有请求携带 `X-Auth-Session-ID`，写请求再加 `X-CSRF-Token`；SSE使用公开auth_session_id查询参数。写请求需Origin或Referer与 `AUTH_TRUSTED_ORIGINS` 精确匹配。前端统一使用credentials，API部署需同源代理或同站可信HTTPS入口。
+
+`POST /auth/logout` 与 `POST /auth/password` 返回204，撤销数据库登录且不写Cookie。`PATCH /users/me` 修改显示名称。管理员通过GET/POST `/admin/users`、PATCH `/admin/users/{id}` 和POST `/admin/users/{id}/password-reset` 管理普通用户。内置admin恢复仅使用离线命令。
+
+开发Cookie名为agent-platform-session-dev，非development使用Secure的__Host-agent-platform-session；均为HttpOnly、SameSite=Lax、Path=/。固定12小时，不滑动续期。生产部署设置APP_ENV及精确可信来源并使用HTTPS。所有密码输入统一要求6–20个Unicode字符，不去空格。用户名规范为3–32位小写字母、数字、下划线且字母开头。密码哈希采用pwdlib 0.3.1推荐Argon2；有界计算和尝试限制配置见 `.env.example`。所有私有响应no-store，只有登录成功设置Cookie。
 
 ## Langfuse 追踪、Prompt 与实验
 

@@ -1,7 +1,6 @@
 import asyncio
 import os
 from io import BytesIO
-from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -43,33 +42,32 @@ def isolate_external_settings(monkeypatch, tmp_path):
 
 @pytest.fixture
 def postgres_target():
-    import asyncpg
+    from app.core.config import Settings
+    from app.infrastructure.database import BaseDatabase
+    from scripts.manage_users import initialize_v3
 
     dsn = os.environ.get("TEST_DATABASE_URL")
     if not dsn or urlsplit(dsn).path != "/agent_platform_test":
         pytest.fail("真实数据库测试需要显式 TEST_DATABASE_URL，库名必须为 agent_platform_test")
     schema = "history_test_" + uuid4().hex
+    settings = Settings(_env_file=None, database_url=dsn)
 
     async def prepare():
-        conn = await asyncpg.connect(dsn)
-        try:
-            await conn.execute(f'CREATE SCHEMA "{schema}"')
-            await conn.execute(f'SET search_path TO "{schema}"')
-            await conn.execute(
-                (
-                    Path(__file__).parents[1] / "database/schema_v2.sql"
-                ).read_text(encoding="utf-8")
+        async with BaseDatabase.maintenance(settings) as db:
+            await db.execute(f'CREATE SCHEMA "{schema}"')
+        await initialize_v3(settings, "test-pass123", schema=schema)
+        async with BaseDatabase.maintenance(settings, schema=schema) as db:
+            uid = await db.fetchval("SELECT user_id FROM users WHERE username='admin'")
+            await db.execute(
+                "INSERT INTO auth_sessions(auth_session_id,user_id,token_hash,csrf_token,"
+                "expires_at) VALUES($1,$2,$3,'test-csrf',now()+interval '1 day')",
+                uuid4(), uid, bytes(32),
             )
-        finally:
-            await conn.close()
 
     async def cleanup():
-        conn = await asyncpg.connect(dsn)
-        try:
-            # schema 来自本次 uuid4，不接收外部标识符，不清理应用/public schema。
-            await conn.execute(f'DROP SCHEMA "{schema}" CASCADE')
-        finally:
-            await conn.close()
+        async with BaseDatabase.maintenance(settings) as db:
+            # 本次生成的随机测试schema，不清理应用/public schema。
+            await db.execute(f'DROP SCHEMA "{schema}" CASCADE')
 
     asyncio.run(prepare())
     yield dsn, schema
@@ -138,18 +136,54 @@ def turn_factory():
 
 @pytest.fixture(autouse=True)
 def wire_application_database(monkeypatch, request):
-    if "create_app" not in request.module.__dict__:
+    if "create_app" not in request.module.__dict__ or getattr(request.module, "AUTH_TEST", False):
         return
     postgres_target = request.getfixturevalue("postgres_target")
     from pydantic import SecretStr
 
     import app.main as main_module
-    from app.infrastructure.conversation.postgres_store import PostgresConversationStore
+    from app.infrastructure.database import Database
 
     dsn, schema = postgres_target
 
-    def make_store(settings, **kwargs):
+    def make_database(settings, **kwargs):
         settings = settings.model_copy(update={"database_url": SecretStr(dsn)})
-        return PostgresConversationStore(settings, _schema=schema, **kwargs)
+        return Database(settings, schema=schema, **kwargs)
 
-    monkeypatch.setattr(main_module, "PostgresConversationStore", make_store)
+    monkeypatch.setattr(main_module, "Database", make_database)
+    from fastapi.testclient import TestClient
+    original_enter = TestClient.__enter__
+    def authenticated_enter(client):
+        original_enter(client)
+        response = client.post(
+            client.app.state.settings.api_prefix + "/auth/login",
+            json={"username": "admin", "password": "test-pass123"},
+            headers={"Origin": "http://localhost:5173"},
+        )
+        assert response.status_code == 200, response.text
+        context = response.json()
+        client.headers.update(
+            {
+                "Origin": "http://localhost:5173",
+                "X-Auth-Session-ID": context["auth_session_id"],
+                "X-CSRF-Token": context["csrf_token"],
+            }
+        )
+        return client
+    monkeypatch.setattr(TestClient, "__enter__", authenticated_enter)
+
+
+
+@pytest.fixture
+def actor(postgres_target):
+    dsn, schema = postgres_target
+    async def load():
+        from app.core.config import Settings
+        from app.infrastructure.database import BaseDatabase
+        from app.infrastructure.identity.postgres_store import LIVE, _context
+
+        async with BaseDatabase.maintenance(
+            Settings(_env_file=None, database_url=dsn), schema=schema
+        ) as db:
+            return _context(await db.fetchrow(LIVE + "AND s.token_hash=$1", bytes(32)))
+    return asyncio.run(load())

@@ -162,6 +162,13 @@ def test_real_http_export_on_windows_reload_event_loop():
         async with app.router.lifespan_context(app):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                          base_url='http://test') as client:
+                login = await client.post('/api/v1/auth/login', json={
+                    'username': 'admin', 'password': 'test-pass123',
+                }, headers={'Origin': 'http://localhost:5173'})
+                context = login.json()
+                client.headers.update({'Origin': 'http://localhost:5173',
+                    'X-Auth-Session-ID': context['auth_session_id'],
+                    'X-CSRF-Token': context['csrf_token']})
                 response = await client.post('/api/v1/documents/export/docx',
                                              json={'markdown': '## 中文审核报告\n\n正文'})
         assert response.status_code == 200

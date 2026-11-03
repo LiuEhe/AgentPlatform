@@ -1,6 +1,7 @@
 """真实注册表、会话服务和制度审核图的跨层测试，外部模型受控替代。"""
 
 import json
+from uuid import UUID
 
 from fastapi.testclient import TestClient
 
@@ -143,7 +144,8 @@ def test_pending_review_then_smalltalk_never_executes_review(monkeypatch, fake_m
         )
         assert (
             client.portal.call(
-                client.app.state.conversation_service._store.snapshot, id
+                client.app.state.conversation_service._store.snapshot,
+                UUID(client.get('/api/v1/auth/me').json()['user']['user_id']), id
             ).continuation
             is None
         )

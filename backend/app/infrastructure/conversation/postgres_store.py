@@ -1,17 +1,13 @@
 """会话历史 PostgreSQL 仓储；不导入 HTTP View 或 Agent 业务。"""
 
-import asyncio
 import base64
 import json
-import re
-from collections.abc import Callable
-from contextlib import asynccontextmanager
 from datetime import datetime
 from uuid import UUID, uuid4
 
-import asyncpg
-
 from app.core.errors import AppError
+from app.infrastructure.database import BaseDatabase
+from app.infrastructure.identity.postgres_store import LIVE, IdentityStore, auth_required
 from app.schemas.conversation_session import (
     ChatSessionListPage,
     ChatSessionPage,
@@ -26,6 +22,7 @@ from app.schemas.conversation_session import (
     SubmissionResult,
 )
 from app.schemas.conversation_turn import ChildAgentResult, ContinuationState
+from app.schemas.identity import AuthContext
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
 CAPACITY_MESSAGE = "会话输出超过容量限制"
@@ -43,75 +40,10 @@ def validate_text(*values: str):
         raise AppError("INVALID_CONVERSATION_INPUT", "内容包含不支持的空字符", 422)
 
 
-class PostgresConversationStore:
-    def __init__(
-        self, settings, *, on_unavailable: Callable[[], None] | None = None, _schema="public"
-    ):
-        if not re.fullmatch(r"public|history_test_[0-9a-f]{32}", _schema):
-            raise ValueError("Invalid database schema")
-        self.settings = settings
-        self._schema = _schema
-        self._on_unavailable = on_unavailable
-        self._pool = None
-        self._owner = None
-        self._available = False
-
-    async def initialize(self):
-        if not self.settings.database_url:
-            raise AppError("STORAGE_UNAVAILABLE", "缺少 DATABASE_URL", 503)
-        dsn = self.settings.database_url.get_secret_value()
-        options = dict(
-            timeout=self.settings.database_timeout_seconds,
-            command_timeout=self.settings.database_timeout_seconds,
-            server_settings={
-                "search_path": self._schema,
-                "statement_timeout": "5000",
-                "lock_timeout": "1000",
-            },
-        )
-        try:
-            self._owner = await asyncpg.connect(dsn, **options)
-            if not await self._owner.fetchval("SELECT pg_try_advisory_lock(1095782471, 1)"):
-                raise AppError("STORAGE_IN_USE", "已有进程使用会话数据库，请使用单工作进程", 503)
-            version = await self._owner.fetchval("SELECT version FROM chat_schema_version")
-            if version != 2:
-                raise AppError("STORAGE_SCHEMA_INVALID", "会话表结构版本不匹配", 503)
-            self._pool = await asyncpg.create_pool(
-                dsn,
-                min_size=self.settings.database_pool_min_size,
-                max_size=self.settings.database_pool_max_size,
-                **options,
-            )
-            self._owner.add_termination_listener(self._lost_owner)
-            self._available = True
-        except BaseException as exc:
-            await self.aclose()
-            if isinstance(exc, (AppError, asyncio.CancelledError)):
-                raise
-            raise AppError("STORAGE_UNAVAILABLE", "数据库连接或会话表结构不可用", 503) from None
-
-    def _lost_owner(self, connection):
-        self._available = False
-        if self._on_unavailable:
-            self._on_unavailable()
-
-    def _check(self):
-        if not self._available or not self._owner or self._owner.is_closed():
-            raise AppError("STORAGE_UNAVAILABLE", "历史保存服务不可用，请重启服务", 503)
-
-    @asynccontextmanager
-    async def _connection(self, *, write=False):
-        self._check()
-        try:
-            async with self._pool.acquire(timeout=self.settings.database_timeout_seconds) as conn:
-                async with conn.transaction(
-                    isolation="read_committed" if write else "repeatable_read", readonly=not write
-                ):
-                    yield conn
-                    if write:
-                        self._check()
-        except (asyncpg.PostgresError, asyncpg.InterfaceError, OSError, TimeoutError):
-            raise AppError("STORAGE_UNAVAILABLE", "会话数据库暂时不可用", 503) from None
+class PostgresConversationStore(BaseDatabase):
+    def __init__(self, database):
+        super().__init__(database)
+        self.identities = IdentityStore(database)
 
     @staticmethod
     def _summary(row):
@@ -122,37 +54,59 @@ class PostgresConversationStore:
             }
         )
 
-    async def _session(self, conn, session_id, *, lock=False):
+    async def _principal(self, conn, actor, *, write=False):
+        if isinstance(actor, AuthContext):
+            if write:
+                await self.identities.lock_actor(conn, actor)
+            else:
+                live = await conn.fetchrow(
+                    LIVE + "AND s.auth_session_id=$1 AND s.user_id=$2",
+                    actor.auth_session_id, actor.user.user_id,
+                )
+                if live is None:
+                    raise auth_required()
+                if live["must_change_password"]:
+                    raise AppError("PASSWORD_CHANGE_REQUIRED", "请先修改临时密码", 403)
+            return actor.user.user_id
+        # Only internal run/recovery callers carry a UUID; HTTP callers always pass AuthContext.
+        if not isinstance(actor, UUID):
+            raise auth_required()
+        return actor
+
+    async def _session(self, conn, actor, session_id, *, lock=False, optional=False):
+        uid = await self._principal(conn, actor, write=lock)
         row = await conn.fetchrow(
             "SELECT * FROM chat_sessions WHERE session_id=$1" + (" FOR UPDATE" if lock else ""),
             identifier(session_id),
         )
-        if not row:
+        if row is not None and row["user_id"] != uid:
+            raise AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404)
+        if row is None and not optional:
             raise AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404)
         return row
 
-    async def inspect_deletion(self, session_id: str) -> SessionDeletionTarget | None:
-        async with self._connection(write=True) as conn:
-            row = await conn.fetchrow(
-                "SELECT agent_id FROM chat_sessions WHERE session_id=$1 FOR UPDATE",
-                identifier(session_id),
-            )
+    async def authorize(self, actor, session_id, *, optional=False, write=False):
+        async with self.transaction(write=write) as conn:
+            return await self._session(conn, actor, session_id, optional=optional, lock=write)
+
+    async def inspect_deletion(self, actor, session_id: str) -> SessionDeletionTarget | None:
+        async with self.transaction(write=True) as conn:
+            row = await self._session(conn, actor, session_id, lock=True, optional=True)
             if row is None:
                 return None
             runs = await conn.fetch(
                 "SELECT run_id,status FROM runs WHERE session_id=$1", identifier(session_id)
             )
             return SessionDeletionTarget(
-                session_id, row["agent_id"], tuple(str(run["run_id"]) for run in runs),
+                session_id, row["agent_id"], str(row["user_id"]),
+                tuple(str(run["run_id"]) for run in runs),
                 next((str(run["run_id"]) for run in runs if run["status"] not in TERMINAL), None),
             )
 
-    async def delete_session(self, session_id: str) -> None:
+    async def delete_session(self, actor, session_id: str) -> None:
         sid = identifier(session_id)
-        async with self._connection(write=True) as conn:
-            exists = await conn.fetchval(
-                "SELECT session_id FROM chat_sessions WHERE session_id=$1 FOR UPDATE", sid
-            )
+        async with self.transaction(write=True) as conn:
+            exists = await self._session(conn, actor, session_id, lock=True, optional=True)
             if exists is None:
                 return
             active = await conn.fetchval(
@@ -235,16 +189,16 @@ class PostgresConversationStore:
                               "session_id": str(row["session_id"])})
 
     async def list_agents(self):
-        async with self._connection() as conn:
+        async with self.transaction() as conn:
             rows = await conn.fetch(
                 "SELECT agent_id,name,description FROM agents ORDER BY agent_id"
             )
         return [dict(row) for row in rows]
 
-    async def get_file(self, session_id, file_id):
+    async def get_file(self, actor, session_id, file_id):
         # 与 add_file 的会话行锁同步，确认原事务结束后再判断文件是否存在。
-        async with self._connection(write=True) as conn:
-            await self._session(conn, session_id, lock=True)
+        async with self.transaction(write=True) as conn:
+            await self._session(conn, actor, session_id, lock=True)
             row = await conn.fetchrow(
                 "SELECT * FROM files WHERE session_id=$1 AND file_id=$2",
                 identifier(session_id), identifier(file_id),
@@ -253,18 +207,19 @@ class PostgresConversationStore:
                 raise AppError("MATERIAL_NOT_FOUND", "会话材料不存在", 404)
             return self._file(row)
 
-    async def create(self, agent_id="conversation_assistant"):
+    async def create(self, actor, agent_id="conversation_assistant"):
         session_id = str(uuid4())
-        async with self._connection(write=True) as conn:
+        async with self.transaction(write=True) as conn:
             await conn.execute(
-                "INSERT INTO chat_sessions(session_id,agent_id,title) VALUES($1,$2,$3)",
+                "INSERT INTO chat_sessions(session_id,agent_id,title,user_id) VALUES($1,$2,$3,$4)",
                 identifier(session_id),
                 agent_id,
                 "新对话",
+                await self._principal(conn, actor, write=True),
             )
-        return await self.read(session_id)
+        return await self.read(actor, session_id)
 
-    async def list(self, agent_id, *, limit=20, cursor=None):
+    async def list(self, actor, agent_id, *, limit=20, cursor=None):
         stamp, last_id = None, None
         if cursor:
             try:
@@ -274,6 +229,7 @@ class PostgresConversationStore:
                 if not isinstance(data, dict) or set(data) != {
                     "v",
                     "agent_id",
+                    "user_id",
                     "updated_at",
                     "session_id",
                 }:
@@ -283,7 +239,11 @@ class PostgresConversationStore:
                     for key in ("agent_id", "updated_at", "session_id")
                 ):
                     raise ValueError
-                if data["v"] != 2 or data["agent_id"] != agent_id:
+                if (
+                    data["v"] != 3
+                    or data["agent_id"] != agent_id
+                    or data["user_id"] != str(actor.user.user_id)
+                ):
                     raise ValueError
                 stamp, last_id = (
                     datetime.fromisoformat(data["updated_at"]),
@@ -293,15 +253,17 @@ class PostgresConversationStore:
                     raise ValueError
             except (ValueError, TypeError, KeyError, UnicodeError):
                 raise AppError("INVALID_CONVERSATION_INPUT", "会话分页游标无效", 422) from None
-        async with self._connection() as conn:
+        async with self.transaction() as conn:
+            uid = await self._principal(conn, actor)
             rows = await conn.fetch(
-                """SELECT * FROM chat_sessions WHERE agent_id=$1
+                """SELECT * FROM chat_sessions WHERE agent_id=$1 AND user_id=$5
                    AND ($2::timestamptz IS NULL OR (updated_at,session_id)<($2,$3::uuid))
                    ORDER BY updated_at DESC,session_id DESC LIMIT $4""",
                 agent_id,
                 stamp,
                 last_id,
                 limit + 1,
+                uid,
             )
         items = [self._summary(row) for row in rows[:limit]]
         next_cursor = None
@@ -310,7 +272,8 @@ class PostgresConversationStore:
             next_cursor = base64.urlsafe_b64encode(
                 json.dumps(
                     dict(
-                        v=2,
+                        v=3,
+                        user_id=str(uid),
                         agent_id=agent_id,
                         updated_at=last.updated_at.isoformat(),
                         session_id=last.session_id,
@@ -319,9 +282,9 @@ class PostgresConversationStore:
             ).decode()
         return ChatSessionListPage(items, next_cursor)
 
-    async def read(self, session_id, *, limit=50, before_sequence=None, after_sequence=None):
-        async with self._connection() as conn:
-            row = await self._session(conn, session_id)
+    async def read(self, actor, session_id, *, limit=50, before_sequence=None, after_sequence=None):
+        async with self.transaction() as conn:
+            row = await self._session(conn, actor, session_id)
             candidates = await self._messages(
                 conn,
                 session_id,
@@ -352,9 +315,9 @@ class PostgresConversationStore:
                 page[-1].sequence if more and after_sequence is not None else None,
             )
 
-    async def snapshot(self, session_id, latest_message_id=None):
-        async with self._connection() as conn:
-            row = await self._session(conn, session_id)
+    async def snapshot(self, actor, session_id, latest_message_id=None):
+        async with self.transaction() as conn:
+            row = await self._session(conn, actor, session_id)
             messages = await self._messages(conn, session_id)
             documents = await self._files(conn, session_id)
             continuation = json.loads(row["continuation"]) if row["continuation"] else None
@@ -367,12 +330,12 @@ class PostgresConversationStore:
                 ContinuationState.model_validate(continuation["data"]) if continuation else None,
             )
 
-    async def add_file(self, session_id, file: SessionFile):
+    async def add_file(self, actor, session_id, file: SessionFile):
         validate_text(file.original_name, file.source_path, file.content_path)
         if file.session_id != session_id:
             raise AppError("MATERIAL_NOT_FOUND", "会话材料不存在", 404)
-        async with self._connection(write=True) as conn:
-            await self._session(conn, session_id, lock=True)
+        async with self.transaction(write=True) as conn:
+            await self._session(conn, actor, session_id, lock=True)
             if await conn.fetchval(
                 "SELECT count(*) FROM runs WHERE session_id=$1 AND status IN ('queued','running')",
                 identifier(session_id),
@@ -412,9 +375,9 @@ class PostgresConversationStore:
             finished_at=row["finished_at"],
         )
 
-    async def read_run(self, session_id, run_id):
-        async with self._connection() as conn:
-            await self._session(conn, session_id)
+    async def read_run(self, actor, session_id, run_id):
+        async with self.transaction() as conn:
+            await self._session(conn, actor, session_id)
             return await self._run(conn, session_id, run_id)
 
     @staticmethod
@@ -423,10 +386,10 @@ class PostgresConversationStore:
             len(m.content) + (len(m.agent_call.output) if m.agent_call else 0) for m in messages
         )
 
-    async def submit(self, session_id, request, *, allow_create=True):
+    async def submit(self, actor, session_id, request, *, allow_create=True):
         validate_text(request.content, request.client_message_id)
-        async with self._connection(write=True) as conn:
-            row = await self._session(conn, session_id, lock=True)
+        async with self.transaction(write=True) as conn:
+            row = await self._session(conn, actor, session_id, lock=True)
             existing = await conn.fetchval(
                 (
                     "SELECT run_id FROM runs WHERE session_id=$1 AND "
@@ -505,8 +468,9 @@ class PostgresConversationStore:
             )
             return SubmissionResult(await self._run(conn, session_id, str(run_id)), True)
 
-    async def start(self, session_id, run_id):
-        async with self._connection(write=True) as conn:
+    async def start(self, actor, session_id, run_id):
+        async with self.transaction(write=True) as conn:
+            await self._session(conn, actor, session_id, lock=True)
             await conn.execute(
                 (
                     "UPDATE runs SET "
@@ -518,9 +482,9 @@ class PostgresConversationStore:
             )
             return await self._run(conn, session_id, run_id)
 
-    async def finish(self, session_id, run_id, completion: RunCompletion):
-        async with self._connection(write=True) as conn:
-            row = await self._session(conn, session_id, lock=True)
+    async def finish(self, actor, session_id, run_id, completion: RunCompletion):
+        async with self.transaction(write=True) as conn:
+            row = await self._session(conn, actor, session_id, lock=True)
             run = await self._run(conn, session_id, run_id)
             if run.status in TERMINAL:
                 return run
@@ -593,15 +557,16 @@ class PostgresConversationStore:
             return await self._run(conn, session_id, run_id)
 
     async def recover_interrupted(self):
-        async with self._connection() as conn:
+        async with self.transaction() as conn:
             rows = await conn.fetch(
-                "SELECT session_id,run_id FROM runs WHERE status IN "
+                "SELECT r.session_id,r.run_id,s.user_id FROM runs r JOIN chat_sessions s "
+                "USING(session_id) WHERE status IN "
                 "('queued','running') ORDER BY session_id"
             )
         for row in rows:
             text = "服务中断，本次处理未完成，请重新提交"
             await self.finish(
-                str(row["session_id"]),
+                row["user_id"], str(row["session_id"]),
                 str(row["run_id"]),
                 RunCompletion(
                     "failed",
@@ -611,16 +576,3 @@ class PostgresConversationStore:
                 ),
             )
         return len(rows)
-
-    async def aclose(self):
-        self._available = False
-        if self._pool:
-            try:
-                await asyncio.wait_for(self._pool.close(), 10)
-            except TimeoutError:
-                self._pool.terminate()
-            self._pool = None
-        if self._owner:
-            self._owner.remove_termination_listener(self._lost_owner)
-            await self._owner.close(timeout=5)
-            self._owner = None

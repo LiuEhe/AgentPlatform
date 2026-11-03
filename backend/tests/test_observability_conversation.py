@@ -9,6 +9,7 @@ from app.core.config import Settings
 from app.core.observability import bind_observation_attributes
 from app.infrastructure.conversation.active_runs import ActiveRunRegistry
 from app.infrastructure.conversation.postgres_store import PostgresConversationStore
+from app.infrastructure.database import Database
 from app.schemas.conversation import MessageCreate
 from app.services.conversation_service import ConversationService
 
@@ -27,8 +28,8 @@ async def build_service():
 
     dsn, schema = POSTGRES_TARGET
     settings = Settings(_env_file=None, database_url=SecretStr(dsn))
-    store = PostgresConversationStore(settings, _schema=schema)
-    await store.initialize()
+    store = PostgresConversationStore(Database(settings , schema=schema))
+    await store.database.initialize()
     observer = RecordingObserver()
     service = ConversationService(
         settings,
@@ -40,12 +41,12 @@ async def build_service():
     return service, observer
 
 
-def test_run_has_new_root_after_202_and_preserves_request_id():
+def test_run_has_new_root_after_202_and_preserves_request_id(actor):
     async def run():
         service, observer = await build_service()
-        session = await service.create()
+        session = await service.create(actor)
         with bind_observation_attributes({"request_id": "request-1"}):
-            result = await service.submit(
+            result = await service.submit(actor,
                 session.session_id, MessageCreate(client_message_id="x", content="hi")
             )
         task = service._tasks[result.run_id]
@@ -55,40 +56,43 @@ def test_run_has_new_root_after_202_and_preserves_request_id():
         assert roots[0]["request_id"] == "request-1"
         assert roots[0]["session_id"] == session.session_id
         await service.aclose()
+        await service._store.database.aclose()
 
     asyncio.run(run())
 
 
-def test_idempotent_submit_creates_one_run_trace():
+def test_idempotent_submit_creates_one_run_trace(actor):
     async def run():
         service, observer = await build_service()
-        session = await service.create()
+        session = await service.create(actor)
         message = MessageCreate(client_message_id="x", content="hi")
-        first = await service.submit(session.session_id, message)
-        second = await service.submit(session.session_id, message)
+        first = await service.submit(actor, session.session_id, message)
+        second = await service.submit(actor, session.session_id, message)
         assert first.run_id == second.run_id
         await asyncio.gather(*list(service._tasks.values()))
         assert len(observer.records) == 1
         await service.aclose()
+        await service._store.database.aclose()
 
     asyncio.run(run())
 
 
-def test_cancel_while_queued_finishes_observation():
+def test_cancel_while_queued_finishes_observation(actor):
     async def run():
         service, observer = await build_service()
         for _ in range(service.settings.conversation_concurrency):
             await service._slots.acquire()
-        session = await service.create()
-        result = await service.submit(
+        session = await service.create(actor)
+        result = await service.submit(actor,
             session.session_id, MessageCreate(client_message_id="x", content="hi")
         )
         task = service._tasks[result.run_id]
         await asyncio.sleep(0)
-        await service.cancel(session.session_id, result.run_id)
+        await service.cancel(actor, session.session_id, result.run_id)
         await asyncio.gather(task, return_exceptions=True)
         assert observer.records[0]["attributes"]["status"] == "cancelled"
         assert result.run_id not in service._tasks
         await service.aclose()
+        await service._store.database.aclose()
 
     asyncio.run(run())

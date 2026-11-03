@@ -9,13 +9,14 @@ from app.core.config import Settings
 from app.core.errors import AppError
 from app.infrastructure.conversation.active_runs import ActiveRunRegistry
 from app.infrastructure.conversation.postgres_store import PostgresConversationStore
+from app.infrastructure.database import Database
 from app.main import create_app
 from app.schemas.conversation import MessageCreate
 from app.schemas.conversation_session import RunCompletion, SessionFile, SessionSubmission
 from app.services.conversation_service import ConversationService
 
 
-def test_startup_recovers_only_admitted_deletions(monkeypatch):
+def test_startup_recovers_only_admitted_deletions(actor, monkeypatch):
     from uuid import uuid4
 
     from app.infrastructure.documents.local_file_store import LocalFileStore
@@ -27,8 +28,10 @@ def test_startup_recovers_only_admitted_deletions(monkeypatch):
         for _ in range(2):
             sid = client.post("/api/v1/sessions").json()["session_id"]
             files.publish(files.stage("conversation_assistant", sid, str(uuid4()), b"docx", "body"))
-            files.write_deletion_intent("conversation_assistant", sid)
-            client.portal.call(client.app.state.conversation_service._store.delete_session, sid)
+            files.write_deletion_intent("conversation_assistant", sid, str(actor.user.user_id))
+            client.portal.call(
+                client.app.state.conversation_service._store.delete_session, actor, sid
+            )
             ids.append(sid)
     original = LocalFileStore.discard_session
     def fail_one(self, agent, sid):
@@ -42,12 +45,14 @@ def test_startup_recovers_only_admitted_deletions(monkeypatch):
         assert files.read_deletion_intent(ids[1]) is None
 
 
-def test_restart_restores_history_and_interrupts_once():
+def test_restart_restores_history_and_interrupts_once(actor):
     settings = Settings(_env_file=None)
     with TestClient(create_app(settings)) as client:
         id = client.post("/api/v1/sessions").json()["session_id"]
         store = client.app.state.conversation_service._store
-        submitted = client.portal.call(store.submit, id, SessionSubmission("queued", "已提交"))
+        submitted = client.portal.call(
+            store.submit, actor, id, SessionSubmission("queued", "已提交")
+        )
     for _ in range(2):
         with TestClient(create_app(settings)) as client:
             history = client.get(f"/api/v1/sessions/{id}").json()
@@ -59,14 +64,14 @@ def test_restart_restores_history_and_interrupts_once():
             assert client.get("/api/v1/sessions").json()["items"][0]["session_id"] == id
 
 
-def test_pagination_and_invalid_cursor_have_explicit_errors():
+def test_pagination_and_invalid_cursor_have_explicit_errors(actor):
     with TestClient(create_app(Settings(_env_file=None))) as client:
         id = client.post("/api/v1/sessions").json()["session_id"]
         store = client.app.state.conversation_service._store
         for i in range(3):
-            run = client.portal.call(store.submit, id, SessionSubmission(str(i), f"用户{i}"))
+            run = client.portal.call(store.submit, actor, id, SessionSubmission(str(i), f"用户{i}"))
             client.portal.call(
-                store.finish, id, run.run.run_id, RunCompletion("succeeded", f"回复{i}")
+                store.finish, actor, id, run.run.run_id, RunCompletion("succeeded", f"回复{i}")
             )
         page = client.get(f"/api/v1/sessions/{id}?after_sequence=0&limit=2").json()
         assert page["last_sequence"] == 6
@@ -93,14 +98,14 @@ def test_structurally_invalid_cursor_returns_422(bad_id):
         assert client.get("/api/v1/sessions", params={"cursor": cursor}).status_code == 422
 
 
-def test_terminal_commit_failure_never_emits_done(postgres_target, monkeypatch):
+def test_terminal_commit_failure_never_emits_done(actor, postgres_target, monkeypatch):
     from types import SimpleNamespace
 
     async def scenario():
         dsn, schema = postgres_target
         settings = Settings(_env_file=None, database_url=dsn)
-        store = PostgresConversationStore(settings, _schema=schema)
-        await store.initialize()
+        store = PostgresConversationStore(Database(settings , schema=schema))
+        await store.database.initialize()
         gate = asyncio.Event()
 
         class Runtime:
@@ -115,11 +120,11 @@ def test_terminal_commit_failure_never_emits_done(postgres_target, monkeypatch):
         service = ConversationService(
             settings, runtime, store=store, active_runs=ActiveRunRegistry(max_bytes=100000)
         )
-        page = await service.create()
-        run = await service.submit(
+        page = await service.create(actor)
+        run = await service.submit(actor,
             page.session_id, MessageCreate(client_message_id="m", content="hi")
         )
-        reader = await service.stream_run(page.session_id, run.run_id)
+        reader = await service.stream_run(actor, page.session_id, run.run_id)
         assert (await anext(reader)).event == "snapshot"
 
         async def fail(*args):
@@ -134,61 +139,67 @@ def test_terminal_commit_failure_never_emits_done(postgres_target, monkeypatch):
             async for event in reader:
                 assert event.event != "done"
         assert runtime.calls == 1
-        assert (await store.read_run(page.session_id, run.run_id)).status in {"queued", "running"}
+        assert (await store.read_run(actor, page.session_id, run.run_id)).status in {
+            "queued",
+            "running",
+        }
         monkeypatch.setattr(store, "finish", original)
         await service.aclose()
-        await store.initialize()
+        await store.database.initialize()
         assert await store.recover_interrupted() == 1
         assert (
-            await store.read_run(page.session_id, run.run_id)
+            await store.read_run(actor, page.session_id, run.run_id)
         ).error_code == "CONVERSATION_INTERRUPTED"
         assert await store.recover_interrupted() == 0
-        await store.aclose()
+        await store.database.aclose()
 
     asyncio.run(scenario())
 
 
-def test_exclusive_owner_and_connection_loss(postgres_target):
-    import asyncpg
+def test_exclusive_owner_and_connection_loss(actor, postgres_target):
 
     async def scenario():
         dsn, schema = postgres_target
         settings = Settings(_env_file=None, database_url=dsn)
         lost = asyncio.Event()
-        first = PostgresConversationStore(settings, _schema=schema, on_unavailable=lost.set)
-        second = PostgresConversationStore(settings, _schema=schema)
-        await first.initialize()
+        first = PostgresConversationStore(
+            Database(settings, schema=schema, on_unavailable=lost.set)
+        )
+        second = PostgresConversationStore(Database(settings , schema=schema))
+        await first.database.initialize()
         try:
             with pytest.raises(AppError) as raised:
-                await second.initialize()
+                await second.database.initialize()
             assert raised.value.code == "STORAGE_IN_USE"
-            pid = await first._owner.fetchval("SELECT pg_backend_pid()")
-            conn = await asyncpg.connect(dsn)
+            pid = await first.fetchval(
+                "SELECT pid FROM pg_locks WHERE locktype='advisory' AND classid=1095782471 AND "
+                "objid=1 AND granted"
+            )
             try:
-                await conn.execute("SELECT pg_terminate_backend($1)", pid)
-            finally:
-                await conn.close()
+                await first.execute("SELECT pg_terminate_backend($1)", pid)
+            except AppError:
+                pass  # Loss may be observed by the post-commit health check.
             await asyncio.wait_for(lost.wait(), 2)
             with pytest.raises(AppError):
-                await first.create()
+                await first.create(actor)
         finally:
-            await first.aclose()
-            await second.aclose()
+            await first.database.aclose()
+            await second.database.aclose()
 
     asyncio.run(scenario())
 
 
-def test_foreign_document_and_rolled_back_finish(postgres_target, monkeypatch):
+def test_foreign_document_and_rolled_back_finish(actor, postgres_target, monkeypatch):
     from uuid import uuid4
 
     async def scenario():
         dsn, schema = postgres_target
         store = PostgresConversationStore(
-            Settings(_env_file=None, database_url=dsn), _schema=schema
+            Database(Settings(_env_file=None, database_url=dsn), schema=schema)
         )
-        await store.initialize()
+        await store.database.initialize()
         try:
-            a, b = await store.create(), await store.create()
+            a, b = await store.create(actor), await store.create(actor)
             doc = SessionFile(
                 file_id=str(uuid4()),
                 session_id=a.summary.session_id,
@@ -198,16 +209,16 @@ def test_foreign_document_and_rolled_back_finish(postgres_target, monkeypatch):
                 size_bytes=10,
                 content_chars=4,
             )
-            await store.add_file(a.summary.session_id, doc)
+            await store.add_file(actor, a.summary.session_id, doc)
             with pytest.raises(AppError) as raised:
-                await store.submit(
+                await store.submit(actor,
                     b.summary.session_id, SessionSubmission("bad", "hi", (doc.file_id,))
                 )
             assert raised.value.status_code == 404
-            assert not (await store.read(b.summary.session_id)).messages
+            assert not (await store.read(actor, b.summary.session_id)).messages
             with pytest.raises(AppError):
-                await store.submit(a.summary.session_id, SessionSubmission("nul", "\x00"))
-            run = await store.submit(
+                await store.submit(actor, a.summary.session_id, SessionSubmission("nul", "\x00"))
+            run = await store.submit(actor,
                 a.summary.session_id, SessionSubmission("good", "hi", (doc.file_id,))
             )
             original = store._run
@@ -222,13 +233,15 @@ def test_foreign_document_and_rolled_back_finish(postgres_target, monkeypatch):
 
             monkeypatch.setattr(store, "_run", broken)
             with pytest.raises(RuntimeError):
-                await store.finish(
+                await store.finish(actor,
                     a.summary.session_id, run.run.run_id, RunCompletion("succeeded", "未提交")
                 )
             monkeypatch.setattr(store, "_run", original)
-            assert len((await store.read(a.summary.session_id)).messages) == 1
-            assert (await store.read_run(a.summary.session_id, run.run.run_id)).status == "queued"
+            assert len((await store.read(actor, a.summary.session_id)).messages) == 1
+            assert (
+                await store.read_run(actor, a.summary.session_id, run.run.run_id)
+            ).status == "queued"
         finally:
-            await store.aclose()
+            await store.database.aclose()
 
     asyncio.run(scenario())

@@ -14,7 +14,7 @@ def test_agents_are_database_metadata_without_model_configuration():
         store = client.app.state.conversation_service._store
 
         async def change():
-            async with store._connection(write=True) as conn:
+            async with store.transaction(write=True) as conn:
                 await conn.execute(
                     "UPDATE agents SET name='数据库名称' WHERE agent_id='conversation_assistant'"
                 )

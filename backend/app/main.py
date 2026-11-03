@@ -1,5 +1,6 @@
 """FastAPI 应用创建与依赖生命周期管理。"""
 
+import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -9,17 +10,24 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.agents import build_agent_registry
 from app.api.agents import router as agents_router
+from app.api.auth import install_auth_guard
+from app.api.auth import router as auth_router
 from app.api.conversations import router as conversations_router
 from app.api.document_exports import router as document_exports_router
 from app.api.health import router as health_router
 from app.api.reviews import router as reviews_router
+from app.api.users import router as users_router
 from app.core.config import Settings, get_settings
 from app.core.errors import install_error_handlers
 from app.core.logging import configure_logging, install_request_logging
 from app.core.observability import NullObserver
 from app.infrastructure.conversation.active_runs import ActiveRunRegistry
 from app.infrastructure.conversation.postgres_store import PostgresConversationStore
+from app.infrastructure.database import Database
 from app.infrastructure.documents.local_file_store import LocalFileStore
+from app.infrastructure.identity.auth_limits import AuthAttemptLimiter
+from app.infrastructure.identity.passwords import PasswordHasher
+from app.infrastructure.identity.postgres_store import IdentityStore
 from app.infrastructure.langfuse.client import create_observer, shutdown_observer
 from app.infrastructure.langfuse.prompts import LangfusePromptResolver
 from app.infrastructure.pandoc import PandocRunner
@@ -27,9 +35,11 @@ from app.infrastructure.ragflow.client import RagFlowClient
 from app.nodes.llm.prompts import PromptResolver
 from app.runtime.agent_runtime import AgentRegistry, AgentRuntime
 from app.services.agent_catalog_service import AgentCatalogService
+from app.services.auth_service import AuthService
 from app.services.conversation_service import ConversationService
 from app.services.document_export_service import DocumentExportService
 from app.services.llm_service import create_llm_service
+from app.services.user_service import UserService
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -58,10 +68,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             async with resolver.session():
                 yield
 
-        conversation_store = PostgresConversationStore(
+        database = Database(
             app_settings,
             on_unavailable=lambda: conversation_service.storage_unavailable(),
         )
+        identities = IdentityStore(database)
+        passwords = PasswordHasher(concurrency=app_settings.auth_hash_concurrency,
+            queue_size=app_settings.auth_hash_queue_size,
+            queue_timeout=app_settings.auth_hash_queue_timeout_seconds)
+        auth = AuthService(app_settings, identities, passwords, AuthAttemptLimiter(
+            window=app_settings.auth_login_window_seconds,
+            ip_failures=app_settings.auth_login_ip_failures,
+            account_failures=app_settings.auth_login_account_failures,
+            registration_window=app_settings.auth_registration_window_seconds,
+            registration_attempts=app_settings.auth_registration_ip_attempts,
+            max_keys=app_settings.auth_attempt_max_keys))
+        app.state.auth_service = auth
+        app.state.user_service = UserService(identities, passwords)
+        conversation_store = PostgresConversationStore(database)
         conversation_service = ConversationService(
             app_settings,
             None,
@@ -75,7 +99,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         export_service = DocumentExportService(app_settings, PandocRunner(app_settings))
         app.state.document_export_service = export_service
         try:
-            await conversation_store.initialize()
+            await database.initialize()
+            await auth.initialize()
+            # Preflight credentials before recovery writes; v1/corrupt files require maintenance.
+            await asyncio.to_thread(conversation_service._files.list_deletion_intents)
             await conversation_store.recover_interrupted()
             await conversation_service.recover_deletions()
             await export_service.initialize()
@@ -117,7 +144,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 await conversation_service.aclose()
             finally:
-                await conversation_store.aclose()
+                await passwords.aclose()
+                await database.aclose()
             await shutdown_observer(observer)
             app.state.conversation_service = None
             app.state.agent_catalog_service = None
@@ -139,15 +167,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.conversation_service = None
     app.state.agent_catalog_service = None
     app.state.observer = NullObserver()
+    install_auth_guard(app)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=app_settings.cors_origins,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "X-Request-ID",
+            "X-CSRF-Token",
+            "X-Auth-Session-ID",
+        ],
     )
     install_request_logging(app)
     install_error_handlers(app)
+    app.include_router(auth_router, prefix=app_settings.api_prefix)
+    app.include_router(users_router, prefix=app_settings.api_prefix)
     app.include_router(health_router)
     app.include_router(agents_router, prefix=app_settings.api_prefix)
     app.include_router(reviews_router, prefix=app_settings.api_prefix)

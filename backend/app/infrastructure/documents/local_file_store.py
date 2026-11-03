@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class SessionDeletionIntent:
     version: int
+    user_id: str
     agent_id: str
     session_id: str
 
@@ -161,18 +162,30 @@ class LocalFileStore:
             for child in directory.rglob("*"):
                 self._safe(child.relative_to(self.root).as_posix())
 
-    def write_deletion_intent(self, agent_id: str, session_id: str) -> SessionDeletionIntent:
+    def write_deletion_intent(
+        self, agent_id: str, session_id: str, user_id: str
+    ) -> SessionDeletionIntent:
+        if str(UUID(user_id)) != user_id:
+            raise self._error()
         self.validate_session_deletion(agent_id, session_id)
         target = self._intent_path(session_id)
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = self._safe(f".deletions/{uuid4()}.tmp")
         try:
             with temporary.open("x", encoding="utf-8") as stream:
-                json.dump({"version": 1, "agent_id": agent_id, "session_id": session_id}, stream)
+                json.dump(
+                    {
+                        "version": 2,
+                        "user_id": user_id,
+                        "agent_id": agent_id,
+                        "session_id": session_id,
+                    },
+                    stream,
+                )
             os.replace(temporary, target)
         finally:
             temporary.unlink(missing_ok=True)
-        return SessionDeletionIntent(1, agent_id, session_id)
+        return SessionDeletionIntent(2, user_id, agent_id, session_id)
 
     def read_deletion_intent(self, session_id: str) -> SessionDeletionIntent | None:
         path = self._intent_path(session_id)
@@ -183,10 +196,15 @@ class LocalFileStore:
         except (ValueError, UnicodeError):
             raise self._error() from None
         if (not isinstance(payload, dict)
-                or set(payload) != {"version", "agent_id", "session_id"}
-                or type(payload["version"]) is not int or payload["version"] != 1
+                or set(payload) != {"version", "user_id", "agent_id", "session_id"}
+                or type(payload["version"]) is not int or payload["version"] != 2
                 or payload["session_id"] != session_id):
             raise self._error()
+        try:
+            if str(UUID(payload["user_id"])) != payload["user_id"]:
+                raise ValueError
+        except (ValueError, TypeError, AttributeError):
+            raise self._error() from None
         self._session_dir(payload["agent_id"], payload["session_id"])
         return SessionDeletionIntent(**payload)
 
@@ -194,12 +212,9 @@ class LocalFileStore:
         directory = self._safe(".deletions")
         intents = []
         for path in directory.glob("*.json"):
-            try:
-                intent = self.read_deletion_intent(path.stem)
-                if intent:
-                    intents.append(intent)
-            except (AppError, OSError) as exc:
-                logger.warning("deletion_intent_invalid error_type=%s", type(exc).__name__)
+            intent = self.read_deletion_intent(path.stem)
+            if intent:
+                intents.append(intent)
         return intents
 
     def discard_session(self, agent_id: str, session_id: str) -> None:

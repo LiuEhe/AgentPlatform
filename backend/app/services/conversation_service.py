@@ -69,6 +69,7 @@ class ConversationService:
         self._uploads: dict[str, asyncio.Task] = {}
         self._submissions: set[asyncio.Task] = set()
         self._run_sessions: dict[str, str] = {}
+        self._run_owners = {}
         self._deletion_tasks: dict[str, asyncio.Task[None]] = {}
         self._closed = False
         self._unavailable = False
@@ -123,20 +124,27 @@ class ConversationService:
             else None,
         )
 
-    async def create(self):
+    async def create(self, actor):
         self._check_open()
-        page = await self._store.create("conversation_assistant")
+        page = await self._store.create(actor, "conversation_assistant")
         return self._page_view(page)
 
-    async def delete(self, session_id: str) -> None:
+    async def authorize(self, actor, session_id, *, optional=False):
+        await self._store.authorize(actor, session_id, optional=optional)
+
+    async def delete(self, actor, session_id: str) -> None:
         self._check_open()
         try:
             session_id = str(UUID(session_id))
         except (ValueError, TypeError, AttributeError):
             raise AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404) from None
+        await self._store.authorize(actor, session_id, optional=True)
+        intent = await asyncio.to_thread(self._files.read_deletion_intent, session_id)
+        if intent is not None and intent.user_id != str(actor.user.user_id):
+            raise AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404)
         task = self._deletion_tasks.get(session_id)
         if task is None or task.done():
-            task = asyncio.create_task(self._delete_session(session_id))
+            task = asyncio.create_task(self._delete_session(actor, session_id))
             self._deletion_tasks[session_id] = task
             def finished(done):
                 if self._deletion_tasks.get(session_id) is done:
@@ -146,11 +154,11 @@ class ConversationService:
             task.add_done_callback(finished)
         await asyncio.shield(task)
 
-    async def _delete_session(self, session_id: str) -> None:
+    async def _delete_session(self, actor, session_id: str) -> None:
         async with self._active.operation(session_id):
             if session_id in self._uploads:
                 raise AppError("CONVERSATION_BUSY", "请等待当前上传结束后再删除", 409)
-            target = await self._store.inspect_deletion(session_id)
+            target = await self._store.inspect_deletion(actor, session_id)
             if target:
                 if target.active_run_id or any(
                     key in self._tasks and not self._tasks[key].done() for key in target.run_ids
@@ -158,15 +166,18 @@ class ConversationService:
                     raise AppError("CONVERSATION_BUSY", "请等待当前操作结束后再删除", 409)
                 try:
                     intent = await asyncio.to_thread(
-                        self._files.write_deletion_intent, target.agent_id, session_id
+                        self._files.write_deletion_intent,
+                        target.agent_id,
+                        session_id,
+                        str(actor.user.user_id),
                     )
                 except (AppError, OSError):
                     raise AppError("STORAGE_UNAVAILABLE", "无法准备删除，请稍后重试", 503) from None
                 try:
-                    await self._store.delete_session(session_id)
+                    await self._store.delete_session(actor, session_id)
                 except Exception as failure:
                     # 新事务等待原写入结束；查询失败时保留凭据，绝不据超时清理文件。
-                    remaining = await self._store.inspect_deletion(session_id)
+                    remaining = await self._store.inspect_deletion(actor, session_id)
                     if remaining is not None:
                         try:
                             await asyncio.to_thread(self._files.discard_deletion_intent, session_id)
@@ -180,6 +191,8 @@ class ConversationService:
                     raise AppError("STORAGE_UNAVAILABLE", "无法核实删除，请稍后重试", 503) from None
                 if intent is None:
                     return
+                if intent.user_id != str(actor.user.user_id):
+                    raise AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404)
             try:
                 await asyncio.to_thread(self._files.discard_session, intent.agent_id, session_id)
                 await asyncio.to_thread(self._files.discard_deletion_intent, session_id)
@@ -191,13 +204,16 @@ class ConversationService:
     async def recover_deletions(self) -> None:
         try:
             intents = await asyncio.to_thread(self._files.list_deletion_intents)
-        except (AppError, OSError) as exc:
-            logger.warning("deletion_recovery_unavailable error_type=%s", type(exc).__name__)
-            return
+        except (AppError, OSError):
+            raise AppError(
+                "STORAGE_SCHEMA_INVALID", "删除凭据格式无效，请离线核实并修复", 503,
+            ) from None
         for intent in intents:
             try:
                 async with self._active.operation(intent.session_id):
-                    target = await self._store.inspect_deletion(intent.session_id)
+                    target = await self._store.inspect_deletion(
+                        UUID(intent.user_id), intent.session_id
+                    )
                     if target is None:
                         await asyncio.to_thread(
                             self._files.discard_session, intent.agent_id, intent.session_id
@@ -209,8 +225,8 @@ class ConversationService:
                     intent.session_id, type(exc).__name__,
                 )
 
-    async def list(self, agent_id="conversation_assistant", *, limit=20, cursor=None):
-        page = await self._store.list(agent_id, limit=limit, cursor=cursor)
+    async def list(self, actor, agent_id="conversation_assistant", *, limit=20, cursor=None):
+        page = await self._store.list(actor, agent_id, limit=limit, cursor=cursor)
         return SessionListView(
             items=[SessionSummaryView(**asdict(s)) for s in page.items],
             next_cursor=page.next_cursor,
@@ -228,9 +244,9 @@ class ConversationService:
             next_after_sequence=page.next_after_sequence,
         )
 
-    async def read(self, session_id, *, limit=50, before_sequence=None, after_sequence=None):
+    async def read(self, actor, session_id, *, limit=50, before_sequence=None, after_sequence=None):
         return self._page_view(
-            await self._store.read(
+            await self._store.read(actor,
                 session_id,
                 limit=limit,
                 before_sequence=before_sequence,
@@ -273,7 +289,8 @@ class ConversationService:
         name = " ".join(filename.replace("\\", "/").split("/")[-1].split())[:200]
         return TurnDocument(id=str(uuid4()), filename=name or "文档.docx", markdown=markdown)
 
-    async def upload(self, session_id: str, filename: str, content: bytes):
+    async def upload(self, actor, session_id: str, filename: str, content: bytes):
+        await self._store.authorize(actor, session_id)
         self._check_open()
         async with self._active.operation(session_id):
             self._check_open()
@@ -282,13 +299,13 @@ class ConversationService:
             self._active.reserve(len(content))
             self._uploads[session_id] = asyncio.current_task()
         try:
-            page = await self._store.read(session_id)
+            page = await self._store.read(actor, session_id)
             self._check_open()
             if page.active_run_id:
                 raise AppError("CONVERSATION_BUSY", "请等待当前操作完成", 409)
             cancelled = asyncio.Event()
             task = asyncio.create_task(
-                self._save_upload(session_id, page, filename, content, cancelled)
+                self._save_upload(actor, session_id, page, filename, content, cancelled)
             )
             try:
                 return await asyncio.shield(task)
@@ -309,7 +326,7 @@ class ConversationService:
             self._active.release(len(content))
             self._uploads.pop(session_id, None)
 
-    async def _save_upload(self, session_id, page, filename, content, cancelled):
+    async def _save_upload(self, actor, session_id, page, filename, content, cancelled):
         staged, paths, document = None, None, None
         confirmed = False
         try:
@@ -340,13 +357,13 @@ class ConversationService:
                     source_path=paths.source_path, content_path=paths.content_path,
                     size_bytes=len(content), content_chars=len(document.markdown),
                 )
-                saved = await self._store.add_file(session_id, metadata)
+                saved = await self._store.add_file(actor, session_id, metadata)
                 confirmed = True
                 return self._file_view(saved)
         finally:
             if paths and not confirmed:
                 try:
-                    await self._store.get_file(session_id, document.id)
+                    await self._store.get_file(actor.user.user_id, session_id, document.id)
                 except AppError as exc:
                     if exc.code == "MATERIAL_NOT_FOUND":
                         await asyncio.to_thread(self._files.discard_published, paths)
@@ -357,7 +374,8 @@ class ConversationService:
             if staged:
                 await asyncio.to_thread(self._files.discard_staged, staged)
 
-    async def submit(self, session_id: str, payload: MessageCreate):
+    async def submit(self, actor, session_id: str, payload: MessageCreate):
+        await self._store.authorize(actor, session_id)
         self._check_open()
         if self.runtime is None:
             raise AppError("SERVICE_NOT_READY", "聊天模型尚未配置就绪", 503)
@@ -375,7 +393,7 @@ class ConversationService:
             submitting = asyncio.current_task()
             self._submissions.add(submitting)
             try:
-                result = await self._store.submit(session_id, request, allow_create=reserved)
+                result = await self._store.submit(actor, session_id, request, allow_create=reserved)
                 self._check_open()
                 created = result.created
                 if (
@@ -386,7 +404,7 @@ class ConversationService:
                 ):
                     text = "服务中断，本次处理未完成，请重新提交"
                     recovered = await self._store.finish(
-                        session_id,
+                        actor.user.user_id, session_id,
                         result.run.run_id,
                         RunCompletion(
                             "failed",
@@ -401,7 +419,8 @@ class ConversationService:
                     run.request_id = observation_attributes.get().get("request_id")
                     self._active.attach(session_id, run)
                     self._run_sessions[run.run_id] = session_id
-                    task = asyncio.create_task(self._execute(session_id, run))
+                    self._run_owners[run.run_id] = actor.user.user_id
+                    task = asyncio.create_task(self._execute(actor.user.user_id, session_id, run))
                     self._tasks[run.run_id] = task
                     task.add_done_callback(lambda done, key=run.run_id: self._task_done(key, done))
                 return self._run_view(result.run)
@@ -416,15 +435,15 @@ class ConversationService:
         if not task.cancelled():
             task.exception()  # _execute reports errors; consume cancellation-cleanup exceptions.
 
-    async def read_run(self, session_id, run_id):
-        return self._run_view(await self._store.read_run(session_id, run_id))
+    async def read_run(self, actor, session_id, run_id):
+        return self._run_view(await self._store.read_run(actor, session_id, run_id))
 
-    async def stream_run(self, session_id, run_id) -> AsyncIterator[RunEvent]:
-        persisted = await self._store.read_run(session_id, run_id)
+    async def stream_run(self, actor, session_id, run_id) -> AsyncIterator[RunEvent]:
+        persisted = await self._store.read_run(actor, session_id, run_id)
         notification = self._active.subscribe(run_id)
         initial = self._active.snapshot(run_id)
         if notification is None and persisted.status not in TERMINAL_STATUSES:
-            persisted = await self._store.read_run(session_id, run_id)
+            persisted = await self._store.read_run(actor, session_id, run_id)
 
         async def events():
             offset = len(initial.text) if initial else 0
@@ -465,26 +484,27 @@ class ConversationService:
         elif event.kind == "stage":
             self._active.set_stage(run_id, event.text)
 
-    async def _finish(self, session_id, run_id, completion):
+    async def _finish(self, owner, session_id, run_id, completion):
         if self._unavailable:
             return
         try:
-            committed = await self._store.finish(session_id, run_id, completion)
+            committed = await self._store.finish(owner, session_id, run_id, completion)
         except Exception:
             self.storage_unavailable()
             raise
         self._active.complete(run_id, committed)
         self._active.discard(run_id)
         self._run_sessions.pop(run_id, None)
+        self._run_owners.pop(run_id, None)
         return committed
 
-    async def _cleanup_run(self, session_id, run_id, completion):
+    async def _cleanup_run(self, owner, session_id, run_id, completion):
         if self._unavailable:
             return
 
         async def finish():
             async with asyncio.timeout(10):
-                await self._finish(session_id, run_id, completion)
+                await self._finish(owner, session_id, run_id, completion)
 
         cleanup = asyncio.create_task(finish())
         while not cleanup.done():
@@ -494,15 +514,18 @@ class ConversationService:
                 continue
         cleanup.result()
 
-    async def cancel(self, session_id, run_id):
-        run = await self._store.read_run(session_id, run_id)
+    async def cancel(self, actor, session_id, run_id):
+        await self._store.authorize(actor, session_id, write=True)
+        run = await self._store.read_run(actor, session_id, run_id)
         if run.status not in TERMINAL_STATUSES:
             task = self._tasks.get(run_id)
             if task:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
-            await self._cleanup_run(session_id, run_id, RunCompletion("cancelled", "已停止。"))
-        return await self.read_run(session_id, run_id)
+            await self._cleanup_run(
+                actor.user.user_id, session_id, run_id, RunCompletion("cancelled", "已停止。")
+            )
+        return await self.read_run(actor, session_id, run_id)
 
     async def _load_materials(self, files):
         documents = []
@@ -515,7 +538,7 @@ class ConversationService:
             )
         return tuple(documents)
 
-    async def _execute(self, session_id, run):
+    async def _execute(self, owner, session_id, run):
         acquired = False
         attrs = {"session_id": session_id, "run_id": run.run_id, "request_id": run.request_id or ""}
         with bind_observation_attributes(attrs):
@@ -525,10 +548,10 @@ class ConversationService:
                         await self._slots.acquire()
                         acquired = True
                     async with asyncio.timeout(self.settings.conversation_run_timeout_seconds):
-                        started = await self._store.start(session_id, run.run_id)
+                        started = await self._store.start(owner, session_id, run.run_id)
                         self._active.update_run(started)
                         self._active.set_stage(run.run_id, "正在处理你的请求")
-                        snapshot = await self._store.snapshot(session_id)
+                        snapshot = await self._store.snapshot(owner, session_id)
                         turn = ConversationTurnInput(
                             latest_message_id=snapshot.latest_message_id,
                             messages=tuple(
@@ -550,7 +573,7 @@ class ConversationService:
                             raise asyncio.CancelledError
                         result = ConversationTurnResult.model_validate(execution.output)
                         final = await self._finish(
-                            session_id,
+                            owner, session_id,
                             run.run_id,
                             RunCompletion(
                                 "succeeded",
@@ -563,7 +586,7 @@ class ConversationService:
                             run.status = final.status
                 except asyncio.CancelledError:
                     await self._cleanup_run(
-                        session_id, run.run_id, RunCompletion("cancelled", "已停止。")
+                        owner, session_id, run.run_id, RunCompletion("cancelled", "已停止。")
                     )
                     run.status = "cancelled"
                     raise
@@ -589,7 +612,7 @@ class ConversationService:
                         type(exc).__name__,
                     )
                     await self._cleanup_run(
-                        session_id,
+                        owner, session_id,
                         run.run_id,
                         RunCompletion("failed", message, error_code=code, error_message=message),
                     )
@@ -607,6 +630,10 @@ class ConversationService:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         for run_id, session_id in list(self._run_sessions.items()):
-            await self._cleanup_run(session_id, run_id, RunCompletion("cancelled", "服务已关闭。"))
+            await self._cleanup_run(
+                self._run_owners[run_id],
+                session_id,
+                run_id,
+                RunCompletion("cancelled", "服务已关闭。"),
+            )
         await self._active.aclose()
-        await self._store.aclose()

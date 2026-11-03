@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from pydantic import ValidationError
 
+from app.api.auth import actor, guard_run_events
 from app.core.errors import AppError
 from app.schemas.conversation import (
     TERMINAL_STATUSES,
@@ -33,7 +34,7 @@ def service(request: Request) -> ConversationService:
 
 @router.post("", status_code=201, response_model=SessionView)
 async def create_conversation(request: Request) -> SessionView:
-    return await service(request).create()
+    return await service(request).create(actor(request))
 
 
 @router.get("/{session_id}", response_model=SessionView)
@@ -46,7 +47,7 @@ async def read_conversation(
 ) -> SessionView:
     if before_sequence is not None and after_sequence is not None:
         raise AppError("INVALID_CONVERSATION_INPUT", "不能同时指定前后消息位置", 422)
-    return await service(request).read(
+    return await service(request).read(actor(request),
         session_id,
         after_sequence=after_sequence,
         before_sequence=before_sequence,
@@ -56,7 +57,7 @@ async def read_conversation(
 
 @router.delete("/{session_id}", status_code=204, response_class=Response)
 async def delete_conversation(session_id: str, request: Request) -> Response:
-    await service(request).delete(session_id)
+    await service(request).delete(actor(request), session_id)
     return Response(status_code=204)
 
 
@@ -67,7 +68,7 @@ async def list_conversations(
     limit: int = Query(default=20, ge=1, le=100),
     cursor: str | None = Query(default=None, max_length=512),
 ) -> SessionListView:
-    return await service(request).list(agent_id, limit=limit, cursor=cursor)
+    return await service(request).list(actor(request), agent_id, limit=limit, cursor=cursor)
 
 
 @router.post("/{session_id}/files", status_code=201, response_model=FileView)
@@ -76,7 +77,9 @@ async def upload_document(
 ) -> FileView:
     try:
         content = await file.read(request.app.state.settings.max_upload_bytes + 1)
-        return await service(request).upload(session_id, file.filename or "", content)
+        return await service(request).upload(
+            actor(request), session_id, file.filename or "", content
+        )
     finally:
         await file.close()
 
@@ -94,19 +97,19 @@ async def send_message(session_id: str, request: Request) -> RunView:
         payload = MessageCreate.model_validate_json(bytes(body))
     except ValidationError as exc:
         raise AppError("INVALID_CONVERSATION_INPUT", "消息内容或附件引用无效", 422) from exc
-    return await service(request).submit(session_id, payload)
+    return await service(request).submit(actor(request), session_id, payload)
 
 
 @router.get("/{session_id}/runs/{run_id}", response_model=RunView)
 async def read_run(session_id: str, run_id: str, request: Request) -> RunView:
-    return await service(request).read_run(session_id, run_id)
+    return await service(request).read_run(actor(request), session_id, run_id)
 
 
 @router.post("/{session_id}/runs/{run_id}/cancel", response_model=RunView)
 async def cancel_run(session_id: str, run_id: str, request: Request) -> JSONResponse:
     instance = service(request)
-    previous = await instance.read_run(session_id, run_id)
-    result = await instance.cancel(session_id, run_id)
+    previous = await instance.read_run(actor(request), session_id, run_id)
+    result = await instance.cancel(actor(request), session_id, run_id)
     return JSONResponse(
         status_code=200 if previous.status in TERMINAL_STATUSES else 202,
         content=result.model_dump(mode="json"),
@@ -115,7 +118,9 @@ async def cancel_run(session_id: str, run_id: str, request: Request) -> JSONResp
 
 async def _run_events(session_id: str, run_id: str, request: Request) -> AsyncIterator[RunEvent]:
     # 依赖在响应头发出前运行，保留不存在时的标准 JSON 404。
-    return await service(request).stream_run(session_id, run_id)
+    events = await service(request).stream_run(actor(request), session_id, run_id)
+    return guard_run_events(actor(request), events,
+                            assert_live=request.app.state.auth_service.assert_live)
 
 
 @router.get("/{session_id}/runs/{run_id}/events", response_class=EventSourceResponse)

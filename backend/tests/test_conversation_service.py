@@ -8,6 +8,7 @@ from app.core.config import Settings
 from app.core.errors import AppError
 from app.infrastructure.conversation.active_runs import ActiveRunRegistry
 from app.infrastructure.conversation.postgres_store import PostgresConversationStore
+from app.infrastructure.database import Database
 from app.runtime.agent_runtime import AgentEvent, AgentExecution
 from app.schemas.conversation import MessageCreate
 from app.schemas.conversation_turn import (
@@ -43,11 +44,11 @@ class Runtime:
     ("files", "CONVERSATION_DELETE_INCOMPLETE"),
     ("receipt", "CONVERSATION_DELETE_INCOMPLETE"),
 ])
-def test_delete_failure_boundaries_and_retry(monkeypatch, phase, code):
+def test_delete_failure_boundaries_and_retry(actor, monkeypatch, phase, code):
     async def scenario():
         service = await make_service()
         service.runtime = None
-        sid = (await service.create()).session_id
+        sid = (await service.create(actor)).session_id
         staged = service._files.stage("conversation_assistant", sid, str(uuid4()), b"docx", "body")
         paths = service._files.publish(staged)
         original_delete = service._store.delete_session
@@ -79,55 +80,59 @@ def test_delete_failure_boundaries_and_retry(monkeypatch, phase, code):
                     patch.setattr(service._files, "discard_deletion_intent", fail_file)
                 if code:
                     with pytest.raises(AppError) as error:
-                        await service.delete(sid)
+                        await service.delete(actor, sid)
                     assert error.value.code == code
                 else:
-                    await service.delete(sid)
-            exists = await original_inspect(sid) is not None
+                    await service.delete(actor, sid)
+            exists = await original_inspect(actor, sid) is not None
             assert exists is (phase in {"intent", "rollback"})
             if phase in {"intent", "rollback", "unknown", "files"}:
                 assert (service._files.root / paths.source_path).read_bytes() == b"docx"
             if phase in {"unknown", "files", "receipt"}:
                 assert service._files.read_deletion_intent(sid) is not None
-            await service.delete(sid)
-            assert await original_inspect(sid) is None
+            await service.delete(actor, sid)
+            assert await original_inspect(actor, sid) is None
             assert not (service._files.root / paths.source_path).exists()
             assert service._files.read_deletion_intent(sid) is None
         finally:
             await service.aclose()
+            await service._store.database.aclose()
     asyncio.run(scenario())
 
 
-def test_delete_rejects_terminal_run_before_task_exit():
+def test_delete_rejects_terminal_run_before_task_exit(actor):
     from app.schemas.conversation_session import RunCompletion, SessionSubmission
 
     async def scenario():
         service = await make_service()
-        sid = (await service.create()).session_id
-        run = await service._store.submit(sid, SessionSubmission("one", "hi"))
+        sid = (await service.create(actor)).session_id
+        run = await service._store.submit(actor, sid, SessionSubmission("one", "hi"))
         try:
             with pytest.raises(AppError) as error:
-                await service.delete(sid)
+                await service.delete(actor, sid)
             assert error.value.code == "CONVERSATION_BUSY"
-            await service._store.finish(sid, run.run.run_id, RunCompletion("succeeded", "done"))
+            await service._store.finish(
+                actor, sid, run.run.run_id, RunCompletion("succeeded", "done")
+            )
             task = asyncio.create_task(asyncio.Event().wait())
             service._tasks[run.run.run_id] = task
             with pytest.raises(AppError) as error:
-                await service.delete(sid)
+                await service.delete(actor, sid)
             assert error.value.code == "CONVERSATION_BUSY"
             service._tasks.pop(run.run.run_id)
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-            await service.delete(sid)
+            await service.delete(actor, sid)
         finally:
             await service.aclose()
+            await service._store.database.aclose()
     asyncio.run(scenario())
 
 
-def test_delete_waiter_cancel_and_shutdown_drain_worker(monkeypatch):
+def test_delete_waiter_cancel_and_shutdown_drain_worker(actor, monkeypatch):
     async def scenario():
         service = await make_service()
-        sid = (await service.create()).session_id
+        sid = (await service.create(actor)).session_id
         entered, finish = threading.Event(), threading.Event()
         original = service._files.discard_session
         def blocked(*args):
@@ -135,7 +140,7 @@ def test_delete_waiter_cancel_and_shutdown_drain_worker(monkeypatch):
             finish.wait(5)
             original(*args)
         monkeypatch.setattr(service._files, "discard_session", blocked)
-        waiter = asyncio.create_task(service.delete(sid))
+        waiter = asyncio.create_task(service.delete(actor, sid))
         assert await asyncio.to_thread(entered.wait, 3)
         waiter.cancel()
         await asyncio.gather(waiter, return_exceptions=True)
@@ -144,6 +149,7 @@ def test_delete_waiter_cancel_and_shutdown_drain_worker(monkeypatch):
         assert not closing.done()
         finish.set()
         await closing
+        await service._store.database.aclose()
         assert not service._deletion_tasks
         assert not service._active._locks
         assert service._files.read_deletion_intent(sid) is None
@@ -151,45 +157,48 @@ def test_delete_waiter_cancel_and_shutdown_drain_worker(monkeypatch):
 
 
 @pytest.mark.parametrize("committed", [False, True])
-def test_recovery_after_each_delete_boundary(committed):
+def test_recovery_after_each_delete_boundary(actor, committed):
     async def scenario():
         service = await make_service()
-        sid = (await service.create()).session_id
+        sid = (await service.create(actor)).session_id
         paths = service._files.publish(service._files.stage(
             "conversation_assistant", sid, str(uuid4()), b"docx", "body"
         ))
-        service._files.write_deletion_intent("conversation_assistant", sid)
+        service._files.write_deletion_intent("conversation_assistant", sid, str(actor.user.user_id))
         if committed:
-            await service._store.delete_session(sid)
+            await service._store.delete_session(actor, sid)
         await service.aclose()
+        await service._store.database.aclose()
         service = await make_service()
         await service.recover_deletions()
         assert service._files.read_deletion_intent(sid) is None
         assert (service._files.root / paths.source_path).exists() is not committed
         await service.aclose()
+        await service._store.database.aclose()
     asyncio.run(scenario())
 
 
-def test_delete_unknown_uuid_does_not_remove_untracked_directory():
+def test_delete_unknown_uuid_does_not_remove_untracked_directory(actor):
     async def scenario():
         service = await make_service()
         sid = str(uuid4())
         paths = service._files.publish(service._files.stage(
             "conversation_assistant", sid, str(uuid4()), b"keep", "body"
         ))
-        await service.delete(sid)
+        await service.delete(actor, sid)
         assert (service._files.root / paths.source_path).read_bytes() == b"keep"
         await service.aclose()
+        await service._store.database.aclose()
     asyncio.run(scenario())
 
 
-def test_delete_busy_upload_and_race_with_submit(monkeypatch):
+def test_delete_busy_upload_and_race_with_submit(actor, monkeypatch):
     async def scenario():
         service = await make_service()
-        sid = (await service.create()).session_id
+        sid = (await service.create(actor)).session_id
         service._uploads[sid] = asyncio.current_task()
         with pytest.raises(AppError) as error:
-            await service.delete(sid)
+            await service.delete(actor, sid)
         assert error.value.code == "CONVERSATION_BUSY"
         assert service._files.read_deletion_intent(sid) is None
         service._uploads.pop(sid)
@@ -200,9 +209,9 @@ def test_delete_busy_upload_and_race_with_submit(monkeypatch):
             finish.wait(5)
             return original(*args)
         monkeypatch.setattr(service._files, "write_deletion_intent", block)
-        deletion = asyncio.create_task(service.delete(sid))
+        deletion = asyncio.create_task(service.delete(actor, sid))
         assert await asyncio.to_thread(entered.wait, 3)
-        submit = asyncio.create_task(service.submit(
+        submit = asyncio.create_task(service.submit(actor,
             sid, MessageCreate(client_message_id="late", content="late")
         ))
         await asyncio.sleep(0)
@@ -213,10 +222,11 @@ def test_delete_busy_upload_and_race_with_submit(monkeypatch):
             await submit
         assert missing.value.status_code == 404
         await service.aclose()
+        await service._store.database.aclose()
     asyncio.run(scenario())
 
 
-def test_stream_snapshot_delta_reconnect_and_multiple_readers_share_one_task():
+def test_stream_snapshot_delta_reconnect_and_multiple_readers_share_one_task(actor):
     async def scenario():
         first, finish = asyncio.Event(), asyncio.Event()
 
@@ -232,21 +242,21 @@ def test_stream_snapshot_delta_reconnect_and_multiple_readers_share_one_task():
 
         runtime = StreamingRuntime()
         service = await make_service(runtime)
-        session = await service.create()
-        run = await service.submit(
+        session = await service.create(actor)
+        run = await service.submit(actor,
             session.session_id, MessageCreate(client_message_id="s1", content="你好")
         )
         await asyncio.wait_for(first.wait(), 1)
-        reader = await service.stream_run(session.session_id, run.run_id)
+        reader = await service.stream_run(actor, session.session_id, run.run_id)
         snapshot = await anext(reader)
         assert snapshot.event == "snapshot" and snapshot.text == "你"
         assert snapshot.run.status == "running"
         assert service._active.used_bytes == len("你".encode())
-        second = await service.stream_run(session.session_id, run.run_id)
+        second = await service.stream_run(actor, session.session_id, run.run_id)
         assert (await anext(second)).text == "你"
         # 关闭一个订阅不会取消任务；新订阅直接取得累计文本，不重跑模型。
         await second.aclose()
-        reconnect = await service.stream_run(session.session_id, run.run_id)
+        reconnect = await service.stream_run(actor, session.session_id, run.run_id)
         assert (await anext(reconnect)).text == "你"
         finish.set()
         events = [event async for event in reader]
@@ -256,12 +266,13 @@ def test_stream_snapshot_delta_reconnect_and_multiple_readers_share_one_task():
         assert service._active.used_bytes == 0
         await reconnect.aclose()
         await service.aclose()
+        await service._store.database.aclose()
         assert service._active.used_bytes == 0
 
     asyncio.run(scenario())
 
 
-def test_stream_delta_arrives_before_completion_and_cancel_wakes_reader():
+def test_stream_delta_arrives_before_completion_and_cancel_wakes_reader(actor):
     async def scenario():
         emitted, finish = asyncio.Event(), asyncio.Event()
 
@@ -272,11 +283,11 @@ def test_stream_delta_arrives_before_completion_and_cancel_wakes_reader():
                 await finish.wait()
 
         service = await make_service(StreamingRuntime())
-        session = await service.create()
-        run = await service.submit(
+        session = await service.create(actor)
+        run = await service.submit(actor,
             session.session_id, MessageCreate(client_message_id="s1", content="你好")
         )
-        reader = await service.stream_run(session.session_id, run.run_id)
+        reader = await service.stream_run(actor, session.session_id, run.run_id)
         assert (await anext(reader)).event == "snapshot"
         emitted.set()
         delta = None
@@ -285,17 +296,18 @@ def test_stream_delta_arrives_before_completion_and_cancel_wakes_reader():
             if event.event == "delta":
                 delta = event
         assert delta.text == "第一段" and not service._tasks[run.run_id].done()
-        await service.cancel(session.session_id, run.run_id)
+        await service.cancel(actor, session.session_id, run.run_id)
         done = await asyncio.wait_for(anext(reader), 1)
         assert done.event == "done" and done.run.status == "cancelled"
         assert "第一段" not in done.run.message.content
         await reader.aclose()
         await service.aclose()
+        await service._store.database.aclose()
 
     asyncio.run(scenario())
 
 
-def test_stream_capacity_failure_releases_partial_text_and_wakes_subscriber():
+def test_stream_capacity_failure_releases_partial_text_and_wakes_subscriber(actor):
     async def scenario():
         class OverflowRuntime(Runtime):
             async def invoke(self, agent_id, payload, *, on_event=None):
@@ -306,35 +318,37 @@ def test_stream_capacity_failure_releases_partial_text_and_wakes_subscriber():
             OverflowRuntime(),
             settings=Settings(_env_file=None, conversation_transient_max_bytes=100),
         )
-        session = await service.create()
-        run = await service.submit(
+        session = await service.create(actor)
+        run = await service.submit(actor,
             session.session_id, MessageCreate(client_message_id="s1", content="hi")
         )
-        result = await complete(service, session, run)
+        result = await complete(actor, service, session, run)
         assert result.status == "failed" and result.error.code == "CONVERSATION_CAPACITY"
         assert service._active.used_bytes == 0
-        reader = await service.stream_run(session.session_id, run.run_id)
+        reader = await service.stream_run(actor, session.session_id, run.run_id)
         assert (await anext(reader)).event == "snapshot"
         assert (await anext(reader)).event == "done"
         await reader.aclose()
         await service.aclose()
+        await service._store.database.aclose()
 
     asyncio.run(scenario())
 
 
-def test_shutdown_wakes_existing_subscriber():
+def test_shutdown_wakes_existing_subscriber(actor):
     async def scenario():
         service = await make_service(Runtime(gate=asyncio.Event()))
-        session = await service.create()
-        run = await service.submit(
+        session = await service.create(actor)
+        run = await service.submit(actor,
             session.session_id, MessageCreate(client_message_id="shutdown", content="hi")
         )
         await service.runtime.entered.wait()
-        reader = await service.stream_run(session.session_id, run.run_id)
+        reader = await service.stream_run(actor, session.session_id, run.run_id)
         await anext(reader)
         waiting = asyncio.create_task(anext(reader))
         await asyncio.sleep(0)
         await service.aclose()
+        await service._store.database.aclose()
         event = await asyncio.wait_for(waiting, 1)
         assert event.event == "done" and event.run.status == "cancelled"
         assert service._active.used_bytes == 0
@@ -343,17 +357,18 @@ def test_shutdown_wakes_existing_subscriber():
     asyncio.run(scenario())
 
 
-def test_shutdown_publishes_terminal_event_for_a_task_not_scheduled_yet():
+def test_shutdown_publishes_terminal_event_for_a_task_not_scheduled_yet(actor):
     async def scenario():
         service = await make_service(Runtime(gate=asyncio.Event()))
-        session = await service.create()
-        run = await service.submit(
+        session = await service.create(actor)
+        run = await service.submit(actor,
             session.session_id, MessageCreate(client_message_id="m1", content="hi")
         )
-        reader = await service.stream_run(session.session_id, run.run_id)
+        reader = await service.stream_run(actor, session.session_id, run.run_id)
         assert (await anext(reader)).run.status in {"queued", "running"}
         # 没有让 _execute 获得调度；取消未启动的 task 不会执行它的 finally。
         await service.aclose()
+        await service._store.database.aclose()
         done = await asyncio.wait_for(anext(reader), 0.1)
         assert done.event == "done" and done.run.status == "cancelled"
         assert service._active.used_bytes == 0
@@ -376,8 +391,8 @@ async def make_service(runtime=None, *, settings=None):
     settings = settings or Settings(_env_file=None)
     dsn, schema = POSTGRES_TARGET
     settings = settings.model_copy(update={"database_url": SecretStr(dsn)})
-    store = PostgresConversationStore(settings, _schema=schema)
-    await store.initialize()
+    store = PostgresConversationStore(Database(settings , schema=schema))
+    await store.database.initialize()
     return ConversationService(
         settings,
         runtime or Runtime(),
@@ -386,28 +401,29 @@ async def make_service(runtime=None, *, settings=None):
     )
 
 
-async def complete(service, session, run):
+async def complete(actor, service, session, run):
     await service._tasks[run.run_id]
-    return await service.read_run(session.session_id, run.run_id)
+    return await service.read_run(actor, session.session_id, run.run_id)
 
 
-def test_chat_without_upload_never_calls_child():
+def test_chat_without_upload_never_calls_child(actor):
     async def scenario():
         runtime = Runtime()
         service = await make_service(runtime)
-        session = await service.create()
-        run = await service.submit(
+        session = await service.create(actor)
+        run = await service.submit(actor,
             session.session_id, MessageCreate(client_message_id="m1", content="你好")
         )
-        result = await complete(service, session, run)
+        result = await complete(actor, service, session, run)
         assert result.status == "succeeded" and result.message.content == "你好"
         assert [call[0] for call in runtime.calls] == ["conversation_assistant"]
         await service.aclose()
+        await service._store.database.aclose()
 
     asyncio.run(scenario())
 
 
-def test_continuation_is_opaque_and_linked_to_saved_message():
+def test_continuation_is_opaque_and_linked_to_saved_message(actor):
     async def scenario():
         runtime = Runtime(
             results=[
@@ -418,82 +434,88 @@ def test_continuation_is_opaque_and_linked_to_saved_message():
             ]
         )
         service = await make_service(runtime)
-        session = await service.create()
+        session = await service.create(actor)
         for index in range(2):
-            run = await service.submit(
+            run = await service.submit(actor,
                 session.session_id, MessageCreate(client_message_id=str(index), content="输入")
             )
-            result = await complete(service, session, run)
+            result = await complete(actor, service, session, run)
             if index == 0:
-                continuation = (await service._store.snapshot(session.session_id)).continuation
+                continuation = (
+                    await service._store.snapshot(actor, session.session_id)
+                ).continuation
                 assert continuation.payload == {"task": {"x": 1}}
                 assert continuation.question_message_id == result.message.message_id
         assert runtime.calls[1][1]["continuation"]["payload"] == {"task": {"x": 1}}
-        assert (await service._store.snapshot(session.session_id)).continuation is None
+        assert (await service._store.snapshot(actor, session.session_id)).continuation is None
         await service.aclose()
+        await service._store.database.aclose()
 
     asyncio.run(scenario())
 
 
-def test_same_client_message_id_reuses_run():
+def test_same_client_message_id_reuses_run(actor):
     async def scenario():
         runtime = Runtime()
         service = await make_service(runtime)
-        session = await service.create()
+        session = await service.create(actor)
         payload = MessageCreate(client_message_id="m1", content="你好")
-        first = await service.submit(session.session_id, payload)
-        second = await service.submit(session.session_id, payload)
+        first = await service.submit(actor, session.session_id, payload)
+        second = await service.submit(actor, session.session_id, payload)
         assert first.run_id == second.run_id
         with pytest.raises(AppError) as error:
-            await service.submit(
+            await service.submit(actor,
                 session.session_id, payload.model_copy(update={"content": "不同正文"})
             )
         assert error.value.status_code == 409
-        await complete(service, session, first)
+        await complete(actor, service, session, first)
         assert len(runtime.calls) == 1
-        assert len((await service.read(session.session_id)).messages) == 2
+        assert len((await service.read(actor, session.session_id)).messages) == 2
         await service.aclose()
+        await service._store.database.aclose()
 
     asyncio.run(scenario())
 
 
-def test_cancel_releases_capacity():
+def test_cancel_releases_capacity(actor):
     async def scenario():
         runtime = Runtime(gate=asyncio.Event())
         service = await make_service(runtime)
-        session = await service.create()
-        run = await service.submit(
+        session = await service.create(actor)
+        run = await service.submit(actor,
             session.session_id, MessageCreate(client_message_id="m1", content="你好")
         )
         await runtime.entered.wait()
-        assert (await service.cancel(session.session_id, run.run_id)).status == "cancelled"
-        assert (await service.read(session.session_id)).active_run_id is None
+        assert (await service.cancel(actor, session.session_id, run.run_id)).status == "cancelled"
+        assert (await service.read(actor, session.session_id)).active_run_id is None
         runtime.gate.set()
-        second = await service.submit(
+        second = await service.submit(actor,
             session.session_id, MessageCreate(client_message_id="m2", content="你好")
         )
-        await complete(service, session, second)
+        await complete(actor, service, session, second)
         await service.aclose()
+        await service._store.database.aclose()
 
     asyncio.run(scenario())
 
 
-def test_close_waits_for_tasks():
+def test_close_waits_for_tasks(actor):
     async def scenario():
         runtime = Runtime(gate=asyncio.Event())
         service = await make_service(runtime)
-        session = await service.create()
-        run = await service.submit(
+        session = await service.create(actor)
+        run = await service.submit(actor,
             session.session_id, MessageCreate(client_message_id="m1", content="你好")
         )
         task = service._tasks[run.run_id]
         await service.aclose()
+        await service._store.database.aclose()
         assert task.done() and not service._tasks
 
     asyncio.run(scenario())
 
 
-def test_child_result_is_displayed_without_service_dispatch():
+def test_child_result_is_displayed_without_service_dispatch(actor):
     async def scenario():
         child = ChildAgentResult(
             id=str(uuid4()),
@@ -505,32 +527,37 @@ def test_child_result_is_displayed_without_service_dispatch():
         )
         runtime = Runtime(results=[ConversationTurnResult(reply="完成", child_call=child)])
         service = await make_service(runtime)
-        session = await service.create()
-        run = await service.submit(
+        session = await service.create(actor)
+        run = await service.submit(actor,
             session.session_id, MessageCreate(client_message_id="m1", content="审核")
         )
-        result = await complete(service, session, run)
+        result = await complete(actor, service, session, run)
         assert result.message.agent_call.output == "# 原始报告"
         assert result.message.agent_call.invocation_id == "child-id"
         assert result.message.agent_call.status == "succeeded"
         assert [c[0] for c in runtime.calls] == ["conversation_assistant"]
         await service.aclose()
+        await service._store.database.aclose()
 
     asyncio.run(scenario())
 
 
-def test_uploaded_doc_then_smalltalk_never_reparses_or_calls_child(docx_bytes_factory, monkeypatch):
+def test_uploaded_doc_then_smalltalk_never_reparses_or_calls_child(
+    actor, docx_bytes_factory, monkeypatch
+):
     async def scenario():
         runtime = Runtime()
         service = await make_service(runtime)
-        session = await service.create()
-        document = await service.upload(session.session_id, "制度.docx", docx_bytes_factory())
+        session = await service.create(actor)
+        document = await service.upload(
+            actor, session.session_id, "制度.docx", docx_bytes_factory()
+        )
         assert runtime.calls == []
         monkeypatch.setattr(
             "app.services.conversation_service.parse_docx",
             lambda *a, **k: pytest.fail("聊天不能重复解析"),
         )
-        run = await service.submit(
+        run = await service.submit(actor,
             session.session_id,
             MessageCreate(
                 client_message_id="m1",
@@ -538,28 +565,30 @@ def test_uploaded_doc_then_smalltalk_never_reparses_or_calls_child(docx_bytes_fa
                 file_ids=[document.file_id],
             ),
         )
-        await complete(service, session, run)
+        await complete(actor, service, session, run)
         assert len(runtime.calls) == 1
         await service.aclose()
+        await service._store.database.aclose()
 
     asyncio.run(scenario())
 
 
-def test_success_is_not_overwritten_by_cancel():
+def test_success_is_not_overwritten_by_cancel(actor):
     async def scenario():
         service = await make_service()
-        session = await service.create()
-        run = await service.submit(
+        session = await service.create(actor)
+        run = await service.submit(actor,
             session.session_id, MessageCreate(client_message_id="m1", content="你好")
         )
-        await complete(service, session, run)
-        assert (await service.cancel(session.session_id, run.run_id)).status == "succeeded"
+        await complete(actor, service, session, run)
+        assert (await service.cancel(actor, session.session_id, run.run_id)).status == "succeeded"
         await service.aclose()
+        await service._store.database.aclose()
 
     asyncio.run(scenario())
 
 
-def test_queue_capacity_is_bounded():
+def test_queue_capacity_is_bounded(actor):
     async def scenario():
         service = await make_service(
             Runtime(gate=asyncio.Event()),
@@ -569,21 +598,22 @@ def test_queue_capacity_is_bounded():
                 conversation_queue_size=0,
             ),
         )
-        first, second = await service.create(), await service.create()
-        await service.submit(
+        first, second = await service.create(actor), await service.create(actor)
+        await service.submit(actor,
             first.session_id, MessageCreate(client_message_id="m1", content="你好")
         )
         with pytest.raises(AppError) as raised:
-            await service.submit(
+            await service.submit(actor,
                 second.session_id, MessageCreate(client_message_id="m2", content="你好")
             )
         assert raised.value.status_code == 503
         await service.aclose()
+        await service._store.database.aclose()
 
     asyncio.run(scenario())
 
 
-def test_output_capacity_failure_does_not_commit_partial_result():
+def test_output_capacity_failure_does_not_commit_partial_result(actor):
     async def scenario():
         child = ChildAgentResult(
             id=str(uuid4()),
@@ -606,28 +636,29 @@ def test_output_capacity_failure_does_not_commit_partial_result():
             ),
             settings=Settings(_env_file=None, conversation_transient_max_bytes=1100),
         )
-        session = await service.create()
-        run = await service.submit(
+        session = await service.create(actor)
+        run = await service.submit(actor,
             session.session_id, MessageCreate(client_message_id="m1", content="你好")
         )
-        async with service._store._connection(write=True) as conn:
+        async with service._store.transaction(write=True) as conn:
             await conn.execute(
                 "UPDATE messages SET content=repeat('x',900000) "
                 "WHERE session_id=$1",
                 UUID(session.session_id),
             )
         service.runtime.gate.set()
-        result = await complete(service, session, run)
+        result = await complete(actor, service, session, run)
         assert result.status == "failed" and result.error.code == "CONVERSATION_CAPACITY"
         assert result.message.agent_call is None
-        assert (await service._store.snapshot(session.session_id)).continuation is None
+        assert (await service._store.snapshot(actor, session.session_id)).continuation is None
         assert service._active.used_bytes <= 1100
         await service.aclose()
+        await service._store.database.aclose()
 
     asyncio.run(scenario())
 
 
-def test_run_timeout_has_one_terminal_message():
+def test_run_timeout_has_one_terminal_message(actor):
     async def scenario():
         service = await make_service(
             Runtime(gate=asyncio.Event()),
@@ -636,23 +667,24 @@ def test_run_timeout_has_one_terminal_message():
                 conversation_run_timeout_seconds=0.01,
             ),
         )
-        session = await service.create()
-        run = await service.submit(
+        session = await service.create(actor)
+        run = await service.submit(actor,
             session.session_id, MessageCreate(client_message_id="m1", content="你好")
         )
-        result = await complete(service, session, run)
+        result = await complete(actor, service, session, run)
         assert result.error.code == "CONVERSATION_TIMEOUT"
-        assert len((await service.read(session.session_id)).messages) == 2
+        assert len((await service.read(actor, session.session_id)).messages) == 2
         await service.aclose()
+        await service._store.database.aclose()
 
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("close", [False, True])
-def test_parse_cancellation_waits_for_thread_and_releases_once(monkeypatch, close):
+def test_parse_cancellation_waits_for_thread_and_releases_once(actor, monkeypatch, close):
     async def scenario():
         service = await make_service()
-        session = await service.create()
+        session = await service.create(actor)
         entered = asyncio.Event()
         release = threading.Event()
         loop = asyncio.get_running_loop()
@@ -663,7 +695,7 @@ def test_parse_cancellation_waits_for_thread_and_releases_once(monkeypatch, clos
             return "# 正文"
 
         monkeypatch.setattr("app.services.conversation_service.parse_docx", parse)
-        upload = asyncio.create_task(service.upload(session.session_id, "x.docx", b"input"))
+        upload = asyncio.create_task(service.upload(actor, session.session_id, "x.docx", b"input"))
         await entered.wait()
         stopping = asyncio.create_task(service.aclose()) if close else upload
         if not close:
@@ -680,22 +712,24 @@ def test_parse_cancellation_waits_for_thread_and_releases_once(monkeypatch, clos
             release.set()
         if close:
             await stopping
+            await service._store.database.aclose()
         else:
             with pytest.raises(asyncio.CancelledError):
                 await upload
             assert service._active.used_bytes == 0
             await service.aclose()
+            await service._store.database.aclose()
         assert service._parse_slots._value == 2 and upload.done()
 
     asyncio.run(scenario())
 
 
-def test_concurrent_upload_cannot_replace_tracked_upload(monkeypatch):
+def test_concurrent_upload_cannot_replace_tracked_upload(actor, monkeypatch):
     from app.schemas.conversation_turn import TurnDocument
 
     async def scenario():
         service = await make_service()
-        session = await service.create()
+        session = await service.create(actor)
         read_entered, read_release = asyncio.Event(), asyncio.Event()
         parse_entered, parse_release = asyncio.Event(), asyncio.Event()
         original = service._store.read
@@ -716,9 +750,9 @@ def test_concurrent_upload_cannot_replace_tracked_upload(monkeypatch):
 
         monkeypatch.setattr(service._store, "read", read)
         monkeypatch.setattr(service, "_parse_upload", parse)
-        first = asyncio.create_task(service.upload(session.session_id, "x.docx", b"x"))
+        first = asyncio.create_task(service.upload(actor, session.session_id, "x.docx", b"x"))
         await read_entered.wait()
-        second = asyncio.create_task(service.upload(session.session_id, "y.docx", b"y"))
+        second = asyncio.create_task(service.upload(actor, session.session_id, "y.docx", b"y"))
         await asyncio.sleep(0)
         read_release.set()
         await parse_entered.wait()
@@ -731,17 +765,18 @@ def test_concurrent_upload_cannot_replace_tracked_upload(monkeypatch):
             parse_release.set()
             await asyncio.gather(first, second, return_exceptions=True)
             await service.aclose()
+            await service._store.database.aclose()
 
     asyncio.run(scenario())
 
 
-def test_shutdown_cancels_upload_waiting_for_session_read(monkeypatch):
+def test_shutdown_cancels_upload_waiting_for_session_read(actor, monkeypatch):
     async def scenario():
         service = await make_service()
-        session = await service.create()
+        session = await service.create(actor)
         entered = asyncio.Event()
         release = asyncio.Event()
-        page = await service._store.read(session.session_id)
+        page = await service._store.read(actor, session.session_id)
         parse_calls = []
 
         async def read(*args, **kwargs):
@@ -755,10 +790,11 @@ def test_shutdown_cancels_upload_waiting_for_session_read(monkeypatch):
 
         monkeypatch.setattr(service._store, "read", read)
         monkeypatch.setattr(service, "_parse_upload", parse)
-        upload = asyncio.create_task(service.upload(session.session_id, "x.docx", b"x"))
+        upload = asyncio.create_task(service.upload(actor, session.session_id, "x.docx", b"x"))
         await entered.wait()
         try:
             await service.aclose()
+            await service._store.database.aclose()
             release.set()
             result = (await asyncio.gather(upload, return_exceptions=True))[0]
             assert isinstance(result, asyncio.CancelledError)
@@ -768,14 +804,15 @@ def test_shutdown_cancels_upload_waiting_for_session_read(monkeypatch):
             release.set()
             await asyncio.gather(upload, return_exceptions=True)
             await service.aclose()
+            await service._store.database.aclose()
 
     asyncio.run(scenario())
 
 
-def test_lost_commit_ack_is_reconciled_without_model_reexecution(monkeypatch):
+def test_lost_commit_ack_is_reconciled_without_model_reexecution(actor, monkeypatch):
     async def scenario():
         service = await make_service()
-        session = await service.create()
+        session = await service.create(actor)
         original = service._store.submit
 
         async def commit_then_lose_ack(*args, **kwargs):
@@ -785,30 +822,31 @@ def test_lost_commit_ack_is_reconciled_without_model_reexecution(monkeypatch):
         payload = MessageCreate(client_message_id="lost-commit", content="不可重做")
         monkeypatch.setattr(service._store, "submit", commit_then_lose_ack)
         with pytest.raises(AppError):
-            await service.submit(session.session_id, payload)
+            await service.submit(actor, session.session_id, payload)
         monkeypatch.setattr(service._store, "submit", original)
         try:
-            recovered = await service.submit(session.session_id, payload)
+            recovered = await service.submit(actor, session.session_id, payload)
             assert recovered.status == "failed"
             assert recovered.error.code == "CONVERSATION_INTERRUPTED"
             assert not service.runtime.calls
-            assert (await service.read(session.session_id)).active_run_id is None
-            later = await service.submit(
+            assert (await service.read(actor, session.session_id)).active_run_id is None
+            later = await service.submit(actor,
                 session.session_id, MessageCreate(client_message_id="later", content="下一条")
             )
-            await complete(service, session, later)
+            await complete(actor, service, session, later)
             assert len(service.runtime.calls) == 1
         finally:
             await service.aclose()
+            await service._store.database.aclose()
 
     asyncio.run(scenario())
 
 
-def test_shutdown_does_not_schedule_pending_message_submission(monkeypatch):
+def test_shutdown_does_not_schedule_pending_message_submission(actor, monkeypatch):
     async def scenario():
         runtime = Runtime()
         service = await make_service(runtime)
-        session = await service.create()
+        session = await service.create(actor)
         entered, release = asyncio.Event(), asyncio.Event()
         original = service._store.submit
 
@@ -819,12 +857,13 @@ def test_shutdown_does_not_schedule_pending_message_submission(monkeypatch):
             return result
 
         monkeypatch.setattr(service._store, "submit", submit)
-        request = asyncio.create_task(service.submit(
+        request = asyncio.create_task(service.submit(actor,
             session.session_id, MessageCreate(client_message_id="shutdown", content="你好")
         ))
         await entered.wait()
         try:
             await service.aclose()
+            await service._store.database.aclose()
             release.set()
             result = (await asyncio.gather(request, return_exceptions=True))[0]
             assert isinstance(result, asyncio.CancelledError)
@@ -837,24 +876,25 @@ def test_shutdown_does_not_schedule_pending_message_submission(monkeypatch):
             release.set()
             await asyncio.gather(request, return_exceptions=True)
             await service.aclose()
+            await service._store.database.aclose()
 
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("failure", ["rollback", "lost_ack", "unknown"])
-def test_file_commit_failure_never_removes_referenced_file(
+def test_file_commit_failure_never_removes_referenced_file(actor,
     docx_bytes_factory, monkeypatch, failure
 ):
     async def scenario():
         service = await make_service()
-        session = await service.create()
+        session = await service.create(actor)
         original = service._store.add_file
         captured = []
 
-        async def failing(session_id, file):
+        async def failing(actor, session_id, file):
             captured.append(file)
             if failure == "lost_ack":
-                await original(session_id, file)
+                await original(actor, session_id, file)
             raise AppError("STORAGE_UNAVAILABLE", "保存结果未确认", 503)
 
         async def unavailable(*args):
@@ -865,24 +905,27 @@ def test_file_commit_failure_never_removes_referenced_file(
             monkeypatch.setattr(service._store, "get_file", unavailable)
         try:
             with pytest.raises(AppError):
-                await service.upload(session.session_id, "材料.docx", docx_bytes_factory())
+                await service.upload(actor, session.session_id, "材料.docx", docx_bytes_factory())
             file = captured[0]
             assert (service._files.root / file.content_path).exists() == (failure != "rollback")
-            assert len((await service.read(session.session_id)).files) == (failure == "lost_ack")
+            assert len((await service.read(actor, session.session_id)).files) == (
+                failure == "lost_ack"
+            )
             assert not list((service._files.root / ".staging").glob("*"))
         finally:
             await service.aclose()
+            await service._store.database.aclose()
 
     asyncio.run(scenario())
 
 
-def test_restart_reads_saved_markdown_without_parsing_again(docx_bytes_factory, monkeypatch):
+def test_restart_reads_saved_markdown_without_parsing_again(actor, docx_bytes_factory, monkeypatch):
     async def scenario():
         service = await make_service()
-        session = await service.create()
+        session = await service.create(actor)
         raw = docx_bytes_factory(body="第一条 应保留完整材料")
-        file = await service.upload(session.session_id, "../../材料.docx", raw)
-        saved = await service._store.get_file(session.session_id, file.file_id)
+        file = await service.upload(actor, session.session_id, "../../材料.docx", raw)
+        saved = await service._store.get_file(actor, session.session_id, file.file_id)
         original = service._files.read_markdown(saved.content_path)
         assert (service._files.root / saved.source_path).read_bytes() == raw
         assert file.original_name == "材料.docx"
@@ -890,6 +933,7 @@ def test_restart_reads_saved_markdown_without_parsing_again(docx_bytes_factory, 
             "file_id", "original_name", "size_bytes", "content_chars", "created_at",
         }
         await service.aclose()
+        await service._store.database.aclose()
 
         def no_parse(*args, **kwargs):
             raise AssertionError("已保存材料不得重复解析")
@@ -897,36 +941,37 @@ def test_restart_reads_saved_markdown_without_parsing_again(docx_bytes_factory, 
         monkeypatch.setattr("app.services.conversation_service.parse_docx", no_parse)
         service = await make_service()
         try:
-            run = await service.submit(
+            run = await service.submit(actor,
                 session.session_id,
                 MessageCreate(
                     client_message_id="read", content="阅读材料", file_ids=[file.file_id]
                 ),
             )
-            result = await complete(service, session, run)
+            result = await complete(actor, service, session, run)
             assert result.status == "succeeded"
             material = service.runtime.calls[0][1]["documents"][0]
             assert material["id"] == file.file_id and material["markdown"] == original
             (service._files.root / saved.content_path).write_text("被改动", encoding="utf-8")
-            run = await service.submit(
+            run = await service.submit(actor,
                 session.session_id, MessageCreate(client_message_id="bad", content="继续"),
             )
-            result = await complete(service, session, run)
+            result = await complete(actor, service, session, run)
             assert result.error.code == "FILE_UNAVAILABLE"
             assert len(service.runtime.calls) == 1
         finally:
             await service.aclose()
+            await service._store.database.aclose()
 
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("operation", ["stage", "publish"])
-def test_cancel_waits_for_file_thread_and_cleans_only_its_upload(
+def test_cancel_waits_for_file_thread_and_cleans_only_its_upload(actor,
     docx_bytes_factory, monkeypatch, operation,
 ):
     async def scenario():
         service = await make_service()
-        session = await service.create()
+        session = await service.create(actor)
         entered = asyncio.Event()
         release = threading.Event()
         loop = asyncio.get_running_loop()
@@ -939,7 +984,7 @@ def test_cancel_waits_for_file_thread_and_cleans_only_its_upload(
 
         monkeypatch.setattr(service._files, operation, blocked)
         upload = asyncio.create_task(
-            service.upload(session.session_id, "x.docx", docx_bytes_factory())
+            service.upload(actor, session.session_id, "x.docx", docx_bytes_factory())
         )
         await asyncio.wait_for(entered.wait(), 5)
         upload.cancel()
@@ -954,11 +999,12 @@ def test_cancel_waits_for_file_thread_and_cleans_only_its_upload(
         with pytest.raises(asyncio.CancelledError):
             await upload
         try:
-            assert not (await service.read(session.session_id)).files
+            assert not (await service.read(actor, session.session_id)).files
             assert not list(service._files.root.rglob("source.docx"))
             assert service._active.used_bytes == 0
             assert service._parse_slots._value == 2
         finally:
             await service.aclose()
+            await service._store.database.aclose()
 
     asyncio.run(scenario())

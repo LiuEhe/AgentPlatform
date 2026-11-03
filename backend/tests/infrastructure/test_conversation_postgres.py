@@ -1,16 +1,17 @@
 """PostgreSQL 历史的真实事务与结构回归。"""
-
 import asyncio
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 
-SCHEMA = Path(__file__).parents[2] / "database/schema_v2.sql"
+from app.infrastructure.database import Database
+
+SCHEMA = Path(__file__).parents[2] / "database/schema_v3.sql"
 
 
 @pytest.mark.parametrize("rollback", [False, True])
-def test_delete_session_removes_all_owned_rows(postgres_target, rollback):
+def test_delete_session_removes_all_owned_rows(actor, postgres_target, rollback):
     from app.core.config import Settings
     from app.core.errors import AppError
     from app.infrastructure.conversation.postgres_store import PostgresConversationStore
@@ -20,57 +21,57 @@ def test_delete_session_removes_all_owned_rows(postgres_target, rollback):
     async def scenario():
         dsn, schema = postgres_target
         store = PostgresConversationStore(
-            Settings(_env_file=None, database_url=dsn), _schema=schema
+            Database(Settings(_env_file=None, database_url=dsn), schema=schema)
         )
-        await store.initialize()
+        await store.database.initialize()
         try:
-            sid = (await store.create()).summary.session_id
-            other = (await store.create()).summary.session_id
+            sid = (await store.create(actor)).summary.session_id
+            other = (await store.create(actor)).summary.session_id
             fid = str(uuid4())
-            await store.add_file(sid, SessionFile(
+            await store.add_file(actor, sid, SessionFile(
                 file_id=fid, session_id=sid, original_name="x.docx",
                 source_path="s", content_path="c",
                 size_bytes=1, content_chars=1,
             ))
-            run = await store.submit(sid, SessionSubmission("first", "hi", (fid,)))
+            run = await store.submit(actor, sid, SessionSubmission("first", "hi", (fid,)))
             call = ChildAgentResult(
                 id=str(uuid4()), agent_id="institution_review", agent_name="review",
                 invocation_id="inv", output_type="markdown", output="report",
             )
-            await store.finish(
+            await store.finish(actor,
                 sid, run.run.run_id, RunCompletion("succeeded", "answer", child_call=call)
             )
             for status in ("failed", "cancelled"):
-                item = await store.submit(sid, SessionSubmission(status, status))
-                await store.finish(sid, item.run.run_id, RunCompletion(status, status))
-            before = await store.inspect_deletion(sid)
+                item = await store.submit(actor, sid, SessionSubmission(status, status))
+                await store.finish(actor, sid, item.run.run_id, RunCompletion(status, status))
+            before = await store.inspect_deletion(actor, sid)
             assert len(before.run_ids) == 3 and before.active_run_id is None
             if rollback:
-                async with store._pool.acquire() as conn:
+                async with store.transaction(write=True) as conn:
                     await conn.execute("""CREATE FUNCTION reject_delete() RETURNS trigger AS $$
                         BEGIN RAISE EXCEPTION 'reject'; END; $$ LANGUAGE plpgsql;
                         CREATE TRIGGER reject_delete BEFORE DELETE ON chat_sessions
                         FOR EACH ROW EXECUTE FUNCTION reject_delete();""")
                 with pytest.raises(AppError):
-                    await store.delete_session(sid)
-                assert len((await store.read(sid)).messages) == 6
-                assert (await store.read(sid)).files[0].file_id == fid
+                    await store.delete_session(actor, sid)
+                assert len((await store.read(actor, sid)).messages) == 6
+                assert (await store.read(actor, sid)).files[0].file_id == fid
                 return
-            await store.delete_session(sid)
-            await store.delete_session(sid)
-            assert await store.inspect_deletion(sid) is None
-            async with store._pool.acquire() as conn:
+            await store.delete_session(actor, sid)
+            await store.delete_session(actor, sid)
+            assert await store.inspect_deletion(actor, sid) is None
+            async with store.transaction(write=True) as conn:
                 for table in ("runs", "messages", "files", "message_files", "agent_calls"):
                     assert await conn.fetchval(f"SELECT count(*) FROM {table}") == 0
                 assert await conn.fetchval("SELECT count(*) FROM agents") == 2
-                assert await conn.fetchval("SELECT version FROM chat_schema_version") == 2
-            assert (await store.read(other)).summary.session_id == other
+                assert await conn.fetchval("SELECT version FROM chat_schema_version") == 3
+            assert (await store.read(actor, other)).summary.session_id == other
         finally:
-            await store.aclose()
+            await store.database.aclose()
     asyncio.run(scenario())
 
 
-def test_delete_session_rejects_active_run(postgres_target):
+def test_delete_session_rejects_active_run(actor, postgres_target):
     from app.core.config import Settings
     from app.core.errors import AppError
     from app.infrastructure.conversation.postgres_store import PostgresConversationStore
@@ -79,87 +80,83 @@ def test_delete_session_rejects_active_run(postgres_target):
     async def scenario():
         dsn, schema = postgres_target
         store = PostgresConversationStore(
-            Settings(_env_file=None, database_url=dsn), _schema=schema
+            Database(Settings(_env_file=None, database_url=dsn), schema=schema)
         )
-        await store.initialize()
+        await store.database.initialize()
         try:
-            sid = (await store.create()).summary.session_id
-            run = await store.submit(sid, SessionSubmission("one", "hello"))
+            sid = (await store.create(actor)).summary.session_id
+            run = await store.submit(actor, sid, SessionSubmission("one", "hello"))
             for status in ("queued", "running"):
                 if status == "running":
-                    await store.start(sid, run.run.run_id)
+                    await store.start(actor, sid, run.run.run_id)
                 with pytest.raises(AppError) as raised:
-                    await store.delete_session(sid)
+                    await store.delete_session(actor, sid)
                 assert raised.value.code == "CONVERSATION_BUSY"
-                assert len((await store.read(sid)).messages) == 1
+                assert len((await store.read(actor, sid)).messages) == 1
             with pytest.raises(AppError) as invalid:
-                await store.inspect_deletion("invalid")
+                await store.inspect_deletion(actor, "invalid")
             assert invalid.value.status_code == 404
         finally:
-            await store.aclose()
+            await store.database.aclose()
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("committed", [False, True])
-def test_deletion_confirmation_waits_for_original_transaction(postgres_target, committed):
+def test_deletion_confirmation_waits_for_original_transaction(actor, postgres_target, committed):
     from app.core.config import Settings
     from app.infrastructure.conversation.postgres_store import PostgresConversationStore
 
     async def scenario():
         dsn, schema = postgres_target
         store = PostgresConversationStore(
-            Settings(_env_file=None, database_url=dsn), _schema=schema
+            Database(Settings(_env_file=None, database_url=dsn), schema=schema)
         )
-        await store.initialize()
+        await store.database.initialize()
         try:
-            sid = (await store.create()).summary.session_id
-            async with store._pool.acquire() as writer:
-                transaction = writer.transaction()
-                await transaction.start()
-                await writer.execute("DELETE FROM chat_sessions WHERE session_id=$1", UUID(sid))
-                lookup = asyncio.create_task(store.inspect_deletion(sid))
-                try:
-                    with pytest.raises(TimeoutError):
-                        await asyncio.wait_for(asyncio.shield(lookup), .1)
-                finally:
-                    if committed:
-                        await transaction.commit()
-                    else:
-                        await transaction.rollback()
-                result = await lookup
-                assert (result is None) is committed
+            sid = (await store.create(actor)).summary.session_id
+            transaction = store.transaction(write=True)
+            writer = await transaction.__aenter__()
+            await writer.execute("DELETE FROM chat_sessions WHERE session_id=$1", UUID(sid))
+            lookup = asyncio.create_task(store.inspect_deletion(actor, sid))
+            try:
+                with pytest.raises(TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(lookup), .1)
+            finally:
+                failure = None if committed else RuntimeError("controlled rollback")
+                await transaction.__aexit__(type(failure) if failure else None, failure, None)
+            result = await lookup
+            assert (result is None) is committed
         finally:
-            await store.aclose()
+            await store.database.aclose()
     asyncio.run(scenario())
 
 
 def test_schema_is_explicit_transaction_without_destructive_statements():
     sql = SCHEMA.read_text(encoding="utf-8")
-    assert sql.strip().startswith("BEGIN;")
-    assert sql.strip().endswith("COMMIT;")
+    assert "CREATE TABLE users" in sql
+    assert "BEGIN;" not in sql  # The maintenance command owns the transaction.
     assert "DROP " not in sql.upper()
     assert "IF NOT EXISTS" not in sql.upper()
 
 
 def test_schema_version_and_reinitialization(postgres_target):
-    import asyncpg
-
+    from app.core.config import Settings
+    from app.core.errors import AppError
+    from app.infrastructure.database import BaseDatabase
     async def scenario():
         dsn, schema = postgres_target
-        conn = await asyncpg.connect(dsn, server_settings={"search_path": schema})
-        try:
-            assert await conn.fetchval("SELECT version FROM chat_schema_version") == 2
-            with pytest.raises(asyncpg.DuplicateTableError):
-                await conn.execute(SCHEMA.read_text(encoding="utf-8"))
-            await conn.execute("ROLLBACK")
-            assert await conn.fetchval("SELECT version FROM chat_schema_version") == 2
-        finally:
-            await conn.close()
-
+        async with BaseDatabase.maintenance(
+            Settings(_env_file=None, database_url=dsn), schema=schema
+        ) as conn:
+            assert await conn.fetchval("SELECT version FROM chat_schema_version") == 3
+            with pytest.raises(AppError):
+                async with conn.transaction(write=True) as tx:
+                    await tx.execute(SCHEMA.read_text(encoding="utf-8"))
+            assert await conn.fetchval("SELECT version FROM chat_schema_version") == 3
     asyncio.run(scenario())
 
 
-def test_concurrent_duplicate_submission_is_persistent(postgres_target):
+def test_concurrent_duplicate_submission_is_persistent(actor, postgres_target):
     from app.core.config import Settings
     from app.infrastructure.conversation.postgres_store import PostgresConversationStore
     from app.schemas.conversation_session import RunCompletion, SessionSubmission
@@ -167,34 +164,34 @@ def test_concurrent_duplicate_submission_is_persistent(postgres_target):
     async def scenario():
         dsn, schema = postgres_target
         store = PostgresConversationStore(
-            Settings(_env_file=None, database_url=dsn), _schema=schema
+            Database(Settings(_env_file=None, database_url=dsn), schema=schema)
         )
-        await store.initialize()
+        await store.database.initialize()
         try:
-            page = await store.create("conversation_assistant")
+            page = await store.create(actor, "conversation_assistant")
             request = SessionSubmission("m1", "你好 😀\nSELECT * FROM users;")
             first, second = await asyncio.gather(
-                store.submit(page.summary.session_id, request),
-                store.submit(page.summary.session_id, request),
+                store.submit(actor, page.summary.session_id, request),
+                store.submit(actor, page.summary.session_id, request),
             )
             assert first.run.run_id == second.run.run_id
             assert sum(r.created for r in (first, second)) == 1
-            await store.finish(
+            await store.finish(actor,
                 page.summary.session_id, first.run.run_id, RunCompletion("succeeded", "收到")
             )
-            await store.finish(
+            await store.finish(actor,
                 page.summary.session_id, first.run.run_id, RunCompletion("cancelled", "已停止")
             )
-            restored = await store.read(page.summary.session_id)
+            restored = await store.read(actor, page.summary.session_id)
             assert [m.content for m in restored.messages] == [request.content, "收到"]
         finally:
-            await store.aclose()
+            await store.database.aclose()
 
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("committed", [False, True])
-def test_file_confirmation_waits_for_original_transaction(postgres_target, committed):
+def test_file_confirmation_waits_for_original_transaction(actor, postgres_target, committed):
     from app.core.config import Settings
     from app.core.errors import AppError
     from app.infrastructure.conversation.postgres_store import PostgresConversationStore
@@ -202,53 +199,48 @@ def test_file_confirmation_waits_for_original_transaction(postgres_target, commi
     async def scenario():
         dsn, schema = postgres_target
         store = PostgresConversationStore(
-            Settings(_env_file=None, database_url=dsn), _schema=schema
+            Database(Settings(_env_file=None, database_url=dsn), schema=schema)
         )
-        await store.initialize()
+        await store.database.initialize()
         lookup = None
         try:
-            page = await store.create()
+            page = await store.create(actor)
             session_id, file_id = UUID(page.summary.session_id), uuid4()
-            async with store._pool.acquire() as writer:
-                # 预热另一条连接，等待时间只衡量事务锁，不包含建连耗时。
-                async with store._pool.acquire():
-                    pass
-                transaction = writer.transaction()
-                await transaction.start()
-                try:
-                    await writer.execute(
-                        "SELECT session_id FROM chat_sessions WHERE session_id=$1 FOR UPDATE",
-                        session_id,
-                    )
-                    await writer.execute(
-                        "INSERT INTO files(file_id,session_id,original_name,source_path,"
-                        "content_path,size_bytes,content_chars) VALUES($1,$2,'x.docx',"
-                        "'source.docx','content.md',1,1)",
-                        file_id, session_id,
-                    )
-                    lookup = asyncio.create_task(store.get_file(str(session_id), str(file_id)))
-                    with pytest.raises(TimeoutError):
-                        await asyncio.wait_for(asyncio.shield(lookup), 0.1)
-                finally:
-                    if committed:
-                        await transaction.commit()
-                    else:
-                        await transaction.rollback()
-                if committed:
-                    assert (await lookup).file_id == str(file_id)
-                else:
-                    with pytest.raises(AppError) as raised:
-                        await lookup
-                    assert raised.value.code == "MATERIAL_NOT_FOUND"
+            transaction = store.transaction(write=True)
+            writer = await transaction.__aenter__()
+            try:
+                await writer.execute(
+                    "SELECT session_id FROM chat_sessions WHERE session_id=$1 FOR UPDATE",
+                    session_id,
+                )
+                await writer.execute(
+                    "INSERT INTO files(file_id,session_id,original_name,source_path,"
+                    "content_path,size_bytes,content_chars) VALUES($1,$2,'x.docx','source.docx',"
+                    "'content.md',1,1)",
+                    file_id,
+                    session_id,
+                )
+                lookup = asyncio.create_task(store.get_file(actor, str(session_id), str(file_id)))
+                with pytest.raises(TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(lookup), .1)
+            finally:
+                failure = None if committed else RuntimeError("controlled rollback")
+                await transaction.__aexit__(type(failure) if failure else None, failure, None)
+            if committed:
+                assert (await lookup).file_id == str(file_id)
+            else:
+                with pytest.raises(AppError) as raised:
+                    await lookup
+                assert raised.value.code == "MATERIAL_NOT_FOUND"
         finally:
             if lookup:
                 await asyncio.gather(lookup, return_exceptions=True)
-            await store.aclose()
+            await store.database.aclose()
 
     asyncio.run(scenario())
 
 
-def test_message_capacity_reserves_terminal_failure_text(postgres_target):
+def test_message_capacity_reserves_terminal_failure_text(actor, postgres_target):
     from app.core.config import Settings
     from app.core.errors import AppError
     from app.infrastructure.conversation.postgres_store import PostgresConversationStore
@@ -257,25 +249,25 @@ def test_message_capacity_reserves_terminal_failure_text(postgres_target):
     async def scenario():
         dsn, schema = postgres_target
         store = PostgresConversationStore(
-            Settings(_env_file=None, database_url=dsn), _schema=schema
+            Database(Settings(_env_file=None, database_url=dsn), schema=schema)
         )
-        await store.initialize()
+        await store.database.initialize()
         try:
-            session_id = (await store.create()).summary.session_id
+            session_id = (await store.create(actor)).summary.session_id
             with pytest.raises(AppError) as raised:
-                await store.submit(session_id, SessionSubmission("full", "字" * 1000000))
+                await store.submit(actor, session_id, SessionSubmission("full", "字" * 1000000))
             assert raised.value.code == "CONVERSATION_CAPACITY"
-            assert not (await store.read(session_id)).messages
-            run = await store.submit(
+            assert not (await store.read(actor, session_id)).messages
+            run = await store.submit(actor,
                 session_id, SessionSubmission("reserved", "字" * 999990)
             )
-            result = await store.finish(
+            result = await store.finish(actor,
                 session_id, run.run.run_id, RunCompletion("succeeded", "超" * 20)
             )
             assert result.error_code == "CONVERSATION_CAPACITY"
-            page = await store.read(session_id)
+            page = await store.read(actor, session_id)
             assert sum(len(message.content) for message in page.messages) == 1000000
         finally:
-            await store.aclose()
+            await store.database.aclose()
 
     asyncio.run(scenario())

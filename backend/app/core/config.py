@@ -54,6 +54,18 @@ class Settings(BaseSettings):
         default=DEFAULT_INSTITUTION_REVIEW_CONCURRENCY,
         ge=1,
     )
+    auth_session_ttl_seconds: int = Field(default=43200, gt=0)
+    auth_trusted_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
+    auth_hash_concurrency: int = Field(default=2, gt=0)
+    auth_hash_queue_size: int = Field(default=8, ge=0)
+    auth_hash_queue_timeout_seconds: float = Field(default=5, gt=0)
+    auth_login_window_seconds: int = Field(default=600, gt=0)
+    auth_login_ip_failures: int = Field(default=30, gt=0)
+    auth_login_account_failures: int = Field(default=5, gt=0)
+    auth_registration_window_seconds: int = Field(default=600, gt=0)
+    auth_registration_ip_attempts: int = Field(default=10, gt=0)
+    auth_attempt_max_keys: int = Field(default=10000, gt=0)
+
     database_url: SecretStr | None = None
     database_pool_min_size: int = Field(default=1, ge=1)
     database_pool_max_size: int = Field(default=5, ge=1)

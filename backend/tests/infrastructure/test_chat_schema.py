@@ -3,16 +3,21 @@
 import asyncio
 from uuid import uuid4
 
-import asyncpg
 import pytest
+
+from app.core.config import Settings
+from app.infrastructure.database import BaseDatabase, DatabaseConstraintError
 
 
 def test_catalog_and_files_have_metadata_only(postgres_target):
     async def scenario():
         dsn, schema = postgres_target
-        conn = await asyncpg.connect(dsn, server_settings={"search_path": schema})
+        manager = BaseDatabase.maintenance(
+            Settings(_env_file=None, database_url=dsn), schema=schema
+        )
+        conn = await manager.__aenter__()
         try:
-            assert await conn.fetchval("SELECT version FROM chat_schema_version") == 2
+            assert await conn.fetchval("SELECT version FROM chat_schema_version") == 3
             assert set(await conn.fetch("SELECT agent_id FROM agents")) == {
                 ("conversation_assistant",), ("institution_review",)
             }
@@ -24,27 +29,29 @@ def test_catalog_and_files_have_metadata_only(postgres_target):
                 "file_id", "session_id", "original_name", "source_path", "content_path",
                 "size_bytes", "content_chars", "created_at",
             }
-            with pytest.raises(asyncpg.ForeignKeyViolationError):
+            with pytest.raises(DatabaseConstraintError):
                 await conn.execute(
-                    "INSERT INTO chat_sessions(session_id,agent_id,title) VALUES($1,'unknown','x')",
+                    "INSERT INTO chat_sessions(session_id,agent_id,title,user_id) VALUES($1,"
+                    "'unknown','x',(SELECT user_id FROM users LIMIT 1))",
                     uuid4(),
                 )
             first, second, run, message, file = [uuid4() for _ in range(5)]
             for session in (first, second):
                 await conn.execute(
-                    "INSERT INTO chat_sessions(session_id,agent_id,title) "
-                    "VALUES($1,'conversation_assistant','x')", session,
+                    "INSERT INTO chat_sessions(session_id,agent_id,title,user_id) "
+                    "VALUES($1,'conversation_assistant','x',(SELECT user_id FROM users LIMIT 1))",
+                    session,
                 )
             await conn.execute(
                 "INSERT INTO runs(run_id,session_id,client_message_id,status) "
                 "VALUES($1,$2,'client','queued')", run, first,
             )
-            with pytest.raises(asyncpg.UniqueViolationError):
+            with pytest.raises(DatabaseConstraintError):
                 await conn.execute(
                     "INSERT INTO runs(run_id,session_id,client_message_id,status) "
                     "VALUES($1,$2,'client','queued')", uuid4(), first,
                 )
-            with pytest.raises(asyncpg.ForeignKeyViolationError):
+            with pytest.raises(DatabaseConstraintError):
                 await conn.execute(
                     "INSERT INTO messages(message_id,session_id,run_id,sequence,role,content) "
                     "VALUES($1,$2,$3,1,'user','x')", message, second, run,
@@ -60,11 +67,11 @@ def test_catalog_and_files_have_metadata_only(postgres_target):
                 file,
                 second,
             )
-            with pytest.raises(asyncpg.ForeignKeyViolationError):
+            with pytest.raises(DatabaseConstraintError):
                 await conn.execute(
                     "INSERT INTO message_files VALUES($1,$2,$3,0)", first, message, file
                 )
         finally:
-            await conn.close()
+            await manager.__aexit__(None, None, None)
 
     asyncio.run(scenario())

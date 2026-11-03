@@ -80,6 +80,7 @@ class ChatSessionSummary:
 class SessionDeletionTarget:
     session_id: str
     agent_id: str
+    user_id: str
     run_ids: tuple[str, ...]
     active_run_id: str | None
 

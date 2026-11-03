@@ -19,7 +19,7 @@ def test_delete_contract_errors_and_no_model(monkeypatch):
         for code, status in (("CONVERSATION_BUSY", 409),
                              ("CONVERSATION_DELETE_INCOMPLETE", 503),
                              ("STORAGE_UNAVAILABLE", 503)):
-            async def fail(_sid, code=code, status=status):
+            async def fail(_actor, _sid, code=code, status=status):
                 raise AppError(code, "safe error", status)
             with monkeypatch.context() as patch:
                 patch.setattr(client.app.state.conversation_service, "delete", fail)
@@ -96,20 +96,27 @@ def test_sse_uses_standard_events_and_prevalidates_unknown_runs(monkeypatch, fak
 
     monkeypatch.setattr("app.main.create_llm_service", lambda _: fake_model_factory(handler))
     with TestClient(create_app(settings())) as client:
-        assert client.get("/api/v1/sessions/missing/runs/missing/events").status_code == 404
+        params = {'auth_session_id': client.headers['X-Auth-Session-ID']}
+        assert (
+            client.get("/api/v1/sessions/missing/runs/missing/events", params=params).status_code
+            == 404
+        )
         id = client.post("/api/v1/sessions").json()["session_id"]
-        assert client.get(f"/api/v1/sessions/{id}/runs/missing/events").status_code == 404
+        assert (
+            client.get(f"/api/v1/sessions/{id}/runs/missing/events", params=params).status_code
+            == 404
+        )
         run = client.post(
             f"/api/v1/sessions/{id}/messages",
             json={"client_message_id": "sse", "content": "你好"},
         ).json()
         with client.stream(
-            "GET", f"/api/v1/sessions/{id}/runs/{run['run_id']}/events"
+            "GET", f"/api/v1/sessions/{id}/runs/{run['run_id']}/events", params=params
         ) as response:
             assert response.status_code == 200
             assert response.headers["content-type"].startswith("text/event-stream")
             assert response.headers["x-accel-buffering"] == "no"
-            assert response.headers["cache-control"] == "no-cache"
+            assert response.headers["cache-control"] == "no-store"
             lines = list(response.iter_lines())
         assert "retry: 3000" in lines
         assert "event: snapshot" in lines and "event: done" in lines
@@ -118,7 +125,9 @@ def test_sse_uses_standard_events_and_prevalidates_unknown_runs(monkeypatch, fak
 
 
 @pytest.mark.parametrize("ending", ["done", "disconnect"])
-def test_sse_idle_ping_keeps_iterator_alive_and_closes_on_end_or_disconnect(monkeypatch, ending):
+def test_sse_idle_ping_keeps_iterator_alive_and_closes_on_end_or_disconnect(
+    actor, monkeypatch, ending
+):
     # 缩短框架的测试时钟；业务流等待实际收到 ping 后才结束，不靠固定 sleep。
     monkeypatch.setattr("fastapi.routing._PING_INTERVAL", 0.01)
 
@@ -139,7 +148,19 @@ def test_sse_idle_ping_keeps_iterator_alive_and_closes_on_end_or_disconnect(monk
             finally:
                 closed = True
 
-        app = create_app(Settings(_env_file=None, llm_model=None, llm_api_key=None))
+        # This checks official response framing/heartbeat separately from authentication tests.
+        from fastapi import FastAPI
+
+        from app.api.conversations import router
+        app = FastAPI()
+        app.include_router(router, prefix='/api/v1')
+        @app.middleware('http')
+        async def fixed_identity(request, call_next):
+            request.state.actor = actor
+            return await call_next(request)
+        async def live(context):
+            return context
+        app.state.auth_service = SimpleNamespace(assert_live=live)
         async def prepare_events(*args):
             return events()
         app.state.conversation_service = SimpleNamespace(stream_run=prepare_events)
