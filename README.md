@@ -24,7 +24,7 @@ AgentPlatform 用分层结构组织智能体应用：前端通过 API 提交任�
 
 助手左侧从后端分页读取会话记录，上传文件在输入框预览并随所属消息展示。普通对话通过 SSE 实时显示模型输出，调用制度审核时推送真实状态并展示完整结果。切换会话保留草稿与文件选择，离开后关闭订阅，返回时恢复同一任务；历史保存到 PostgreSQL，刷新或重启后可恢复；未发送草稿仍仅在页面内存。制度审核报告保留完整 Markdown，并提供章节导航、复制、独立 Word 下载和明确的停止等待操作。
 
-智能体元数据、会话、消息、文件路径及完整子调用结果保存到 PostgreSQL；上传原件与解析正文存放在 backend/documents 的 agent/session/file 分级目录，不自动过期。服务重启后未完成运行标记中断，不自动重做。活动任务、SSE 临时文本及取消句柄仍在单进程内存，请使用单工作进程；同库第二实例会拒绝启动。当前没有登录、用户权限隔离、长期记忆、长对话摘要或 Redis，独立审核表单不新增历史功能。
+智能体元数据、会话、消息、文件路径及完整子调用结果保存到 PostgreSQL；上传原件与解析正文存放在 backend/documents 的 agent/session/file 分级目录，不自动过期。服务重启后未完成运行标记中断，不自动重做。活动任务、SSE 临时文本及取消句柄仍在单进程内存，请使用单工作进程；同库第二实例会拒绝启动。已接入公开注册、Cookie登录、本人账号和管理员用户管理；会话按用户隔离。未引入长期记忆、长对话摘要或 Redis，独立审核表单不新增历史功能。
 
 后端另提供独立 Markdown 转 Word 下载接口，使用 Python 依赖自带的 Pandoc 转换、python-docx 统一样式，不依赖模型配置或系统级安装 Pandoc。原制度审核报告页可点击“下载 Word”保存当前报告；会话页本次仅展示调用结果，不增加下载、报告版本或新业务流程，MCP 尚未接入。
 
@@ -72,36 +72,9 @@ flowchart LR
 | Markdown 报告 | marked、DOMPurify |
 | Word 导出 | pypandoc-binary、python-docx |
 
-## 代码结构
+## 项目架构与目录
 
-```text
-Agent/
-├── backend/
-│   ├── database/                   # 显式建库与当前 v2 建表 SQL
-│   ├── documents/                  # 会话文件原件与正文，运行时生成并被 Git 忽略
-│   ├── app/
-│   │   ├── agents/institution_review/  # 制度审核适配器、图、状态和专属节点
-│   │   ├── api/                        # 审核与健康检查路由
-│   │   ├── core/                       # 配置、错误处理和请求日志
-│   │   ├── infrastructure/             # 模型与 RAGFlow 客户端
-│   │   ├── nodes/document/             # DOCX 转 Markdown 节点
-│   │   ├── runtime/                    # 智能体注册与调用运行时
-│   │   ├── schemas/                    # 审核报告共享结构
-│   │   └── services/                   # 审核用例协调
-│   ├── tests/
-│   └── README.md                       # 后端配置、启动和 API 说明
-├── frontend/
-│   ├── src/
-│   │   ├── api/                        # API 客户端
-│   │   ├── features/institution-review/ # 上传和报告界面
-│   │   ├── components/                 # 工作台共享组件
-│   │   ├── router/                     # 页面路由
-│   │   └── views/                      # 首页、广场和工作台
-│   └── README.md                       # 前端配置和启动说明
-├── docs/database.md                # 数据库设计、结构与初始化入口
-├── docs/ai-coding/                     # 项目治理、架构和质量规则
-└── README.md
-```
+项目架构目录由 [AGENTS.md](AGENTS.md) 提供入口，完整内容集中维护在[项目架构目录](docs/ai-coding/project-structure.md)；模块职责和依赖边界见[架构规则](docs/ai-coding/architecture-rules.md)。账号、统一数据库基类与现有Agent的边界均已记录。
 
 ## 本地启动
 
@@ -125,6 +98,12 @@ pnpm dev
 
 前端开发服务器默认将 `/api` 代理到 `http://127.0.0.1:8000`。详细配置见 [后端 README](backend/README.md) 和 [前端 README](frontend/README.md)。
 
+## 账号与部署
+
+任何人可在 `/register` 创建普通账号，再到 `/login` 主动登录。本人资料与改密位于 `/account`，内置管理员在 `/admin/users` 创建、启停或重置普通用户；管理员不能读取其他人的会话。退出、换号或登录失效会清除页面草稿、附件选择与位置，后端历史继续保留。
+
+应用启动不读取或限制数据库结构版本号，账号与会话功能仍依赖已部署的用户表和会话归属字段。新环境使用隐藏密码输入的管理命令初始化，已有库不重复初始化；应用启动不会自动认领或建表。仓库仅保留当前结构初始化与管理员密码恢复，旧版升级入口已移除。操作和恢复步骤见[数据库说明](docs/database.md)。
+
 ## 当前入口
 
 - `GET /api/v1/agents`：数据库智能体展示目录；会话接口统一使用 `/api/v1/sessions` 与 session_id/message_id/run_id/file_id。
@@ -142,13 +121,14 @@ pnpm dev
 后端在 `backend/` 执行：
 
 ```powershell
-uv run ruff check app tests
+uv run ruff check app scripts tests
 uv run pytest
 ```
 
 前端在 `frontend/` 执行：
 
 ```powershell
+node --test src/features/conversation-assistant/useConversation.test.cjs src/features/auth/useAuth.test.cjs src/features/auth/appLifecycle.test.cjs src/api/auth.test.cjs
 pnpm build
 ```
 

@@ -1,5 +1,7 @@
 # 当前架构与架构约束
 
+项目目录集中维护在[项目架构目录](project-structure.md)，由根[AGENTS.md](../../AGENTS.md)提供入口。本文件维护当前调用关系、职责和依赖约束；拟变更单独标注，不作为已经实现的事实。
+
 ## 当前架构图
 
 以下图示描述仓库当前代码中可见的主要调用关系，不表示尚未实现的规划模块。
@@ -8,6 +10,9 @@
 flowchart LR
   UI[Vue 页面与制度审核 feature] --> APIClient[frontend/src/api]
   APIClient --> HTTP[FastAPI API]
+  HTTP --> Auth[AuthService / UserService]
+  Auth --> Identity[IdentityStore]
+  Identity --> Base[BaseDatabase / Database]
   HTTP --> ReviewService[ReviewService]
   HTTP --> ExportService[DocumentExportService]
   ExportService --> Pandoc[Python 包内 Pandoc]
@@ -28,6 +33,7 @@ flowchart LR
   HTTP --> Core[配置、错误处理、日志]
   HTTP --> ConversationService[ConversationService]
   ConversationService --> SessionStore[PostgreSQL 会话历史仓储]
+  SessionStore --> Base
   ConversationService --> ParseNode[公共 DOCX 解析节点]
   ParseNode --> DocNode
   ConversationService --> Runtime
@@ -139,16 +145,30 @@ DOCX 上传可选，粘贴正文引用当前会话用户消息。消息、结果
 
 ## 当前架构文档状态
 
-`docs/superpowers/智能体平台项目架构图_v2.md` 是规划材料，其中的数据库、认证、stores、消息队列和其他模块不代表当前实现。评估变更时以代码和本文件的“当前架构图”为准；未来计划须明确标注为计划，并单独审批。
+项目目录以[独立目录文档](project-structure.md)为唯一维护位置，当前运行与依赖边界以源码和本文为准。ORM、一级auth/stores、Redis或消息队列不是当前实现；拟变更不能作为已实施事实。正式架构说明不依赖任务设计或执行记录。
+
+### 账号、认证与统一数据库执行
+
+模块职责及调用方见[项目架构目录](project-structure.md#账号与数据库模块职责)，持久化与失败语义见[数据库说明](../database.md)和[错误码](../errors.md)。
+
+- `infrastructure/database.py` 的 Database 独占共享池、运行权和生命周期；BaseDatabase 提供查询、执行与绑定同一连接的事务。启动不读取或限制数据库结构版本号，新环境通过离线初始化命令建表并建立真实admin，已有库不重复初始化。只有此模块使用 asyncpg，两个仓储继承基类，维护脚本和 Python 数据库测试同样引用基类。不能按仓储各建池或暴露原始连接。
+- 身份与会话写入在同一 BaseDatabase 事务内验证并锁定用户，再锁会话；业务 SQL、所有权和 DTO 映射归仓储。基类只映射驱动/连接/超时和内部约束异常，不承担用户策略或生成业务 SQL。
+- `IdentityStore` 持久保存真实账号和可撤销登录；`AuthService` 负责公开注册、登录与密码用例，`UserService` 负责本人资料和管理员管理。注册固定创建启用的普通账号，不自动登录；管理员创建/重置要求首次改密。唯一内置 admin 不能经管理接口停用或重置。
+- 所有业务 API 验证身份；写请求额外验证精确来源、CSRF 和公开登录上下文。只有登录成功写 HttpOnly Cookie，退出/改密只撤销数据库登录。SSE 绑定原登录，每帧前及空闲最多5秒复核；撤销只结束订阅，不取消已接纳的业务运行。
+- 会话拥有者固定为 chat_sessions.user_id，admin 不绕过他人资源权限。公共服务入口显式传 AuthContext；已接纳后台执行和内部恢复显式传 user_id。Agent/runtime 不依赖账号仓储、应用服务或会话存储完成业务编排。
+- 删除凭据 version2 包含 user_id；会话行消失后，HTTP 清理重试仍先核对拥有者，再复用本地任务。不再提供旧版凭据转换入口；启动遇到旧版或损坏凭据时拒绝接流量，需核对备份并离线修复。
+- 前端 `features/auth` 装配单个认证控制器；统一客户端绑定身份代次并拒绝旧结果。身份变化销毁私有 KeepAlive，清除草稿、File、选择、重试、位置与报告URL。隐藏/恢复先遮蔽并重新核验，同一身份内导航继续保留草稿。认证令牌和 CSRF 只在内存，不写 Web Storage。
+
+`pwdlib[argon2]` 锁定 0.3.1，采用安装包的 `PasswordHash.recommended()`、`verify_and_update()`；CPU工作使用标准库 `asyncio.to_thread`，同进程并发2、等待8、等待5秒。取消必须等待实际线程结束后释放额度。asyncpg 0.32.0 的官方 pool/transaction API 管理资源、read_committed 写事务和 repeatable_read 只读事务；跨仓储验证复用绑定连接，未引入 ORM。
 
 ### 会话持久化运行边界
 
-同一数据库由专用连接持固定 advisory lock，首版仅一个应用进程；第二实例拒绝启动。启动恢复遗留 queued/running 为中断失败，不调用模型。终态消息、完整结果、continuation 与运行状态原子提交后才发送 SSE done；终态提交失败或运行权丢失拒绝新写入，需要服务重启。客户端历史列表从后端按更新时间分页，消息按 sequence 前后分页；sessionStorage 不是历史真源。没有用户/租户隔离或历史自动清理。数据库、连接、池和取消故障采用官方 asyncpg API，不自建协议/心跳。
+同一数据库由专用连接持固定 advisory lock，首版仅一个应用进程；第二实例拒绝启动。启动恢复遗留 queued/running 为中断失败，不调用模型。终态消息、完整结果、continuation 与运行状态原子提交后才发送 SSE done；终态提交失败或运行权丢失拒绝新写入，需要服务重启。客户端历史列表从后端按更新时间分页，消息按 sequence 前后分页；sessionStorage 不是历史真源。会话按真实用户隔离，不自动清理历史。数据库、连接、池和取消故障采用官方 asyncpg API，不自建协议/心跳。
 
 ### 会话文件与智能体目录
 
 `infrastructure/documents/local_file_store.py` 负责附件原件及已解析 Markdown 的本地暂存、目录发布、读取和精确清理；默认根为 backend/documents，DOCUMENTS_DIR 相对 backend 解析，路径按 agent_id/session_id/file_id 分级，数据库保存相对 POSIX 路径。ConversationService 协调解析、文件发布和元数据事务，取消等待不可中止的写线程；提交未确认时先查询 file_id，无法核实则保留文件，不盲删。文件与数据库不构成跨资源原子事务，崩溃可留下待核对孤立文件。Agent 只接收服务加载的 TurnDocument 正文，不导入文件或数据库存储。
 
-AgentCatalogService 消费注入的 list_agents 查询，HTTP GET /api/v1/agents 和前端目录实际使用该元数据；运行执行仍由代码注册表控制。会话公共接口为 /api/v1/sessions，使用 session_id/message_id/run_id/file_id；文件返回元数据，不公开内部路径或静态目录。用户已批准丢弃旧表数据，本轮直接初始化 v2，不保留迁移或旧 HTTP 别名。
+AgentCatalogService 消费注入的 list_agents 查询，HTTP GET /api/v1/agents 和前端目录实际使用该元数据；运行执行仍由代码注册表控制。会话公共接口为 /api/v1/sessions，使用 session_id/message_id/run_id/file_id；文件返回元数据，不公开内部路径或静态目录。新环境显式初始化v3；已有库不重复初始化，不再提供旧版升级入口或无账号HTTP别名。
 
-未来个人私有会话需要真实 users 与 chat_sessions.user_id，并在所有会话、运行、文件、SSE 和取消入口校验服务端身份。当前没有用户身份来源，不伪造用户、不接受客户端 user_id 授权、不以文件目录代替权限控制。
+身份由可撤销Cookie登录提供，不接受客户端user_id授权，也不以文件目录代替权限控制。

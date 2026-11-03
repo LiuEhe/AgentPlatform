@@ -4,7 +4,7 @@
 
 | 能力 | 当前状态 | 使用方式/限制 |
 | --- | --- | --- |
-| Ruff | `backend/pyproject.toml` 配置了规则并在 `dev` 依赖组声明 Ruff | 在 `backend/` 运行 `uv run ruff check app tests`。 |
+| Ruff | `backend/pyproject.toml` 配置了规则并在 `dev` 依赖组声明 Ruff | 在 `backend/` 运行 `uv run ruff check app scripts tests`。 |
 | 后端测试 | `backend/tests/` 使用 pytest 覆盖双文档输入、DOCX 解析、条款分组、跨请求并发额度与取消清理、发现定位、报告、完整审核图和 ASGI 入口及启动就绪 | 在 `backend/` 运行 `uv run pytest`。通过假运行时、假模型和假检索器隔离外部服务，不消耗真实账户额度。 |
 | 前端类型检查与构建 | `frontend/package.json` 的 `build` 脚本运行 `vue-tsc -b && vite build` | 在 `frontend/` 运行 `pnpm build`。当前没有单独 lint 或前端测试脚本。 |
 | 依赖锁定 | `backend/uv.lock`、`frontend/pnpm-lock.yaml` 已跟踪 | 依赖声明变化时检查对应锁文件；不得只改锁文件来掩盖依赖决策。 |
@@ -21,6 +21,8 @@
 ## 当前覆盖范围与后续扩展
 
 当前测试覆盖制度审核应用服务、真实编译审核图及 ASGI 生命周期；模型和检索器使用受控替身。未覆盖真实模型准确率、上下文上限、真实 RAGFlow 网络调用、账户额度和生产吞吐，这些事项需在对应服务可用时另行验收。
+
+账号回归覆盖公开注册、登录撤销、强制改密、来源/CSRF/上下文、admin管理、会话归属、删除凭据和SSE重新授权；数据库用例使用显式专用PostgreSQL测试库，准备与边界见[数据库说明](../database.md#测试与维护)。前端另运行 `node --test src/features/auth/useAuth.test.cjs src/features/auth/appLifecycle.test.cjs src/api/auth.test.cjs`，使用真实Vue KeepAlive验证同身份导航保留和身份代次销毁，并验证刷新指针、退出乱序与旧响应丢弃。多标签页和离线退出另做实际浏览器验收，不能用Node替身代替。
 
 文档导出测试另覆盖输入与大小边界、内容和样式结构、跨请求共享并发、取消及进程回收、流式 JSON 和无模型配置的独立入口。`tests/test_document_export_integration.py` 使用已声明 Python 依赖的真实包内 Pandoc，不消耗模型额度；发布验收必须实际运行，不能用缺依赖跳过代替通过。Word/WPS 的实际分页、字体替代和复杂表格布局仍须单独进行目视验收，结构测试通过不表示版式已验收。
 
