@@ -1,193 +1,189 @@
 # 数据库设计与初始化
 
-当前使用 PostgreSQL 18、asyncpg 0.32.0。可执行结构以 [schema_v3.sql](../backend/database/schema_v3.sql) 为准。应用启动不读取或限制数据库结构版本号，仍确认内置admin，不隐式建库、建表或迁移。版本表保留当前初始化结构的记录。
+项目使用 PostgreSQL 18、asyncpg 0.32.0，保存账号、登录会话和业务历史；上传原件与解析正文保存在本地文件目录。完整字段、类型、约束和索引以 [schema_v3.sql](../backend/database/schema_v3.sql) 为准。
 
-## 文件职责
+## 表结构
 
-| 位置 | 职责 |
-| --- | --- |
-| [create_databases.sql](../backend/database/create_databases.sql) | 仅供新环境显式建应用库及测试库，已有数据库无需执行 |
-| [schema_v3.sql](../backend/database/schema_v3.sql) | 当前DDL，由管理脚本与真实admin初始化在同一事务中执行 |
-| [postgres_store.py](../backend/app/infrastructure/conversation/postgres_store.py) | 会话SQL、拥有者校验和DTO映射，继承BaseDatabase；不读写附件正文 |
-| [local_file_store.py](../backend/app/infrastructure/documents/local_file_store.py) | 本地原件、解析正文、暂存、发布、读取和精确清理 |
-| [active_runs.py](../backend/app/infrastructure/conversation/active_runs.py) | 当前进程活动任务、流式临时文本、锁和额度；不持有第二份持久历史 |
+以下按数据库表说明全部字段。UUID 由应用生成；`timestamptz` 表示带时区的时间，`now()` 为数据库当前时间。外键不级联删除，业务历史不自动过期。
 
-SQL 是 backend/database 下的部署资产，不属于 Python 运行时包。发布时单独携带，不打入 wheel。未引入迁移框架；密码计算使用锁定的pwdlib[argon2] 0.3.1。
+### users：用户账号
+
+保存用户资料和密码哈希。仅内置 `admin` 为管理员且必须保持启用，其他账号角色均为普通用户。
+
+| 字段 | 类型 | 可空 | 含义与约束 |
+| --- | --- | --- | --- |
+| `user_id` | uuid | 否 | 用户标识，主键 |
+| `username` | text | 否 | 唯一用户名；3–32 位小写字母、数字或下划线，须以字母开头 |
+| `display_name` | text | 否 | 展示名称，1–50 字符 |
+| `password_hash` | text | 否 | 非空的 Argon2 密码哈希，不保存明文密码 |
+| `role` | text | 否 | 角色：`admin`（管理员）或 `user`（普通用户） |
+| `status` | text | 否 | 账号状态：`active`（启用）或 `disabled`（停用） |
+| `must_change_password` | boolean | 否 | 是否须先修改临时密码；公开注册为 false，管理员创建或重置普通用户密码时为 true |
+| `created_at` | timestamptz | 否 | 创建时间，默认 `now()` |
+| `updated_at` | timestamptz | 否 | 最近更新时间，默认 `now()`，后续由应用更新 |
+
+### auth_sessions：登录会话
+
+保存登录有效期和撤销状态，用于验证 Cookie 登录；与下面的业务聊天会话分别存储。
+
+| 字段 | 类型 | 可空 | 含义与约束 |
+| --- | --- | --- | --- |
+| `auth_session_id` | uuid | 否 | 登录会话标识，主键 |
+| `user_id` | uuid | 否 | 登录用户，外键指向 `users.user_id` |
+| `token_hash` | bytea | 否 | 登录 token 的 SHA-256 摘要，唯一且固定 32 字节；Cookie 中的原始 token 不入库 |
+| `csrf_token` | text | 否 | 防止跨站请求伪造的校验 token，非空 |
+| `created_at` | timestamptz | 否 | 登录创建时间，默认 `now()` |
+| `expires_at` | timestamptz | 否 | 到期时间，必须晚于创建时间 |
+| `revoked_at` | timestamptz | 是 | 撤销时间；为空表示未主动撤销，仍须检查到期时间和用户状态；非空时不得早于创建时间 |
+
+### agents：智能体元数据
+
+保存目录展示信息，预置 `conversation_assistant`（会话助手）和 `institution_review`（制度审核）。执行能力由代码注册表决定，增加数据库记录不会自动增加执行能力。
+
+| 字段 | 类型 | 可空 | 含义与约束 |
+| --- | --- | --- | --- |
+| `agent_id` | text | 否 | 稳定的智能体代码标识，主键 |
+| `name` | text | 否 | 展示名称 |
+| `description` | text | 否 | 智能体说明 |
+| `created_at` | timestamptz | 否 | 创建时间，默认 `now()` |
+| `updated_at` | timestamptz | 否 | 元数据更新时间，默认 `now()` |
+
+### chat_sessions：业务会话
+
+保存聊天会话的归属、标题和待补齐的审核参数。拥有者创建后不变，管理员也不能访问他人会话。
+
+| 字段 | 类型 | 可空 | 含义与约束 |
+| --- | --- | --- | --- |
+| `session_id` | uuid | 否 | 业务会话标识，主键 |
+| `user_id` | uuid | 否 | 会话拥有者，外键指向 `users.user_id` |
+| `agent_id` | text | 否 | 入口智能体，外键指向 `agents.agent_id` |
+| `title` | text | 否 | 会话标题，首次用户提交时生成 |
+| `last_sequence` | bigint | 否 | 会话内已保存消息的最高序号，默认 0，不能为负数 |
+| `continuation` | jsonb | 是 | 待补齐审核参数，格式为 `{version:1,data:...}`；没有待补参时为空 |
+| `created_at` | timestamptz | 否 | 创建时间，默认 `now()` |
+| `updated_at` | timestamptz | 否 | 最近提交时间，默认 `now()`，用于会话列表排序 |
+
+### runs：提交与执行记录
+
+一条记录对应一次消息提交，保存排队、执行和终态结果。`(session_id, client_message_id)` 唯一，用于重复请求识别；每会话最多一个 queued 或 running 任务。
+
+| 字段 | 类型 | 可空 | 含义与约束 |
+| --- | --- | --- | --- |
+| `run_id` | uuid | 否 | 执行标识，主键 |
+| `session_id` | uuid | 否 | 所属业务会话，外键指向 `chat_sessions.session_id` |
+| `client_message_id` | varchar(128) | 否 | 客户端生成的请求标识，重试同一请求时保持不变 |
+| `status` | text | 否 | 执行状态：`queued`（排队）、`running`（执行）、`succeeded`（成功）、`failed`（失败）、`cancelled`（取消） |
+| `error_code` | text | 是 | 失败错误码，见[错误码说明](errors.md) |
+| `error_message` | text | 是 | 面向用户的安全错误说明 |
+| `created_at` | timestamptz | 否 | 提交时间，默认 `now()` |
+| `started_at` | timestamptz | 是 | 实际开始执行的时间 |
+| `finished_at` | timestamptz | 是 | 终态时间；当且仅当状态为成功、失败或取消时非空 |
+
+### messages：消息正文
+
+保存完整用户消息和助手消息。`(session_id, sequence)` 唯一，保证会话内顺序；`(run_id, role)` 唯一，每轮一条用户消息、至多一条助手终态消息。
+
+| 字段 | 类型 | 可空 | 含义与约束 |
+| --- | --- | --- | --- |
+| `message_id` | uuid | 否 | 消息标识，主键 |
+| `session_id` | uuid | 否 | 所属业务会话，外键指向 `chat_sessions.session_id` |
+| `run_id` | uuid | 否 | 所属执行；与 `session_id` 组成复合外键，指向同一会话下的 `runs` 记录 |
+| `sequence` | bigint | 否 | 会话内递增序号，必须大于 0 |
+| `role` | text | 否 | 消息角色：`user`（用户）或 `assistant`（助手） |
+| `content` | text | 否 | 完整正文；失败或取消时也可保存终态说明 |
+| `created_at` | timestamptz | 否 | 消息保存时间，默认 `now()` |
+
+### files：附件元数据
+
+仅保存文件信息和相对路径，原件与解析正文保存在本地文件目录。已上传但未发送的文件也归属于会话。
+
+| 字段 | 类型 | 可空 | 含义与约束 |
+| --- | --- | --- | --- |
+| `file_id` | uuid | 否 | 文件标识，主键 |
+| `session_id` | uuid | 否 | 所属业务会话，外键指向 `chat_sessions.session_id` |
+| `original_name` | text | 否 | 展示用原文件名，不用于拼接物理路径 |
+| `source_path` | text | 否 | 原始 DOCX 相对附件根目录的路径，唯一且非空 |
+| `content_path` | text | 否 | 解析 Markdown 相对附件根目录的路径，唯一且非空 |
+| `size_bytes` | bigint | 否 | 原件字节数，必须大于 0 |
+| `content_chars` | integer | 否 | 解析正文字数，不能为负数 |
+| `created_at` | timestamptz | 否 | 文件保存时间，默认 `now()` |
+
+### message_files：消息附件引用
+
+把消息与附件关联，并保留引用顺序。`(message_id, file_id)` 为联合主键，`(message_id, position)` 唯一；复合外键保证消息和附件属于同一会话。
+
+| 字段 | 类型 | 可空 | 含义与约束 |
+| --- | --- | --- | --- |
+| `session_id` | uuid | 否 | 消息和附件共同所属的业务会话，参与两组复合外键 |
+| `message_id` | uuid | 否 | 消息标识；与 `session_id` 共同引用 `messages` |
+| `file_id` | uuid | 否 | 文件标识；与 `session_id` 共同引用 `files` |
+| `position` | integer | 否 | 附件在该消息中的排列位置，从 0 开始 |
+
+### agent_calls：成功子调用结果
+
+保存助手调用其他 Agent 后的完整成功结果。当前用于制度审核子调用；失败由父运行记录表示。
+
+| 字段 | 类型 | 可空 | 含义与约束 |
+| --- | --- | --- | --- |
+| `call_id` | uuid | 否 | 子调用结果记录标识，主键 |
+| `message_id` | uuid | 否 | 展示该结果的消息，唯一，外键指向 `messages.message_id` |
+| `agent_id` | text | 否 | 被调用智能体，外键指向 `agents.agent_id` |
+| `agent_name` | text | 否 | 调用时的智能体名称快照 |
+| `invocation_id` | text | 否 | 运行时返回的调用标识，用于关联此次执行 |
+| `output_type` | text | 否 | 输出格式：`markdown`、`text` 或 `json` |
+| `output` | text | 否 | 完整输出内容 |
+
+### chat_schema_version：初始化结构版本
+
+记录初始化结构版本；应用启动不读取或限制版本号，也不据此自动迁移。
+
+| 字段 | 类型 | 可空 | 含义与约束 |
+| --- | --- | --- | --- |
+| `singleton` | boolean | 否 | 主键且只能为 true，保证最多一条记录 |
+| `version` | integer | 否 | 初始化版本号，当前约束为 3，初始化写入 3 |
 
 ## 连接与配置
 
-本地地址 `127.0.0.1:5432`，用户 `postgres`。应用库 `agent_platform`；专用测试库 `agent_platform_test`。真实密码仅在被 Git 忽略的 backend/.env 中，本文与示例不记录密码。
+本地数据库地址为 `127.0.0.1:5432`，用户为 `postgres`；应用库为 `agent_platform`，测试库为 `agent_platform_test`。连接串放在被 Git 忽略的 `backend/.env` 中，密码中的保留字符须 URL 编码。
 
-| 配置项 | 用途 |
+| 配置项 | 用途与默认值 |
 | --- | --- |
-| DATABASE_URL | 应用完整连接串 |
-| TEST_DATABASE_URL | 测试终端显式提供；只允许 agent_platform_test，不回退应用库 |
-| DATABASE_POOL_MIN_SIZE / DATABASE_POOL_MAX_SIZE | 普通连接池大小，默认 1 / 5 |
-| DATABASE_TIMEOUT_SECONDS | 建连、获取连接和命令超时，默认 5 秒 |
-| DOCUMENTS_DIR | 附件根目录；未配置为 backend/documents，相对配置固定按 backend 解析 |
-
-.env 注释列出主机、端口、用户和库用途；密码仅在连接串中，不另复制一份密码注释。保留字符须 URL 编码。
+| `DATABASE_URL` | 应用数据库连接串 |
+| `TEST_DATABASE_URL` | 测试终端显式提供，仅允许连接 `agent_platform_test` |
+| `DATABASE_POOL_MIN_SIZE` / `DATABASE_POOL_MAX_SIZE` | 普通连接池大小，默认 1 / 5 |
+| `DATABASE_TIMEOUT_SECONDS` | 数据库操作超时，默认 5 秒 |
+| `DOCUMENTS_DIR` | 附件根目录，默认 `backend/documents`；相对路径按 `backend` 解析 |
 
 ## 初始化
 
-新环境先在postgres管理库执行 `backend/database/create_databases.sql`。在backend工作目录配置明确的DATABASE_URL与DOCUMENTS_DIR，再执行：
+仅新环境执行：先在 `postgres` 管理库运行 [create_databases.sql](../backend/database/create_databases.sql)，再配置 `backend/.env`，在 `backend/` 目录执行：
 
 ```powershell
 uv run python -m scripts.manage_users initialize
 ```
 
-命令隐藏输入并确认6–20字符的admin密码，在同一事务内执行schema_v3与真实admin插入。没有默认密码；重复初始化拒绝覆盖。不要单独执行v3 DDL后启动没有admin的服务。已有环境不要重复初始化；仓库只保留当前结构初始化和管理员密码恢复，不再提供旧版升级或续做入口。
-
-### 备份与恢复
-
-数据库与整个附件根（包括`.deletions`和`.staging`）必须作为同一恢复点保存。先停服务，核对目标库和DOCUMENTS_DIR，使用PostgreSQL18客户端备份；凭据使用受控配置或客户端密码提示，避免出现在命令行。
-
-```powershell
-pg_dump -h 127.0.0.1 -p 5432 -U postgres -d agent_platform -W -Fc -f <备份目录>/database.dump
-tar -czf <备份目录>/documents.tar.gz -C <实际附件根> .
-pg_restore --list <备份目录>/database.dump
-tar -tzf <备份目录>/documents.tar.gz
-```
-
-恢复前在隔离库与临时目录演练；恢复时保持数据库、附件及删除凭据属于同一备份点。已有用户或私有会话的环境不能直接降级到无认证旧版本，优先前向修复。覆盖现有数据或恢复旧备份需另行确认数据损失，不运行初始化命令覆盖已有库。
+命令隐藏输入并确认 6–20 字符的管理员密码，在同一事务中建表并创建真实 `admin`，没有默认密码。已有库不要重复初始化；应用启动只检查管理员，不自动建库、建表或迁移。
 
 ### admin密码恢复
 
-停服务、核对目标并取得运行权后执行 `uv run python -m scripts.manage_users reset-admin`。隐藏输入新密码，只修改内置admin密码并撤销其全部登录，不重新认领会话、不处理其他用户。此入口不暴露为HTTP API。
+停服务并核对目标库后，在 `backend/` 执行 `uv run python -m scripts.manage_users reset-admin`。命令修改内置管理员密码并撤销其全部登录，不改变会话归属。实现见 [manage_users.py](../backend/scripts/manage_users.py)。
 
-## 统一数据库资源与账号表
+## 存储与维护
 
-`infrastructure/database.py` 内部封装asyncpg 0.32.0，Database拥有唯一共享连接池与advisory运行权；BaseDatabase提供fetch/fetchrow/fetchval/execute及绑定同一连接的transaction。两个仓储继承基类，维护脚本和Python测试通过maintenance入口；驱动连接/池不对外暴露。写事务read_committed，用户锁之后以新语句复核登录，再操作会话；只读事务repeatable_read。
+| 项目 | 说明 |
+| --- | --- |
+| 数据库访问 | [IdentityStore](../backend/app/infrastructure/identity/postgres_store.py) 负责用户与登录记录，[PostgresConversationStore](../backend/app/infrastructure/conversation/postgres_store.py) 负责业务会话历史；两者复用同一个连接池，统一由 [Database](../backend/app/infrastructure/database.py) 管理连接 |
+| 事务一致性 | 身份校验与会话写入需要一起完成时，使用同一数据库连接和事务，成功时一起提交，失败时一起回滚 |
+| 运行方式 | 同库仅允许一个应用进程；重启将未完成任务标为中断，不自动重做 |
+| 附件位置 | `<DOCUMENTS_DIR>/<agent_id>/<session_id>/<file_id>/` 下保存 `source.docx` 和 `content.md` |
+| 文件操作 | 暂存目录为 `.staging`，删除凭据目录为 `.deletions`；数据库提交未知时保留文件待核实 |
+| 永久删除 | 通过会话删除接口清理历史和附件；附件清理失败可重试，不清理备份或用户下载副本 |
+| 备份恢复 | 停服务后共同备份数据库与整个附件根目录（含 `.staging`、`.deletions`），恢复时使用同一备份点；先在隔离环境演练，覆盖已有数据须另行确认 |
 
-`users`：user_id UUID主键，username唯一且规范为字母开头3–32位小写字母/数字/下划线；display_name 1–50字符；password_hash非空Argon2编码；role为admin/user、status为active/disabled；must_change_password布尔值，created_at/updated_at为timestamptz。约束确保只有username=admin可为admin且不能停用，其他账号固定user。users_list(created_at DESC,user_id DESC)支持分页。
-
-`auth_sessions`：auth_session_id UUID主键、user_id外键、token_hash唯一32字节SHA256摘要、csrf_token非空、created_at/expires_at及可空revoked_at。expires_at>created_at，revoked_at不得早于created_at，建立用户与过期时间索引。Cookie明文不入库；密码/重置/停用撤销全部相关登录，普通退出只撤销绑定登录。登录时小批清理过期记录，不清理业务历史。
-
-公开注册创建active普通用户且must_change_password=false，不创建auth_sessions；管理员创建/重置设true。存量会话已归属真实admin。admin角色不绕过会话拥有者判断。
-
-## 表结构
-
-业务 UUID 由应用生成；时间均为非空 timestamptz，created_at/updated_at 默认 now()，下列可空时间例外。外键均 NO ACTION，无级联删除或自动过期；历史通过显式 DELETE 用例永久删除，不修改结构版本。
-
-### agents：智能体元数据
-
-| 字段 | 类型及约束 | 含义 |
-| --- | --- | --- |
-| agent_id | text PK | 稳定代码标识 |
-| name / description | text NOT NULL | 展示名称及说明 |
-| created_at / updated_at | timestamptz NOT NULL | 创建和更新记录 |
-
-SQL 显式初始化 conversation_assistant（会话助手）与 institution_review（制度审核）。不存模型、密钥、Prompt 或可执行代码，不在应用启动时覆盖元数据。GET /api/v1/agents 与前端目录读取名称和描述；执行能力仍由现有代码注册表决定，数据库添加行不等于可执行 Agent。
-
-### chat_sessions：会话
-
-| 字段 | 类型及约束 | 含义 |
-| --- | --- | --- |
-| session_id | uuid PK | 会话标识 |
-| user_id | uuid NOT NULL FK users | 不可变拥有者；所有子对象经会话继承归属 |
-| agent_id | text NOT NULL FK agents | 入口 Agent，当前会话入口为 conversation_assistant |
-| title | text NOT NULL | 首次用户提交生成标题 |
-| last_sequence | bigint NOT NULL DEFAULT 0 CHECK >= 0 | 全会话最高消息序号 |
-| continuation | jsonb NULL | 版本化待补参数据 {version:1,data:...} |
-| created_at / updated_at | timestamptz NOT NULL | 创建与最近提交时间 |
-
-索引 chat_sessions_list(user_id,agent_id,updated_at DESC,session_id DESC)，支持键集分页。不存消息数组或模型上下文缓存。
-
-### runs：提交和后台执行
-
-| 字段 | 类型及约束 | 含义 |
-| --- | --- | --- |
-| run_id | uuid PK | 执行标识 |
-| session_id | uuid NOT NULL FK chat_sessions | 所属会话 |
-| client_message_id | varchar(128) NOT NULL | 请求幂等标识 |
-| status | text NOT NULL CHECK 枚举 | queued/running/succeeded/failed/cancelled |
-| error_code / error_message | text NULL | 安全错误说明 |
-| created_at | timestamptz NOT NULL | 提交时间 |
-| started_at / finished_at | timestamptz NULL | 开始/终态时间 |
-
-UNIQUE(session_id,run_id)、UNIQUE(session_id,client_message_id)。部分唯一索引 session_one_active_run(session_id) 限定 queued/running 时每会话只有一个活动运行。CHECK 保证终态当且仅当 finished_at 非空。请求正文和有序文件引用存在用户消息，不重复保存。
-
-### messages：消息
-
-| 字段 | 类型及约束 | 含义 |
-| --- | --- | --- |
-| message_id | uuid PK | 消息标识 |
-| session_id | uuid NOT NULL FK chat_sessions | 所属会话 |
-| run_id | uuid NOT NULL | 所属执行 |
-| sequence | bigint NOT NULL CHECK > 0 | 会话内递增序号 |
-| role | text NOT NULL CHECK user/assistant | 消息角色 |
-| content | text NOT NULL | 完整消息正文 |
-| created_at | timestamptz NOT NULL | 保存时间 |
-
-UNIQUE(session_id,message_id)、UNIQUE(session_id,sequence)、UNIQUE(run_id,role)。复合 FK(session_id,run_id) 引用 runs(session_id,run_id)，禁止关联其他会话的运行。一轮一条用户消息及至多一条助手终态消息，失败/取消同样保存说明。
-
-### files：文件元数据
-
-| 字段 | 类型及约束 | 含义 |
-| --- | --- | --- |
-| file_id | uuid PK | 文件标识 |
-| session_id | uuid NOT NULL FK chat_sessions | 所属会话 |
-| original_name | text NOT NULL | 展示用原文件名，不参与路径拼接 |
-| source_path | text NOT NULL UNIQUE CHECK 非空 | 原件相对路径 |
-| content_path | text NOT NULL UNIQUE CHECK 非空 | Markdown 相对路径 |
-| size_bytes | bigint NOT NULL CHECK > 0 | 原件字节数 |
-| content_chars | integer NOT NULL CHECK >= 0 | 已解析正文字数 |
-| created_at | timestamptz NOT NULL | 保存时间 |
-
-UNIQUE(session_id,file_id)，索引 files_list(session_id,created_at,file_id)。没有 bytea、markdown 或正文内容列；容量通过元数据求和。已上传未发送的文件也归该会话。HTTP 只返回 file_id/original_name/size_bytes/content_chars/created_at，不返回内部路径。
-
-### message_files：消息引用
-
-session_id、message_id、file_id 均为 uuid NOT NULL；position 为 integer NOT NULL CHECK >= 0。PK(message_id,file_id)，UNIQUE(message_id,position)，索引 file_references(file_id)。复合外键 (session_id,message_id) 和 (session_id,file_id) 分别引用 messages 和 files，防止跨会话引用，position 保留附件顺序。
-
-### agent_calls：成功子调用结果
-
-call_id uuid PK；message_id uuid NOT NULL UNIQUE FK messages；agent_id text NOT NULL FK agents；agent_name text NOT NULL 为名称快照；invocation_id text NOT NULL；output_type text NOT NULL CHECK markdown/text/json；output text NOT NULL 保存完整结果。当前只保存已有成功子审核结果，失败由父运行错误表示，不新增通用工具日志或独立审核报告历史。
-
-### chat_schema_version：结构版本
-
-singleton boolean PRIMARY KEY CHECK(singleton)，version integer NOT NULL CHECK(version=3)。只允许 true 一个键，初始化写 (true,3)。这是基础设施版本表，不是业务实体。
-
-## 文件目录、操作与备份
-
-```text
-backend/documents/
-  .deletions/<session_id>.json
-  .staging/<upload_id>/
-  <agent_id>/<session_id>/<file_id>/
-    source.docx
-    content.md
-```
-
-原件和 UTF-8 解析正文各保存一份。上传只解析一次，后续模型输入从 content.md 读取；Agent 获得中立 TurnDocument，不能直接读文件或数据库。所有路径段由代码 Agent 标识及服务端 UUID 生成，数据库保存相对根目录的 POSIX 路径，变更根目录后保持相对结构即可；用户原文件名不用于物理目录。
-
-使用已安装 Python 3.12.13 标准库 pathlib.Path.resolve/lstat、os.rename、shutil.rmtree；文件在同一根内暂存再通过目录 rename 发布，已有目标拒绝覆盖。路径边界检查拒绝绝对路径、盘符/UNC、反斜杠、上级引用、symlink/junction/reparse point。清理只针对本次生成目录，先核实解析目标仍在根内。缺文件、无效 UTF-8 或正文长度与元数据不一致返回 FILE_UNAVAILABLE，不以空材料继续调用。未给 documents 挂静态路由或新增下载入口，目录被 Git 忽略。
-
-上传顺序为校验解析 → 暂存 → 发布 → 元数据事务。取消/关闭等待不可中止的解析及文件线程完成，再清理和释放额度。同会话上传和消息提交互斥，数据库再次校验活动运行及文件额度。
-
-文件系统与 PostgreSQL 不组成分布式事务。数据库保存未确认时按 file_id 核实，并取得与原写入相同的会话行锁，等待原事务结束：已引用保留；明确无记录只清理本次发布目录；核实失败也保留并仅记录文件 ID。进程崩溃可能留下待核对孤立文件，不建立自动扫描清理平台。恢复和备份必须同时包含数据库与文件目录，只有数据库备份无法恢复正文。文件外置减少数据库体积，不会减少原件和正文占用的总磁盘空间。
-
-## 事务与运行边界
-
-- 提交事务原子保存 queued 运行、用户消息、有序文件引用及序号；先比较幂等内容，再检查忙碌和容量。
-- 终态事务原子保存助手消息、子结果、续接和状态；已提交终态不被取消覆盖，提交成功后才发送 SSE done。
-- 模型、解析和 SSE 不持有长事务。普通池默认 1–5，另有专用连接持 advisory lock，单库只允许一个应用进程；锁丢失拒绝新写入并要求重启。
-- 启动将遗留 queued/running 收为 CONVERSATION_INTERRUPTED，不重做模型。提交 ACK 丢失后的重复请求若无本地任务，收为中断失败并返回原 run_id。
-- 每会话最多 100 消息、8 文件，正文合计 100000 字符，消息及子结果合计 1000000 字符；提交时为容量失败的终态提示预留 10 字符。模型输入预算仍为 24000 序列化字符，历史子结果片段最多 4000 字符。
-- HTTP 前缀为 /api/v1/sessions，字段 session_id/message_id/run_id/file_id，文件引用 file_ids；旧 conversations 路由没有别名。列表游标版本3，绑定user_id与agent_id，消息按 sequence 前后分页，last_sequence 不能代表客户端已收位置。
-
-## 显式永久删除
-
-`DELETE /api/v1/sessions/{session_id}` 由应用服务取得同会话操作锁，拒绝上传、活动运行及本地执行收尾中的目标。仓储通过会话行锁在单个事务依次删除 message_files/agent_calls、messages、files、runs、chat_sessions；不更改 agents 或外键。提交响应丢失时通过新的 read-committed 锁定查询等待原事务结束，确认无会话后才清理附件。
-
-`.deletions` 凭据在数据库删除前以标准库原子替换落盘，包含version=2/user_id/agent_id/session_id。提交后清理对应会话目录，再移除凭据，全部完成才返回204。部分清理失败保留凭据并返回专用503；未知提交保留文件和凭据。启动只恢复凭据所指目标：数据库无会话则完成清理，仍有会话则保留材料并移除凭据。备份须同时包含数据库、附件与凭据；该机制不清理已有备份、Langfuse、模型供应商记录或用户下载副本。
-
-## 私有会话边界
-
-登录身份来自服务端Cookie会话，chat_sessions.user_id为不可变拥有者。子对象经会话继承归属；管理员不能绕过拥有者判断，文件物理路径不变。不提供共享、成员ACL、长期记忆或图断点恢复。模块职责见[项目架构目录](ai-coding/project-structure.md)，依赖约束见[架构规则](ai-coding/architecture-rules.md)。
+会话与附件操作分别见 [postgres_store.py](../backend/app/infrastructure/conversation/postgres_store.py) 和 [local_file_store.py](../backend/app/infrastructure/documents/local_file_store.py)，失败响应见[错误码](errors.md)。
 
 ## 测试与维护
 
-测试显式使用 TEST_DATABASE_URL，仅允许 agent_platform_test；每项测试创建本次随机 history_test_<uuid> schema，执行schema_v3.sql并创建真实测试身份，只清理该 schema。文件测试使用 tmp_path，不读实际用户文件。CI 同样使用 PostgreSQL 18，覆盖真实事务、表约束、重启、所有权丢失、文件提交确认、取消及路径边界；模型和 RAG 使用受控替身，不代表真实模型效果已验收。
+数据库测试显式使用 `TEST_DATABASE_URL`，不回退应用库；每项测试创建随机 `history_test_<uuid>` schema，通过当前初始化流程准备结构与身份，只清理本次 schema。文件测试使用临时目录，不操作实际用户文件。
 
-SQL、仓储、HTTP、前端、CI 和本文须同步更新；涉及结构、数据或文件清理先按 [治理流程](ai-coding/governance.md) 及 [风险规则](ai-coding/risk-management.md) 明确授权范围。
+结构变化时同步更新 SQL、相关实现、测试和本文；检查要求见[质量门禁](ai-coding/quality-gates.md)，数据操作遵守[风险规则](ai-coding/risk-management.md)。
