@@ -36,13 +36,13 @@
 | `CONVERSATION_INPUT_TOO_LARGE` | 413 | 消息请求体超过 65536 字节，缩小请求 |
 | `CONVERSATION_INPUT_TOO_LONG` | 422 | 超出模型上下文预算，缩短输入 |
 | `CONVERSATION_NOT_FOUND` | 404 | 会话不存在或不属于当前用户 |
-| `MATERIAL_NOT_FOUND` | 404 | 附件不存在或不属于指定会话 |
+| `MATERIAL_NOT_FOUND` | 404 | 材料原文不存在、引用非用户消息或不属于指定会话 |
 | `RUN_NOT_FOUND` | 404 | 运行不存在或不属于指定会话 |
 | `MESSAGE_CONFLICT` | 409 | 同一 client_message_id 对应不同内容，不能覆盖旧请求 |
 | `CONVERSATION_BUSY` | 409 / 503 | 409：会话正在操作或收尾；503：全局接纳额度不足，等待后重试 |
 | `CONVERSATION_CAPACITY` | 413 | 会话容量或临时额度不足，减少输入、等待或新建会话 |
 | `FILE_UNAVAILABLE` | 503 | 文件缺失、正文校验失败或路径/凭据无效，不能以空材料继续 |
-| `CONVERSATION_DELETE_INCOMPLETE` | 503 | 数据库已删除，附件清理未完成；清除本地正文，保留原 ID 重试清理 |
+| `CONVERSATION_DELETE_INCOMPLETE` | 503 | 数据库已删除，检查点、附件或凭据清理未完成；清除本地正文，保留原 ID 重试清理 |
 
 ## 文档解析与审核输入
 

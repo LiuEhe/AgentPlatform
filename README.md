@@ -4,7 +4,7 @@
 
 ### 面向智能体应用构建与运行的模块化平台工程
 
-当前提供基于 DOCX 的制度审核工作流，包含 Vue 前端、FastAPI 后端，以及 OpenAI 兼容模型和 RAGFlow 接入。
+提供会话助手与 DOCX 制度审核，包含 Vue 前端、FastAPI 后端，以及 OpenAI 兼容模型和 RAGFlow 接入。
 
 **Python 3.12 / 3.13** · **FastAPI** · **LangChain / LangGraph** · **Vue 3 / TypeScript** · **RAGFlow**
 
@@ -14,52 +14,34 @@
 
 ## 项目现状
 
-AgentPlatform 用分层结构组织智能体应用：前端通过 API 提交任务，后端服务处理文档并调用运行时；具体智能体负责流程编排，外部模型和知识库通过基础设施客户端接入。
+- **制度审核**：上传 DOCX 草稿，选择知识库审核或标准文档对比，生成包含条款定位的 Markdown 报告；标准文档模式无需 RAGFlow。
+- **会话助手**：支持聊天、粘贴正文和可选附件；明确审核意图且参数齐全后调用制度审核，通过 SSE 展示回答与执行状态。
+- **短期记忆与历史**：官方 PostgreSQL checkpointer 保存成功轮次、摘要和待补参；完整历史与报告单独归档，附件保存在本地。支持会话永久删除及清理失败重试。
+- **账号与导出**：支持注册、登录、个人账号和管理员用户管理，会话按用户隔离；提供 Markdown 转 Word 下载。
+- **可观测性**：可选接入 Langfuse，记录调用链、Token 用量、Prompt 版本与合成数据集实验，正文采集默认关闭。
 
-目前已实现的业务是制度审核：上传 DOCX 制度草稿后，选择知识库审核，或再上传一份 DOCX 标准文档直接对比。后端将文档转成 Markdown，按章、节和条拆分，使用模型检查条款冲突、重复和术语问题，最终返回 Markdown 报告。前端采用暖白与陶土色界面，提供宣传首页、智能体目录，以及会话助手和制度审核两个独立工作页面；图标统一使用 Lucide。
-
-标准文档模式不调用 RAGFlow 或 embedding，知识库检索额度不足时仍可使用。草稿超过 30 个条款块时，按原顺序合并相邻条款至 30 组，保留原文和逐条定位。条款任务并发数通过 `INSTITUTION_REVIEW_CONCURRENCY` 配置，默认 3，由同进程的制度审核请求共享；多个工作进程各自计算额度。
-
-当前增加会话助手：可直接聊天、可选上传 DOCX 或粘贴正文；先识别意图，普通聊天、制度知识问答和摘要不调用审核，明确制度审核且参数齐全时才调用已有智能体，并原样展示结果。入口为 `/agents/conversation-assistant`。
-
-助手左侧从后端分页读取会话记录，上传文件在输入框预览并随所属消息展示。普通对话通过 SSE 实时显示模型输出，调用制度审核时推送真实状态并展示完整结果。切换会话保留草稿与文件选择，离开后关闭订阅，返回时恢复同一任务；历史保存到 PostgreSQL，刷新或重启后可恢复；未发送草稿仍仅在页面内存。制度审核报告保留完整 Markdown，并提供章节导航、复制、独立 Word 下载和明确的停止等待操作。
-
-智能体元数据、会话、消息、文件路径及完整子调用结果保存到 PostgreSQL；上传原件与解析正文存放在 backend/documents 的 agent/session/file 分级目录，不自动过期。服务重启后未完成运行标记中断，不自动重做。活动任务、SSE 临时文本及取消句柄仍在单进程内存，请使用单工作进程；同库第二实例会拒绝启动。已接入公开注册、Cookie登录、本人账号和管理员用户管理；会话按用户隔离。未引入长期记忆、长对话摘要或 Redis，独立审核表单不新增历史功能。
-
-后端另提供独立 Markdown 转 Word 下载接口，使用 Python 依赖自带的 Pandoc 转换、python-docx 统一样式，不依赖模型配置或系统级安装 Pandoc。原制度审核报告页可点击“下载 Word”保存当前报告；会话页本次仅展示调用结果，不增加下载、报告版本或新业务流程，MCP 尚未接入。
+当前采用单工作进程，同库第二实例会拒绝启动；重启后未完成任务标记中断，不自动重做。长期记忆、Redis 和 MCP 尚未接入。
 
 ## 架构概览
 
-会话助手支持单条永久删除：确认后清理会话消息、运行结果及上传文件；忙碌目标须先等待或停止并等其结束。附件清理失败可以重试，服务启动会核对待清理凭据。删除最后一条后保持空态，首次进入空历史也需点击“新建对话”才创建；不提供撤销、回收站或批量清理，不涉及用户下载副本、外部追踪和备份。
+前端通过 API 调用应用服务，服务将智能体任务交给统一运行时；各 Agent 使用 LangGraph 编排业务流程。
 
 ```mermaid
 flowchart LR
-    Browser[浏览器 / Vue 工作台] --> APIClient[前端 API 客户端]
-    APIClient --> API[FastAPI 路由]
-    API --> ReviewService[ReviewService]
-    API --> ExportService[DocumentExportService]
-    ExportService --> Pandoc[包内 Pandoc / DOCX 样式]
-    API --> AgentGraphService[AgentGraphService]
-    AgentGraphService --> GraphMetadata[制度审核流程图元数据]
-    ReviewService --> Docx[DOCX 转 Markdown 节点]
-    ReviewService --> Runtime[AgentRuntime]
-    Runtime --> Registry[AgentRegistry]
-    Registry --> Adapter[制度审核适配器]
-    Adapter --> Graph[LangGraph 审核流程]
-    Graph --> Split[条款拆分]
-    Graph --> ClauseReview[受控并发条款审查]
-    Graph --> Terminology[全文术语检查]
-    ClauseReview --> RAG[知识库模式 / RAGFlow]
-    ClauseReview --> Standard[标准模式 / 上传标准全文]
-    ClauseReview --> Model[OpenAI 兼容模型]
-    Terminology --> Model
-    Graph --> Report[Markdown 报告]
-    Report --> API
+    Browser[Vue 工作台] --> API[FastAPI / 应用服务]
+    API --> Runtime[AgentRuntime / 注册表]
+    Runtime --> Chat[会话助手图]
+    Runtime --> Review[制度审核图]
+    Chat --> Model[聊天模型]
+    Chat --> Runtime
+    Review --> Model
+    Review --> RAG[RAGFlow / 标准文档]
+    API --> Storage[PostgreSQL / 本地附件]
+    Chat --> Memory[PostgreSQL checkpointer]
+    API --> Export[Pandoc / Word 导出]
 ```
 
-应用启动时创建模型，并在知识库配置齐备时注入 RAGFlow 客户端。聊天模型配置完整即可初始化运行时。父图先并行完成条款拆分和全文术语检查，再进入官方 LangGraph Send 条款子图，按审核模式分发单组任务、校验完整性并有序汇总，最后生成简述、冲突检测、术语检测和修改建议四部分报告。通过条款不进入后续问题汇总上下文。
-
-条款子图沿用父图构建时的共享 semaphore，保留同进程跨请求额度；旧批量调度代码已移除。静态流程页面仍展示父图概览，不展开动态 chunk。当前没有图层重试、持久检查点或跨进程恢复；失败重新提交会重做，取消只保证本进程任务清理和额度释放。
+制度审核使用官方 Send 分发条款任务，并共享同进程并发额度；独立审核图不配置持久恢复。实现细节见 [后端 README](backend/README.md)。
 
 ## 技术栈
 
@@ -67,6 +49,7 @@ flowchart LR
 | --- | --- |
 | 后端 | Python 3.12 / 3.13、FastAPI、Pydantic、HTTPX |
 | 智能体流程 | LangChain、LangGraph |
+| 持久化 | PostgreSQL、官方 PostgreSQL checkpointer、本地附件 |
 | 模型与知识库 | OpenAI 兼容聊天模型、RAGFlow |
 | 前端 | Vue 3、TypeScript、Vue Router、Vite |
 | Markdown 报告 | marked、DOMPurify |
@@ -74,24 +57,27 @@ flowchart LR
 
 ## 项目架构与目录
 
-项目架构目录由 [AGENTS.md](AGENTS.md) 提供入口，完整内容集中维护在[项目架构目录](docs/ai-coding/project-structure.md)；模块职责和依赖边界见[架构规则](docs/ai-coding/architecture-rules.md)。账号、统一数据库基类与现有Agent的边界均已记录。
+目录见[项目架构目录](docs/ai-coding/project-structure.md)，职责边界见[架构规则](docs/ai-coding/architecture-rules.md)，协作约定见 [AGENTS.md](AGENTS.md)。
 
 ## 本地启动
 
-需要 PostgreSQL 18（先按后端说明执行 SQL 初始化）、Python 3.12 或 3.13、[uv](https://docs.astral.sh/uv/)，以及 Node.js 20.19+ 或 22.12+ 和 pnpm。先按各自 README 配置后端模型与 RAGFlow 参数，然后在两个终端分别启动：
+需要 PostgreSQL 18、Python 3.12 / 3.13、[uv](https://docs.astral.sh/uv/)、Node.js 20.19+ 或 22.12+ 和 pnpm。在两个终端分别启动：
 
 ```powershell
 # 终端一：后端
 cd backend
-Copy-Item .env.example .env
+Copy-Item .env.example .env  # 仅首次准备；已有配置时跳过
 uv sync
-uv run uvicorn app.main:create_app --factory --reload
+# 填写 .env，并按数据库说明完成初始化后启动
+uv run uvicorn app.main:create_app --factory --reload --loop app.infrastructure.conversation.checkpoints:event_loop_factory
 ```
+
+**Windows 特殊情况**：`--loop ...:event_loop_factory` 使用项目提供的事件循环工厂，在 Windows 下选择 Selector，因为 PostgreSQL 检查点使用的 Psycopg 异步驱动不支持默认的 Proactor。其他系统也可使用上面的命令；`--reload` 用于开发时自动重启。
 
 ```powershell
 # 终端二：前端
 cd frontend
-Copy-Item .env.example .env.local
+Copy-Item .env.example .env.local  # 仅首次准备；已有配置时跳过
 pnpm install
 pnpm dev
 ```
@@ -100,23 +86,21 @@ pnpm dev
 
 ## 账号与部署
 
-任何人可在 `/register` 创建普通账号，再到 `/login` 主动登录。本人资料与改密位于 `/account`，内置管理员在 `/admin/users` 创建、启停或重置普通用户；管理员不能读取其他人的会话。退出、换号或登录失效会清除页面草稿、附件选择与位置，后端历史继续保留。
+注册与登录入口为 `/register`、`/login`，本人资料与改密位于 `/account`，管理员用户管理位于 `/admin/users`。管理员不能读取其他人的会话。
 
-应用启动不读取或限制数据库结构版本号，账号与会话功能仍依赖已部署的用户表和会话归属字段。新环境使用隐藏密码输入的管理命令初始化，已有库不重复初始化；应用启动不会自动认领或建表。仓库仅保留当前结构初始化与管理员密码恢复，旧版升级入口已移除。操作和恢复步骤见[数据库说明](docs/database.md)。
+当前数据库结构为 v4，应用启动不自动建表或迁移。新环境须显式初始化，已有旧结构测试库需另建空环境；不提供旧版迁移或兼容入口。初始化、管理员密码恢复及备份步骤见[数据库说明](docs/database.md)。
 
 ## 当前入口
 
-- `GET /api/v1/agents`：数据库智能体展示目录；会话接口统一使用 `/api/v1/sessions` 与 session_id/message_id/run_id/file_id。
+- `GET /api/v1/agents`：智能体目录；会话相关接口位于 `/api/v1/sessions`。
 - `GET /health/live`：进程存活检查。
 - `GET /health/ready`：检查模型配置与审核运行时，并分别返回两种模式的配置可用性；不探测外部连通或账户额度。
-- `POST /api/v1/reviews`：以 `multipart/form-data` 上传草稿 `file`，以及审核方式 `review_mode`；`standard_document` 模式还需 `standard_file`，返回 `text/markdown` 审核报告。缺省方式为 `knowledge_base`，兼容原有单文件请求。
-- `GET /api/v1/agents/institution_review/graph`：返回制度审核流程的静态节点和连线结构，不依赖运行时就绪状态，也不包含节点执行进度。
-- `POST /api/v1/documents/export/docx`：JSON 提交 `markdown` 和可选 `title`，返回 DOCX 附件。支持文本、列表、代码及表格，首版拒绝图片与原始 HTML；限制、样式及示例见 [后端 README](backend/README.md#markdown-导出-word)。
+- `POST /api/v1/reviews`：上传 DOCX 草稿及可选标准文档，返回 Markdown 审核报告。
+- `GET /api/v1/agents/institution_review/graph`：制度审核静态流程结构。
+- `POST /api/v1/documents/export/docx`：提交 Markdown，下载 DOCX。详细参数见 [后端 README](backend/README.md)。
 - 前端 `/`、`/agents`、`/agents/conversation-assistant`、`/agents/institution-review`、`/agents/institution-review/flow`：宣传首页、智能体目录、会话助手、制度审核工作台和静态流程结构图。
 
 ## 质量检查
-
-后端已接入可选的本地 Langfuse：记录 Agent/图/模型/检索调用链、供应商 Token，关联 Prompt 版本并执行合成数据集实验。费用需要匹配模型价格，正文采集默认关闭。配置、初始化、实验及回退方法见 [后端 Langfuse 说明](backend/README.md#langfuse-追踪prompt-与实验)。凭据只保存在后端本地环境配置。
 
 后端在 `backend/` 执行：
 
@@ -124,6 +108,8 @@ pnpm dev
 uv run ruff check app scripts tests
 uv run pytest
 ```
+
+数据库测试须显式设置指向专用测试库的 `TEST_DATABASE_URL`，准备步骤见[数据库测试与维护](docs/database.md#测试与维护)。
 
 前端在 `frontend/` 执行：
 

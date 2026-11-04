@@ -1,6 +1,6 @@
 # 项目架构目录
 
-- 更新日期：2026-11-02。
+- 更新日期：2026-11-04。
 - 本文件集中维护项目目录；[AGENTS.md](../../AGENTS.md)是阅读入口，新增或迁移模块前先阅读本文和[架构规则](architecture-rules.md)。
 - 当前目录按源码核对，包含账号、会话归属和统一数据库基类；仓库仅保留当前结构初始化与管理员密码恢复。
 
@@ -20,7 +20,7 @@ Agent/
 │   │   ├── infrastructure/
 │   │   │   ├── database.py               # 统一查询/事务基类、共享连接池与运行权
 │   │   │   ├── identity/                # 账号仓储、Argon2计算与有界尝试计数
-│   │   │   ├── conversation/             # PostgreSQL历史和进程内活动资源
+│   │   │   ├── conversation/             # PostgreSQL归档、官方检查点资源与活动资源
 │   │   │   ├── documents/                # 本地原件、解析正文与删除凭据
 │   │   │   ├── llm/                      # 模型客户端创建与适配
 │   │   │   ├── ragflow/                  # 外部知识库适配
@@ -31,13 +31,13 @@ Agent/
 │   │   │   └── institution_review/       # 制度审核Agent及Send条款子图
 │   │   ├── nodes/
 │   │   │   ├── document/                 # 公共DOCX解析与格式转换
-│   │   │   └── llm/                      # 公共上下文预算、裁剪与Prompt契约
+│   │   │   └── llm/                      # 公共上下文预算、分片摘要与Prompt契约
 │   │   ├── runtime/                      # 通用注册、调用上下文与执行
 │   │   ├── schemas/                      # 应用中立记录与HTTP契约
 │   │   └── main.py                       # 资源与应用服务装配、生命周期
 │   ├── database/
 │   │   ├── create_databases.sql          # 显式新建应用库与专用测试库
-│   │   └── schema_v3.sql                 # 当前结构，由维护脚本在事务内执行
+│   │   └── schema_v4.sql                 # 当前结构，由维护脚本在事务内执行
 │   ├── scripts/                          # 显式运维和实验入口
 │   ├── tests/                            # pytest、受控模型与真实隔离数据库回归
 │   ├── documents/                        # 运行时附件根，不纳入Git
@@ -70,7 +70,7 @@ Agent/
 └── .github/workflows/ci.yml               # 后端检查/测试与前端构建
 ```
 
-当前使用 PostgreSQL，账号、登录与会话拥有者保存在数据库，附件正文存本地文件；活动执行/SSE临时文本仍在单进程内存。应用启动不读取或限制数据库结构版本号。同库只允许一个应用实例。没有引入ORM、Redis、消息队列或图持久检查点。新环境显式初始化当前结构，已有库不重复初始化；旧版升级入口已移除。
+当前使用 PostgreSQL，账号、登录与会话拥有者保存在数据库，附件正文存本地文件；活动执行/SSE临时文本仍在单进程内存。应用启动不读取或限制数据库结构版本号。同库只允许一个应用实例。会话图已采用官方 PostgreSQL checkpointer 保存短期记忆；没有引入ORM、Redis、消息队列或长期 Store。新环境显式初始化当前结构，已有库不重复初始化；旧版升级入口已移除。
 
 ## 账号与数据库模块职责
 
@@ -87,15 +87,26 @@ Agent/
 | `backend/app/services/user_service.py` | 本人资料、管理员创建/启停/重置普通用户；用户API使用 |
 | `backend/app/api/auth.py`、`users.py` | HTTP、Cookie、来源/CSRF/上下文与身份依赖；业务路由复用，业务规则不进入Agent |
 | `backend/app/schemas/identity.py` | 中立账号/身份记录与公开请求响应；内部密码哈希不进入公开View |
-| `backend/database/schema_v3.sql` | 新环境当前结构初始化资产；不在应用启动时执行 |
-| `backend/scripts/manage_users.py` | 当前结构初始化与admin密码恢复；全部Python数据库读写通过BaseDatabase，密码隐藏输入 |
+| `backend/database/schema_v4.sql` | 新环境当前结构初始化资产；不在应用启动时执行 |
+| `backend/scripts/manage_users.py` | 当前 v4 结构初始化与 admin 密码恢复；业务 SQL 经 BaseDatabase，官方 setup 经 CheckpointResources，密码隐藏输入 |
 | `frontend/src/features/auth/` | 注册/登录/资料/改密/用户管理表单，以及认证代次、状态清理和跨标签页重新核验 |
 | `frontend/src/api/auth.ts`、`users.ts` | 注册、认证、个人与管理员HTTP契约，复用统一客户端 |
 | `frontend/src/views/`、`router/`、`App.vue` | 新增页面组合与守卫，身份变化时整体销毁私有KeepAlive缓存 |
 
 注册只创建启用的普通用户，不签发登录、不替换原Cookie；管理员创建/重置的临时密码仍要求改密。chat_sessions.user_id是不可变拥有者，子对象经会话继承；admin角色不绕过他人正文权限。原会话和稳定附件路径保留。
 
-两个仓储必须共享同一Database资源，跨仓储授权和写入使用同一BaseDatabase事务对象；不能按子类各建池，不能在事务中另取连接，也不能保留driver旁路。用户/会话策略留在仓储与服务，Agent/runtime不依赖账号或存储。详细约束见[架构规则](architecture-rules.md)，持久化见[数据库说明](../database.md)，对外失败语义见[错误码](../errors.md)。
+两个仓储必须共享同一Database资源，跨仓储授权和写入使用同一BaseDatabase事务对象；不能按子类各建池，不能在业务事务中另取连接，也不能保留业务 driver 旁路。官方 checkpointer 作为受限例外由独立 Psycopg 池承载，只用于官方检查点 API，不开放业务 SQL。用户/会话策略留在仓储与服务，Agent/runtime不依赖账号或存储。详细约束见[架构规则](architecture-rules.md)，持久化见[数据库说明](../database.md)，对外失败语义见[错误码](../errors.md)。
+
+## 短期记忆模块职责
+
+| 位置 | 职责、输入输出、依赖及实际调用方 |
+| --- | --- |
+| `backend/app/infrastructure/conversation/checkpoints.py` | 输入配置/schema，输出官方 saver；依赖 Psycopg pool 与 AsyncPostgresSaver，应用装配、维护初始化和删除用例调用；统一开关池、就绪检查、官方 thread 删除及 Windows loop factory |
+| `backend/app/schemas/conversation_turn.py` | 当前用户消息、确认位置、稳定助手标识、材料目录/reader 与完成位置的中立契约；服务和 Agent 适配器使用；共享 thread_id helper 校验 Agent ID 和 UUID |
+| `backend/app/nodes/llm/memory.py` | 输入 Agent 已选择的完整旧轮次、策略、旧摘要和 Prompt，输出摘要、覆盖序号及待移除 ID；复用公共预算和模型调用，不决定审核业务；会话图摘要节点调用 |
+| `backend/app/agents/conversation_assistant/nodes/memory_summarize.py` | 根据当前助手策略选择旧轮次，调用公共摘要，原子返回摘要和 RemoveMessage 更新；材料 ID 与待补参留在自身状态 |
+| `backend/app/agents/conversation_assistant/graph/state.py` | 官方 add_messages 通道、摘要、覆盖序号、材料目录、待补参和完成 run_id；模型上下文、完整报告及本轮临时对象使用 UntrackedValue，不进入持久通道 |
+| `backend/app/services/conversation_service.py` | 读取当前轮与按需原文，透传授权 reader；在归档事务提交完成位置；删除和恢复按可信 Agent/session 身份操作官方 saver；不含具体助手记忆策略 |
 
 ## 维护方式
 
