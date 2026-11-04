@@ -11,6 +11,7 @@ from pathlib import Path
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import httpx
+from langgraph.checkpoint.memory import InMemorySaver
 
 from app.agents import build_agent_registry
 from app.agents.conversation_assistant.evaluation import evaluate_case as evaluate_conversation
@@ -20,6 +21,11 @@ from app.infrastructure.langfuse.client import create_observer, shutdown_observe
 from app.infrastructure.langfuse.prompts import LangfusePromptResolver
 from app.infrastructure.ragflow.client import RagFlowClient
 from app.runtime.agent_runtime import AgentRegistry, AgentRuntime
+from app.schemas.conversation_turn import (
+    ConversationTurnResources,
+    MaterialReference,
+    TurnMaterial,
+)
 from app.services.llm_service import create_llm_service
 from scripts.sync_langfuse_prompts import prompt_specs
 
@@ -27,7 +33,21 @@ from scripts.sync_langfuse_prompts import prompt_specs
 async def execute_case(case, *, runtime, resolver, versions, projections=None):
     try:
         async with resolver.session(versions=versions, strict=True):
-            execution = await runtime.invoke(case["agent_id"], case["input"])
+            if case["agent_id"] == "conversation_assistant":
+                materials = {
+                    (item["ref"]["kind"], item["ref"]["id"]): TurnMaterial.model_validate(item)
+                    for item in case.get("materials", [])
+                }
+
+                async def read_materials(refs: tuple[MaterialReference, ...]):
+                    return tuple(materials[(ref.kind, ref.id)] for ref in refs)
+
+                execution = await runtime.invoke(
+                    case["agent_id"], case["input"],
+                    resources=ConversationTurnResources(read_materials),
+                )
+            else:
+                execution = await runtime.invoke(case["agent_id"], case["input"])
         actual = (projections or {}).pop(execution.invocation_id, {})
         evaluator = (
             evaluate_conversation
@@ -199,6 +219,7 @@ async def run_remote(args, cases, versions):
             build_agent_registry(
                 model,
                 rag,
+                checkpointer=InMemorySaver(),
                 registry=registry,
                 invoke_agent=runtime.invoke,
                 institution_review_concurrency=settings.institution_review_concurrency,

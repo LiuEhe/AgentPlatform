@@ -43,7 +43,7 @@ CREATE TABLE chat_sessions (
     agent_id text NOT NULL REFERENCES agents (agent_id),
     title text NOT NULL,
     last_sequence bigint NOT NULL DEFAULT 0 CHECK (last_sequence >= 0),
-    continuation jsonb,
+    memory_checkpoint_id text CHECK (memory_checkpoint_id IS NULL OR memory_checkpoint_id <> ''),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -117,6 +117,15 @@ CREATE TABLE agent_calls (
 
 CREATE TABLE chat_schema_version (
     singleton boolean PRIMARY KEY CHECK (singleton),
-    version integer NOT NULL CHECK (version = 3)
+    version integer NOT NULL CHECK (version = 4)
 );
-INSERT INTO chat_schema_version VALUES (true, 3);
+INSERT INTO chat_schema_version VALUES (true, 4);
+
+-- 开发/测试默认账号：admin / 123456，密码以 Argon2id 哈希保存。
+INSERT INTO users (
+    user_id, username, display_name, password_hash, role, status, must_change_password
+) VALUES (
+    gen_random_uuid(), 'admin', '管理员',
+    '$argon2id$v=19$m=65536,t=3,p=4$fj7MWjmNrASgE4ND/P6zHQ$1JMks/gT+sruRk1gEP+8f9/wv5gscrYS4YlPy+CVT5Q',
+    'admin', 'active', false
+);

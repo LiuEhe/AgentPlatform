@@ -1,26 +1,30 @@
-"""单次调用的业务状态，不保存会话锁、任务或存储对象。"""
+"""会话图持久工作记忆与单轮临时输出。"""
 
-from typing import TypedDict
+from typing import Annotated, TypedDict
 
-from app.agents.conversation_assistant.nodes.material_prepare import Materials
+from langchain_core.messages import AnyMessage
+from langgraph.channels import UntrackedValue
+from langgraph.graph.message import add_messages
+
 from app.agents.conversation_assistant.schemas import (
+    AssembledReply,
     ConversationInput,
     IntentDecision,
     PreparedAction,
 )
-from app.schemas.conversation_turn import (
-    ChildAgentResult,
-    ConversationTurnInput,
-    ConversationTurnResult,
-)
+from app.schemas.conversation_turn import ChildAgentResult
 
 
 class ConversationGraphState(TypedDict, total=False):
-    turn: ConversationTurnInput
-    materials: Materials
-    model_context: ConversationInput
-    decision: IntentDecision
-    prepared_action: PreparedAction
-    reply: str
-    child_call: ChildAgentResult
-    result: ConversationTurnResult
+    messages: Annotated[list[AnyMessage], add_messages]
+    summary: str
+    summary_through_sequence: int
+    pending_review: dict[str, object] | None
+    material_catalog: list[dict[str, object]]
+    last_completed_run_id: str | None
+    model_context: Annotated[ConversationInput, UntrackedValue(ConversationInput)]
+    decision: Annotated[IntentDecision, UntrackedValue(IntentDecision)]
+    prepared_action: Annotated[PreparedAction, UntrackedValue(PreparedAction)]
+    reply: Annotated[str, UntrackedValue(str)]
+    child_call: Annotated[ChildAgentResult, UntrackedValue(ChildAgentResult)]
+    result: Annotated[AssembledReply, UntrackedValue(AssembledReply)]

@@ -1,24 +1,26 @@
 """会话助手私有的意图、材料引用及动作契约。"""
 
+from dataclasses import dataclass
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.agents.institution_review.schemas import ReviewMode
-from app.schemas.conversation_turn import ContinuationState
-
-
-class MaterialRef(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    kind: Literal["document", "user_message"]
-    id: str = Field(min_length=1, max_length=128)
+from app.schemas.conversation_turn import (
+    ChildAgentResult,
+    ConversationTurnInput,
+    InternalModel,
+    MaterialReader,
+    MaterialReference,
+    NonblankOutput,
+)
 
 
 class ReviewArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    draft: MaterialRef | None = None
+    draft: MaterialReference | None = None
     review_mode: ReviewMode | None = None
-    standard: MaterialRef | None = None
+    standard: MaterialReference | None = None
 
 
 class PendingReview(BaseModel):
@@ -33,6 +35,8 @@ class ConversationInput(BaseModel):
     capabilities: list[dict[str, object]] = Field(default_factory=list)
     pending_review: PendingReview | None = None
     coverage_note: str = ""
+    summary: str = ""
+    material_catalog: list[dict[str, object]] = Field(default_factory=list)
 
 
 class IntentDecision(BaseModel):
@@ -68,7 +72,7 @@ class IntentDecision(BaseModel):
 
 class PreparedReview(BaseModel):
     agent_id: Literal["institution_review"] = "institution_review"
-    payload: dict[str, object]
+    arguments: ReviewArguments
 
 
 class PreparedAction(BaseModel):
@@ -76,4 +80,15 @@ class PreparedAction(BaseModel):
     decision: IntentDecision
     review: PreparedReview | None = None
     question: str | None = None
-    continuation: ContinuationState | None = None
+    pending_review: PendingReview | None = None
+
+
+class AssembledReply(InternalModel):
+    reply: NonblankOutput
+    child_call: ChildAgentResult | None = None
+
+
+@dataclass(frozen=True)
+class ConversationExecutionContext:
+    turn: ConversationTurnInput
+    read_materials: MaterialReader

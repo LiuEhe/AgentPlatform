@@ -6,10 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.schemas.conversation_turn import (
-    ChildAgentResult,
-    ContinuationState,
-)
+from app.schemas.conversation_turn import ChildAgentResult
 
 SessionRunStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 
@@ -56,15 +53,6 @@ class SessionRun:
     created_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
-
-
-@dataclass(frozen=True)
-class SessionSnapshot:
-    session_id: str
-    latest_message_id: str
-    messages: tuple[SessionMessage, ...]
-    files: dict[str, SessionFile]
-    continuation: ContinuationState | None = None
 
 
 @dataclass(frozen=True)
@@ -116,4 +104,7 @@ class RunCompletion:
     child_call: ChildAgentResult | None = None
     error_code: str | None = None
     error_message: str | None = None
-    continuation: ContinuationState | None = None
+    assistant_message_id: str | None = None
+    assistant_sequence: int | None = None
+    expected_checkpoint_id: str | None = None
+    memory_checkpoint_id: str | None = None

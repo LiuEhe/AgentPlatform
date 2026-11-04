@@ -1,45 +1,41 @@
-"""确定性业务门控与待补审核参数续接。"""
+"""确定性业务门控；待补参数只保存在图状态。"""
 
-from collections.abc import Mapping
+from collections.abc import Sequence
 
 from app.agents.conversation_assistant.config import ConversationAgentConfig
 from app.agents.conversation_assistant.schemas import (
     IntentDecision,
+    PendingReview,
     PreparedAction,
     ReviewArguments,
 )
 from app.agents.conversation_assistant.tools.institution_review import prepare_review
-from app.schemas.conversation_turn import ContinuationState, ConversationTurnInput
+from app.schemas.conversation_turn import MaterialDescriptor
 
 
 def prepare_action(
-    turn: ConversationTurnInput,
-    decision: IntentDecision,
-    materials: Mapping[tuple[str, str], tuple[str, str]],
-    config: ConversationAgentConfig,
+    decision: IntentDecision, pending_review: PendingReview | None,
+    catalog: Sequence[MaterialDescriptor], config: ConversationAgentConfig, *,
+    question_message_id: str,
 ) -> PreparedAction:
     decision = IntentDecision.model_validate(decision.model_dump())
     if decision.intent != "institution_review":
         return PreparedAction(route=decision.action, decision=decision, question=decision.question)
     args = decision.review_args or ReviewArguments()
-    if turn.continuation and decision.pending_action in {"keep", "update"}:
-        previous = ReviewArguments.model_validate(turn.continuation.payload["arguments"])
+    if pending_review and decision.pending_action in {"keep", "update"}:
         args = ReviewArguments.model_validate(
-            previous.model_dump() | args.model_dump(exclude_none=True)
+            pending_review.arguments.model_dump() | args.model_dump(exclude_none=True)
         )
         if args.review_mode == "knowledge_base":
-            # 模式切换后废弃待补任务中的旧标准，不能继续传给知识库审核。
             args = args.model_copy(update={"standard": None})
     decision = decision.model_copy(update={"review_args": args})
-    prepared = prepare_review(args, materials, config)
+    prepared = prepare_review(args, catalog, config)
     if decision.action == "call_agent" and not isinstance(prepared, str):
         return PreparedAction(route="call_agent", decision=decision, review=prepared)
-    continuation = ContinuationState(payload={"arguments": args.model_dump(mode="json")})
+    pending = PendingReview(arguments=args, question_message_id=question_message_id)
     if args.review_mode == "knowledge_base" and not config.knowledge_base_configured:
-        continuation = None
+        pending = None
     return PreparedAction(
-        route="clarify",
-        decision=decision,
-        continuation=continuation,
+        route="clarify", decision=decision, pending_review=pending,
         question=prepared if isinstance(prepared, str) else decision.question,
     )

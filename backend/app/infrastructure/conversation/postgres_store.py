@@ -17,11 +17,16 @@ from app.schemas.conversation_session import (
     SessionFile,
     SessionMessage,
     SessionRun,
-    SessionSnapshot,
     SessionSubmission,
     SubmissionResult,
 )
-from app.schemas.conversation_turn import ChildAgentResult, ContinuationState
+from app.schemas.conversation_turn import (
+    ChildAgentResult,
+    ConversationTurnInput,
+    MaterialDescriptor,
+    MaterialReference,
+    TurnMessage,
+)
 from app.schemas.identity import AuthContext
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
@@ -133,6 +138,7 @@ class PostgresConversationStore(BaseDatabase):
         after=None,
         limit=None,
         descending=False,
+        message_id=None,
     ):
         rows = await conn.fetch(
             """SELECT m.*, c.call_id, c.agent_id, c.agent_name, c.invocation_id,
@@ -144,6 +150,7 @@ class PostgresConversationStore(BaseDatabase):
                WHERE m.session_id=$1 AND ($2::uuid IS NULL OR m.run_id=$2)
                  AND ($3::bigint IS NULL OR m.sequence < $3)
                  AND ($4::bigint IS NULL OR m.sequence > $4)
+                 AND ($6::uuid IS NULL OR m.message_id=$6)
                ORDER BY """
             + ("m.sequence DESC" if descending else "m.sequence")
             + " LIMIT $5",
@@ -152,6 +159,7 @@ class PostgresConversationStore(BaseDatabase):
             before,
             after,
             limit,
+            identifier(message_id) if message_id else None,
         )
         return [
             SessionMessage(
@@ -315,20 +323,45 @@ class PostgresConversationStore(BaseDatabase):
                 page[-1].sequence if more and after_sequence is not None else None,
             )
 
-    async def snapshot(self, actor, session_id, latest_message_id=None):
+    async def load_turn(self, actor, session_id, run_id, *, assistant_message_id):
         async with self.transaction() as conn:
             row = await self._session(conn, actor, session_id)
-            messages = await self._messages(conn, session_id)
+            await self._run(conn, session_id, run_id)
+            messages = await self._messages(conn, session_id, run_id=run_id)
+            message = next(m for m in messages if m.role == "user")
             documents = await self._files(conn, session_id)
-            continuation = json.loads(row["continuation"]) if row["continuation"] else None
-            return SessionSnapshot(
-                session_id,
-                latest_message_id
-                or next(m.message_id for m in reversed(messages) if m.role == "user"),
-                tuple(messages),
-                {d.file_id: d for d in documents},
-                ContinuationState.model_validate(continuation["data"]) if continuation else None,
+            return ConversationTurnInput(
+                agent_id=row["agent_id"], session_id=session_id, run_id=run_id,
+                checkpoint_id=row["memory_checkpoint_id"],
+                message=TurnMessage(id=message.message_id, sequence=message.sequence,
+                                    role="user", content=message.content,
+                                    document_ids=message.file_ids),
+                assistant_message_id=assistant_message_id,
+                assistant_sequence=row["last_sequence"] + 1,
+                material_catalog=tuple(MaterialDescriptor(
+                    ref=MaterialReference(kind="document", id=d.file_id),
+                    title=d.original_name, chars=d.content_chars,
+                ) for d in documents),
             )
+
+    async def read_material_sources(self, actor, session_id, refs):
+        async with self.transaction() as conn:
+            await self._session(conn, actor, session_id)
+            result = []
+            for ref in refs:
+                if ref.kind == "document":
+                    row = await conn.fetchrow(
+                        "SELECT * FROM files WHERE session_id=$1 AND file_id=$2",
+                        identifier(session_id), identifier(ref.id),
+                    )
+                    source = self._file(row) if row else None
+                else:
+                    rows = await self._messages(conn, session_id, message_id=ref.id)
+                    source = next((m for m in rows if m.role == "user"), None)
+                if source is None:
+                    raise AppError("MATERIAL_NOT_FOUND", "会话材料不存在", 404)
+                result.append(source)
+            return tuple(result)
 
     async def add_file(self, actor, session_id, file: SessionFile):
         validate_text(file.original_name, file.source_path, file.content_path)
@@ -490,11 +523,7 @@ class PostgresConversationStore(BaseDatabase):
                 return run
             if completion.status not in TERMINAL:
                 raise ValueError("Completion must be terminal")
-            text, call, continuation = (
-                completion.text,
-                completion.child_call,
-                completion.continuation,
-            )
+            text, call = completion.text, completion.child_call
             status, code, error = completion.status, completion.error_code, completion.error_message
             validate_text(text, call.output if call else "")
             if (
@@ -504,8 +533,17 @@ class PostgresConversationStore(BaseDatabase):
                 > 1000000
             ):
                 status, code, error = "failed", "CONVERSATION_CAPACITY", CAPACITY_MESSAGE
-                text, call, continuation = error, None, None
-            message_id = uuid4()
+                text, call = error, None
+            if status == "succeeded":
+                if (not completion.memory_checkpoint_id or not completion.assistant_message_id
+                    or completion.assistant_sequence != row["last_sequence"] + 1
+                    or completion.expected_checkpoint_id != row["memory_checkpoint_id"]):
+                    raise AppError("STORAGE_UNAVAILABLE", "记忆提交位置不一致", 503)
+                message_id = identifier(completion.assistant_message_id)
+            else:
+                if completion.status != "succeeded" and completion.memory_checkpoint_id:
+                    raise ValueError("Only successful runs can publish memory")
+                message_id = uuid4()
             await conn.execute(
                 (
                     "INSERT INTO "
@@ -529,18 +567,17 @@ class PostgresConversationStore(BaseDatabase):
                     call.output_type,
                     call.output,
                 )
-            payload = None
-            if continuation:
-                data = continuation.model_copy(update={"question_message_id": str(message_id)})
-                payload = json.dumps({"version": 1, "data": data.model_dump(mode="json")})
             await conn.execute(
                 (
                     "UPDATE chat_sessions SET "
-                    "last_sequence=last_sequence+1,continuation=$2::jsonb,updated_at=clock_timestamp()"
-                    " WHERE session_id=$1"
+                    "last_sequence=last_sequence+1,memory_checkpoint_id=$2,"
+                    "updated_at=clock_timestamp() WHERE session_id=$1 "
+                    "AND memory_checkpoint_id IS NOT DISTINCT FROM $3"
                 ),
                 identifier(session_id),
-                payload,
+                completion.memory_checkpoint_id if status == "succeeded"
+                else row["memory_checkpoint_id"],
+                row["memory_checkpoint_id"],
             )
             await conn.execute(
                 (

@@ -31,6 +31,7 @@ class AgentContext:
     invocation_id: str
     agent_id: str
     on_event: AgentEventSink | None = None
+    resources: object | None = None
 
 
 @dataclass(frozen=True)
@@ -91,10 +92,13 @@ class AgentRuntime:
         payload: Mapping[str, object],
         *,
         on_event: AgentEventSink | None = None,
+        resources: object | None = None,
     ) -> AgentExecution:
         """按智能体标识执行一次调用。"""
         invocation_id = str(uuid4())
-        context = AgentContext(invocation_id=invocation_id, agent_id=agent_id, on_event=on_event)
+        context = AgentContext(
+            invocation_id=invocation_id, agent_id=agent_id, on_event=on_event, resources=resources,
+        )
         try:
             agent = self._registry.resolve(agent_id)
             with self._observer.scope(

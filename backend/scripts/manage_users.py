@@ -1,14 +1,14 @@
-"""显式离线账号初始化与管理员密码恢复；不在应用启动中执行。"""
+"""显式离线数据库初始化、检查点建表与管理员密码恢复。"""
 
 import argparse
 import asyncio
 from getpass import getpass
 from pathlib import Path
 from urllib.parse import urlsplit
-from uuid import uuid4
 
 from app.core.config import Settings
 from app.core.errors import AppError
+from app.infrastructure.conversation.checkpoints import CheckpointResources, event_loop_factory
 from app.infrastructure.database import BaseDatabase
 from app.infrastructure.identity.passwords import PasswordHasher
 
@@ -31,22 +31,38 @@ async def _password(password):
         await hasher.aclose()
 
 
-async def initialize_v3(settings, password, *, schema="public"):
+async def initialize_v4(settings, password, *, schema="public"):
     _scope(settings, schema)
-    encoded, user_id = await _password(password), uuid4()
+    encoded = await _password(password)
     async with BaseDatabase.maintenance(settings, schema=schema) as db:
-        if await db.fetchval("SELECT to_regclass('chat_schema_version')") is not None:
-            raise ValueError(
-                "Database already initialized; use password reset"
-            )
+        existing = await db.fetch("SELECT tablename FROM pg_tables WHERE schemaname=$1", schema)
+        official = {"checkpoints", "checkpoint_blobs", "checkpoint_writes", "checkpoint_migrations"}
+        if any(row[0] not in official for row in existing):
+            raise ValueError("Database is not an empty new environment; use password reset")
+        checkpoints = CheckpointResources(settings, schema=schema)
+        try:
+            await checkpoints.open()
+            await checkpoints.setup()
+        finally:
+            await checkpoints.aclose()
         async with db.transaction(write=True) as tx:
-            await tx.execute((SQL_ROOT / "schema_v3.sql").read_text(encoding="utf-8"))
-            await tx.execute(
-                "INSERT INTO users(user_id,username,display_name,password_hash,role,status,"
-                "must_change_password) VALUES($1,'admin','管理员',$2,'admin','active',false)",
-                user_id, encoded,
+            await tx.execute((SQL_ROOT / "schema_v4.sql").read_text(encoding="utf-8"))
+            user_id = await tx.fetchval(
+                "UPDATE users SET password_hash=$1 WHERE username='admin' RETURNING user_id",
+                encoded,
             )
     return user_id
+
+
+async def setup_checkpoints(settings, *, schema="public"):
+    _scope(settings, schema)
+    async with BaseDatabase.maintenance(settings, schema=schema):
+        checkpoints = CheckpointResources(settings, schema=schema)
+        try:
+            await checkpoints.open()
+            await checkpoints.setup()
+        finally:
+            await checkpoints.aclose()
 
 
 async def reset_admin_password(settings, password, *, schema="public"):
@@ -67,19 +83,22 @@ async def reset_admin_password(settings, password, *, schema="public"):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("initialize", "reset-admin"))
+    parser.add_argument("operation", choices=("initialize", "setup-checkpoints", "reset-admin"))
     args = parser.parse_args()
     settings = Settings()
-    password = getpass("管理员新密码：")
-    if password != getpass("确认新密码："):
-        raise SystemExit("两次密码不一致")
-    operation = (
-        initialize_v3(settings, password)
-        if args.operation == "initialize"
-        else reset_admin_password(settings, password)
-    )
+    if args.operation == "setup-checkpoints":
+        operation = setup_checkpoints(settings)
+    else:
+        password = getpass("管理员新密码：")
+        if password != getpass("确认新密码："):
+            raise SystemExit("两次密码不一致")
+        operation = (
+            initialize_v4(settings, password)
+            if args.operation == "initialize"
+            else reset_admin_password(settings, password)
+        )
     try:
-        asyncio.run(operation)
+        asyncio.run(operation, loop_factory=event_loop_factory)
     except (AppError, ValueError, OSError, KeyError) as exc:
         raise SystemExit(
             f"维护失败（{type(exc).__name__}），请检查目标数据库与初始化状态"

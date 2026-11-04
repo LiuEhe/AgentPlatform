@@ -1,7 +1,7 @@
 """制度审核的能力说明、原文参数映射与受限运行时调用。"""
 
 import re
-from collections.abc import Mapping
+from collections.abc import Sequence
 from pathlib import Path
 from uuid import uuid4
 
@@ -11,7 +11,7 @@ from app.agents.conversation_assistant.schemas import PreparedReview, ReviewArgu
 from app.agents.institution_review.schemas import ReviewMode
 from app.core.errors import AppError
 from app.runtime.agent_runtime import AgentInvoker
-from app.schemas.conversation_turn import ChildAgentResult
+from app.schemas.conversation_turn import ChildAgentResult, MaterialDescriptor, MaterialReader
 
 
 def review_capabilities(config: ConversationAgentConfig) -> list[dict[str, object]]:
@@ -31,7 +31,7 @@ def review_capabilities(config: ConversationAgentConfig) -> list[dict[str, objec
 
 def prepare_review(
     args: ReviewArguments,
-    materials: Mapping[tuple[str, str], tuple[str, str]],
+    catalog: Sequence[MaterialDescriptor],
     config: ConversationAgentConfig,
 ) -> PreparedReview | str:
     if args.draft is None:
@@ -47,9 +47,26 @@ def prepare_review(
             return "知识库审核尚未配置，可提供标准材料后使用对比审核。"
     if args.standard == args.draft:
         return "草稿与标准引用相同，请确认两份材料的角色。"
-    filename, markdown = resolve_material(materials, args.draft)
-    if not markdown.strip() or len(markdown) > config.max_review_chars:
-        raise AppError("INVALID_REVIEW_INPUT", "草稿正文为空或超过审核限制", 422)
+    for ref in (args.draft, args.standard):
+        if ref:
+            descriptor = resolve_material(catalog, ref)
+            if descriptor.chars == 0 or descriptor.chars > config.max_review_chars:
+                raise AppError("INVALID_REVIEW_INPUT", "正文为空或超过审核限制", 422)
+    return PreparedReview(arguments=args)
+
+
+async def invoke_review(
+    invoke_agent: AgentInvoker, prepared: PreparedReview, read_materials: MaterialReader,
+) -> ChildAgentResult:
+    prepared = PreparedReview.model_validate(prepared.model_dump())
+    args = prepared.arguments
+    refs = tuple(ref for ref in (args.draft, args.standard) if ref)
+    materials = await read_materials(refs)
+    if tuple(m.ref for m in materials) != refs:
+        raise AppError("MATERIAL_NOT_FOUND", "会话材料不存在", 404)
+    filename, markdown = materials[0].title, materials[0].content
+    if not markdown.strip():
+        raise AppError("INVALID_REVIEW_INPUT", "草稿正文为空", 422)
     match = re.search(r"^\s{0,3}#\s+(.+?)\s*$", markdown, re.MULTILINE)
     original_title = match.group(1).strip() if match else ""
     if re.match(r"^第[一二三四五六七八九十百千万零〇两0-9]+(?:章|节|条)", original_title):
@@ -63,16 +80,11 @@ def prepare_review(
     if original_title and original_title != title:
         payload["document_title"] = original_title
     if args.standard:
-        name, text = resolve_material(materials, args.standard)
-        if not text.strip() or len(text) > config.max_review_chars:
+        name, text = materials[1].title, materials[1].content
+        if not text.strip():
             raise AppError("INVALID_REVIEW_INPUT", "标准正文为空或超过审核限制", 422)
         payload.update(standard_name=name, standard_content=text)
-    return PreparedReview(payload=payload)
-
-
-async def invoke_review(invoke_agent: AgentInvoker, prepared: PreparedReview) -> ChildAgentResult:
-    prepared = PreparedReview.model_validate(prepared.model_dump())
-    execution = await invoke_agent(prepared.agent_id, prepared.payload)
+    execution = await invoke_agent(prepared.agent_id, payload)
     if not isinstance(execution.output, str) or not execution.output.strip():
         raise AppError("AGENT_OUTPUT_INVALID", "子智能体未返回可展示结果", 502)
     if len(execution.output) > 200000:

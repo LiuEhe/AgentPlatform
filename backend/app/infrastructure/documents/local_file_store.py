@@ -145,7 +145,8 @@ class LocalFileStore:
 
     def _session_dir(self, agent_id: str, session_id: str) -> Path:
         try:
-            if agent_id != "conversation_assistant" or str(UUID(session_id)) != session_id:
+            if (not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", agent_id)
+                    or str(UUID(session_id)) != session_id):
                 raise ValueError
         except (ValueError, TypeError, AttributeError):
             raise self._error() from None

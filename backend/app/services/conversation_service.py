@@ -11,6 +11,7 @@ from app.core.config import Settings
 from app.core.errors import AppError
 from app.core.observability import NullObserver, bind_observation_attributes, observation_attributes
 from app.infrastructure.conversation.active_runs import ActiveRunRegistry
+from app.infrastructure.conversation.checkpoints import CheckpointResources
 from app.infrastructure.conversation.postgres_store import PostgresConversationStore
 from app.infrastructure.documents.local_file_store import LocalFileStore
 from app.nodes.document.parse import DocumentParseError, parse_docx
@@ -36,10 +37,11 @@ from app.schemas.conversation_session import (
     SessionSubmission,
 )
 from app.schemas.conversation_turn import (
-    ConversationTurnInput,
+    ConversationTurnResources,
     ConversationTurnResult,
     TurnDocument,
-    TurnMessage,
+    TurnMaterial,
+    conversation_thread_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,12 +54,14 @@ class ConversationService:
         runtime: AgentRuntime | None,
         *,
         store: PostgresConversationStore,
+        checkpoints: CheckpointResources,
         active_runs: ActiveRunRegistry,
         observer=None,
         files: LocalFileStore | None = None,
     ):
         self.settings, self.runtime = settings, runtime
         self._store, self._active = store, active_runs
+        self._checkpoints = checkpoints
         self._observer = observer or NullObserver()
         self._files = files or LocalFileStore(settings.documents_root)
         self._slots = asyncio.Semaphore(settings.conversation_concurrency)
@@ -194,11 +198,16 @@ class ConversationService:
                 if intent.user_id != str(actor.user.user_id):
                     raise AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404)
             try:
+                await self._checkpoints.delete_thread(
+                    conversation_thread_id(intent.agent_id, session_id),
+                )
                 await asyncio.to_thread(self._files.discard_session, intent.agent_id, session_id)
                 await asyncio.to_thread(self._files.discard_deletion_intent, session_id)
             except (AppError, OSError):
                 raise AppError(
-                    "CONVERSATION_DELETE_INCOMPLETE", "对话已删除，附件清理未完成，请重试清理", 503
+                    "CONVERSATION_DELETE_INCOMPLETE",
+                    "对话已删除，记忆或附件清理未完成，请重试清理",
+                    503,
                 ) from None
 
     async def recover_deletions(self) -> None:
@@ -215,6 +224,9 @@ class ConversationService:
                         UUID(intent.user_id), intent.session_id
                     )
                     if target is None:
+                        await self._checkpoints.delete_thread(
+                            conversation_thread_id(intent.agent_id, intent.session_id),
+                        )
                         await asyncio.to_thread(
                             self._files.discard_session, intent.agent_id, intent.session_id
                         )
@@ -527,16 +539,21 @@ class ConversationService:
             )
         return await self.read_run(actor, session_id, run_id)
 
-    async def _load_materials(self, files):
-        documents = []
-        for file in files:
-            markdown = await asyncio.to_thread(self._files.read_markdown, file.content_path)
-            if len(markdown) != file.content_chars:
-                raise AppError("FILE_UNAVAILABLE", "材料文件不可用，请重新上传", 503)
-            documents.append(
-                TurnDocument(id=file.file_id, filename=file.original_name, markdown=markdown)
-            )
-        return tuple(documents)
+    def _material_reader(self, owner, session_id):
+        async def read(refs):
+            sources = await self._store.read_material_sources(owner, session_id, refs)
+            result = []
+            for ref, source in zip(refs, sources, strict=True):
+                if isinstance(source, SessionFile):
+                    text = await asyncio.to_thread(self._files.read_markdown, source.content_path)
+                    if len(text) != source.content_chars:
+                        raise AppError("FILE_UNAVAILABLE", "材料文件不可用，请重新上传", 503)
+                    title = source.original_name
+                else:
+                    text, title = source.content, "粘贴正文"
+                result.append(TurnMaterial(ref=ref, title=title, content=text))
+            return tuple(result)
+        return read
 
     async def _execute(self, owner, session_id, run):
         acquired = False
@@ -551,27 +568,28 @@ class ConversationService:
                         started = await self._store.start(owner, session_id, run.run_id)
                         self._active.update_run(started)
                         self._active.set_stage(run.run_id, "正在处理你的请求")
-                        snapshot = await self._store.snapshot(owner, session_id)
-                        turn = ConversationTurnInput(
-                            latest_message_id=snapshot.latest_message_id,
-                            messages=tuple(
-                                TurnMessage(
-                                    id=m.message_id, role=m.role, content=m.content,
-                                    document_ids=m.file_ids, agent_call=m.agent_call,
-                                )
-                                for m in snapshot.messages
-                            ),
-                            documents=await self._load_materials(snapshot.files.values()),
-                            continuation=snapshot.continuation,
+                        turn = await self._store.load_turn(
+                            owner, session_id, run.run_id, assistant_message_id=str(uuid4()),
                         )
+                        if turn.checkpoint_id is None:
+                            async with self._active.operation(session_id):
+                                await self._checkpoints.delete_thread(
+                                    conversation_thread_id(turn.agent_id, session_id),
+                                )
                         execution = await self.runtime.invoke(
-                            "conversation_assistant",
+                            turn.agent_id,
                             turn.model_dump(),
                             on_event=lambda event: self._receive_event(run.run_id, event),
+                            resources=ConversationTurnResources(
+                                self._material_reader(owner, session_id)
+                            ),
                         )
                         if asyncio.current_task().cancelling():
                             raise asyncio.CancelledError
                         result = ConversationTurnResult.model_validate(execution.output)
+                        if (result.assistant_message_id != turn.assistant_message_id
+                                or result.assistant_sequence != turn.assistant_sequence):
+                            raise AppError("AGENT_OUTPUT_INVALID", "会话结果标识不一致", 502)
                         final = await self._finish(
                             owner, session_id,
                             run.run_id,
@@ -579,7 +597,10 @@ class ConversationService:
                                 "succeeded",
                                 result.reply,
                                 child_call=result.child_call,
-                                continuation=result.continuation,
+                                assistant_message_id=result.assistant_message_id,
+                                assistant_sequence=result.assistant_sequence,
+                                expected_checkpoint_id=turn.checkpoint_id,
+                                memory_checkpoint_id=result.checkpoint_id,
                             ),
                         )
                         if final:

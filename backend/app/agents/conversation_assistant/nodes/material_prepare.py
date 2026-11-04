@@ -1,34 +1,34 @@
-"""组织完整原文索引；仅允许当前会话文档和用户消息成为材料。"""
+"""组织材料目录；正文通过本轮已授权能力按引用读取。"""
 
-from collections.abc import Mapping
+from collections.abc import Sequence
 
-from app.agents.conversation_assistant.schemas import MaterialRef
 from app.core.errors import AppError
-from app.schemas.conversation_turn import ConversationTurnInput
+from app.schemas.conversation_turn import (
+    ConversationTurnInput,
+    MaterialDescriptor,
+    MaterialReference,
+)
 
-Materials = dict[tuple[str, str], tuple[str, str]]
 
-
-def prepare_materials(turn: ConversationTurnInput) -> Materials:
-    materials = {
-        ("document", document.id): (document.filename, document.markdown)
-        for document in turn.documents
+def prepare_materials(
+    catalog: Sequence[dict], turn: ConversationTurnInput
+) -> list[MaterialDescriptor]:
+    items = {
+        (d["ref"]["kind"], d["ref"]["id"]): MaterialDescriptor.model_validate(d) for d in catalog
     }
-    materials.update(
-        {
-            ("user_message", message.id): ("粘贴正文", message.content)
-            for message in turn.messages
-            if message.role == "user"
-        }
+    for descriptor in turn.material_catalog:
+        items[(descriptor.ref.kind, descriptor.ref.id)] = descriptor
+    ref = MaterialReference(kind="user_message", id=turn.message.id)
+    items[(ref.kind, ref.id)] = MaterialDescriptor(
+        ref=ref, title="粘贴正文", chars=len(turn.message.content), sequence=turn.message.sequence,
     )
-    return materials
+    return list(items.values())
 
 
 def resolve_material(
-    materials: Mapping[tuple[str, str], tuple[str, str]],
-    ref: MaterialRef,
-) -> tuple[str, str]:
-    material = materials.get((ref.kind, ref.id))
-    if material is None:
-        raise AppError("MATERIAL_NOT_FOUND", "会话材料不存在，请重新选择", 404)
-    return material
+    catalog: Sequence[MaterialDescriptor], ref: MaterialReference
+) -> MaterialDescriptor:
+    for descriptor in catalog:
+        if descriptor.ref == ref:
+            return descriptor
+    raise AppError("MATERIAL_NOT_FOUND", "会话材料不存在，请重新选择", 404)

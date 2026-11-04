@@ -22,6 +22,7 @@ from app.core.errors import install_error_handlers
 from app.core.logging import configure_logging, install_request_logging
 from app.core.observability import NullObserver
 from app.infrastructure.conversation.active_runs import ActiveRunRegistry
+from app.infrastructure.conversation.checkpoints import CheckpointResources
 from app.infrastructure.conversation.postgres_store import PostgresConversationStore
 from app.infrastructure.database import Database
 from app.infrastructure.documents.local_file_store import LocalFileStore
@@ -86,10 +87,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.auth_service = auth
         app.state.user_service = UserService(identities, passwords)
         conversation_store = PostgresConversationStore(database)
+        checkpoints = CheckpointResources(database.settings, schema=database.schema)
         conversation_service = ConversationService(
             app_settings,
             None,
             store=conversation_store,
+            checkpoints=checkpoints,
             active_runs=ActiveRunRegistry(max_bytes=app_settings.conversation_transient_max_bytes),
             observer=observer,
             files=LocalFileStore(app_settings.documents_root),
@@ -101,6 +104,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             await database.initialize()
             await auth.initialize()
+            await checkpoints.open()
+            await checkpoints.assert_ready()
             # Preflight credentials before recovery writes; v1/corrupt files require maintenance.
             await asyncio.to_thread(conversation_service._files.list_deletion_intents)
             await conversation_store.recover_interrupted()
@@ -127,6 +132,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         institution_review_concurrency=app_settings.institution_review_concurrency,
                         registry=registry,
                         invoke_agent=runtime.invoke,
+                        checkpointer=checkpoints.saver,
                         conversation_max_review_chars=app_settings.max_review_chars,
                         conversation_knowledge_base_configured=not app_settings.ragflow_issues(),
                         observer=observer,
@@ -145,6 +151,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await conversation_service.aclose()
             finally:
                 await passwords.aclose()
+                await checkpoints.aclose()
                 await database.aclose()
             await shutdown_observer(observer)
             app.state.conversation_service = None

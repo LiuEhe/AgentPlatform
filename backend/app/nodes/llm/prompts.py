@@ -1,6 +1,7 @@
 """公共 Prompt 解析会话、编译与模型调用；不包含 Agent 策略。"""
 
 import asyncio
+import json
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -8,6 +9,8 @@ from dataclasses import dataclass
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda
+
+from app.nodes.llm.context import ContextBudgetError
 
 _active = ContextVar("prompt_resolver", default=None)
 _session = ContextVar("prompt_session", default=None)
@@ -72,7 +75,9 @@ class PromptResolver:
         return ResolvedPrompt(template=template, name=spec.name)
 
 
-async def invoke_prompt(model, spec: PromptSpec, variables, *, output_schema=None):
+async def invoke_prompt(
+    model, spec: PromptSpec, variables, *, output_schema=None, max_input_chars: int | None = None,
+):
     resolver = _active.get() or PromptResolver()
     resolved = await resolver.resolve(spec)
 
@@ -80,6 +85,10 @@ async def invoke_prompt(model, spec: PromptSpec, variables, *, output_schema=Non
         messages = [
             ("human" if m.type == "human" else m.type, m.content) for m in prompt.to_messages()
         ]
+        if max_input_chars is not None and len(json.dumps(
+            messages, ensure_ascii=False, separators=(",", ":"),
+        )) > max_input_chars:
+            raise ContextBudgetError("模型请求超过序列化预算")
         target = model.with_structured_output(output_schema) if output_schema else model
         return await target.ainvoke(messages)
 

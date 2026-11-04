@@ -13,6 +13,7 @@ from app.runtime.agent_runtime import AgentInvoker, AgentRegistry, AgentRuntime
 
 if TYPE_CHECKING:
     from langchain_core.language_models.chat_models import BaseChatModel
+    from langgraph.checkpoint.base import BaseCheckpointSaver
 
     from app.infrastructure.ragflow.client import RagFlowClient
 
@@ -30,6 +31,7 @@ class AgentBuildContext:
     observer: object | None = None
     graph_config_factory: object | None = None
     evaluation_sink: object | None = None
+    checkpointer: BaseCheckpointSaver | None = None
 
 
 def build_agent_registry(
@@ -44,6 +46,7 @@ def build_agent_registry(
     observer=None,
     graph_config_factory=None,
     evaluation_sink=None,
+    checkpointer=None,
 ) -> AgentRegistry:
     """发现子包并调用各自的注册入口。"""
     registry = registry if registry is not None else AgentRegistry()
@@ -54,6 +57,7 @@ def build_agent_registry(
         observer=observer,
         graph_config_factory=graph_config_factory,
         evaluation_sink=evaluation_sink,
+        checkpointer=checkpointer,
         rag_client=rag_client,
         institution_review_concurrency=institution_review_concurrency,
         invoke_agent=invoke_agent,
