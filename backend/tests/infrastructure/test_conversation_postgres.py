@@ -4,10 +4,76 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
+from conftest import finish_success
 
 from app.infrastructure.database import Database
 
-SCHEMA = Path(__file__).parents[2] / "database/schema_v3.sql"
+SCHEMA = Path(__file__).parents[2] / "database/schema_v4.sql"
+
+
+def test_incremental_turn_and_atomic_checkpoint_publication(actor, postgres_target):
+    from app.core.config import Settings
+    from app.core.errors import AppError
+    from app.infrastructure.conversation.postgres_store import PostgresConversationStore
+    from app.schemas.conversation_session import RunCompletion, SessionSubmission
+    from app.schemas.conversation_turn import MaterialReference
+
+    async def scenario():
+        dsn, schema = postgres_target
+        store = PostgresConversationStore(
+            Database(Settings(_env_file=None, database_url=dsn), schema=schema)
+        )
+        await store.database.initialize()
+        try:
+            sid = (await store.create(actor)).summary.session_id
+            submitted = await store.submit(actor, sid, SessionSubmission("first", "完整原文"))
+            turn = await store.load_turn(
+                actor, sid, submitted.run.run_id, assistant_message_id=str(uuid4())
+            )
+            assert turn.checkpoint_id is None and turn.message.content == "完整原文"
+            complete = RunCompletion(
+                "succeeded",
+                "答复",
+                assistant_message_id=turn.assistant_message_id,
+                assistant_sequence=turn.assistant_sequence,
+                expected_checkpoint_id=None,
+                memory_checkpoint_id="accepted-one",
+            )
+            saved = await store.finish(actor, sid, turn.run_id, complete)
+            assert saved.message.message_id == turn.assistant_message_id
+            second = await store.submit(actor, sid, SessionSubmission("second", "下一轮"))
+            current = await store.load_turn(
+                actor, sid, second.run.run_id, assistant_message_id=str(uuid4())
+            )
+            assert current.message.content == "下一轮" and current.checkpoint_id == "accepted-one"
+            with pytest.raises(AppError) as error:
+                await store.finish(actor, sid, current.run_id, RunCompletion(
+                    "succeeded", "错误父位置", assistant_message_id=current.assistant_message_id,
+                    assistant_sequence=current.assistant_sequence,
+                    expected_checkpoint_id=None, memory_checkpoint_id="bad-child",
+                ))
+            assert error.value.code == "STORAGE_UNAVAILABLE"
+            assert (await store.read_run(actor, sid, current.run_id)).status == "queued"
+            sources = await store.read_material_sources(actor, sid, (
+                MaterialReference(kind="user_message", id=turn.message.id),
+            ))
+            assert sources[0].content == "完整原文"
+            with pytest.raises(AppError):
+                await store.read_material_sources(actor, sid, (
+                    MaterialReference(kind="user_message", id=turn.assistant_message_id),
+                ))
+            await store.finish(actor, sid, current.run_id, RunCompletion("cancelled", "停止"))
+            async with store.transaction() as db:
+                assert (
+                    await db.fetchval(
+                        "SELECT memory_checkpoint_id FROM chat_sessions WHERE session_id=$1",
+                        UUID(sid),
+                    )
+                    == "accepted-one"
+                )
+        finally:
+            await store.database.aclose()
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("rollback", [False, True])
@@ -38,9 +104,7 @@ def test_delete_session_removes_all_owned_rows(actor, postgres_target, rollback)
                 id=str(uuid4()), agent_id="institution_review", agent_name="review",
                 invocation_id="inv", output_type="markdown", output="report",
             )
-            await store.finish(actor,
-                sid, run.run.run_id, RunCompletion("succeeded", "answer", child_call=call)
-            )
+            await finish_success(store, actor, sid, run.run.run_id, "answer", child_call=call)
             for status in ("failed", "cancelled"):
                 item = await store.submit(actor, sid, SessionSubmission(status, status))
                 await store.finish(actor, sid, item.run.run_id, RunCompletion(status, status))
@@ -64,7 +128,7 @@ def test_delete_session_removes_all_owned_rows(actor, postgres_target, rollback)
                 for table in ("runs", "messages", "files", "message_files", "agent_calls"):
                     assert await conn.fetchval(f"SELECT count(*) FROM {table}") == 0
                 assert await conn.fetchval("SELECT count(*) FROM agents") == 2
-                assert await conn.fetchval("SELECT version FROM chat_schema_version") == 3
+                assert await conn.fetchval("SELECT version FROM chat_schema_version") == 4
             assert (await store.read(actor, other)).summary.session_id == other
         finally:
             await store.database.aclose()
@@ -148,11 +212,11 @@ def test_schema_version_and_reinitialization(postgres_target):
         async with BaseDatabase.maintenance(
             Settings(_env_file=None, database_url=dsn), schema=schema
         ) as conn:
-            assert await conn.fetchval("SELECT version FROM chat_schema_version") == 3
+            assert await conn.fetchval("SELECT version FROM chat_schema_version") == 4
             with pytest.raises(AppError):
                 async with conn.transaction(write=True) as tx:
                     await tx.execute(SCHEMA.read_text(encoding="utf-8"))
-            assert await conn.fetchval("SELECT version FROM chat_schema_version") == 3
+            assert await conn.fetchval("SELECT version FROM chat_schema_version") == 4
     asyncio.run(scenario())
 
 
@@ -176,9 +240,7 @@ def test_concurrent_duplicate_submission_is_persistent(actor, postgres_target):
             )
             assert first.run.run_id == second.run.run_id
             assert sum(r.created for r in (first, second)) == 1
-            await store.finish(actor,
-                page.summary.session_id, first.run.run_id, RunCompletion("succeeded", "收到")
-            )
+            await finish_success(store, actor, page.summary.session_id, first.run.run_id, "收到")
             await store.finish(actor,
                 page.summary.session_id, first.run.run_id, RunCompletion("cancelled", "已停止")
             )
@@ -244,7 +306,7 @@ def test_message_capacity_reserves_terminal_failure_text(actor, postgres_target)
     from app.core.config import Settings
     from app.core.errors import AppError
     from app.infrastructure.conversation.postgres_store import PostgresConversationStore
-    from app.schemas.conversation_session import RunCompletion, SessionSubmission
+    from app.schemas.conversation_session import SessionSubmission
 
     async def scenario():
         dsn, schema = postgres_target
@@ -261,9 +323,7 @@ def test_message_capacity_reserves_terminal_failure_text(actor, postgres_target)
             run = await store.submit(actor,
                 session_id, SessionSubmission("reserved", "字" * 999990)
             )
-            result = await store.finish(actor,
-                session_id, run.run.run_id, RunCompletion("succeeded", "超" * 20)
-            )
+            result = await finish_success(store, actor, session_id, run.run.run_id, "超" * 20)
             assert result.error_code == "CONVERSATION_CAPACITY"
             page = await store.read(actor, session_id)
             assert sum(len(message.content) for message in page.messages) == 1000000

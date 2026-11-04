@@ -79,7 +79,7 @@ def test_evaluator_failure_cannot_be_reported_as_success():
     assert result["items"][0]["error_type"] == "EXPERIMENT_EVALUATION_INCOMPLETE"
 
 
-def test_all_tasks_use_one_loop_and_one_graph_build(monkeypatch, fake_model_factory):
+def test_all_tasks_use_one_loop_and_one_graph_build(monkeypatch, fake_model_factory, turn_factory):
     from contextvars import ContextVar
 
     from app.core.config import Settings
@@ -100,10 +100,7 @@ def test_all_tasks_use_one_loop_and_one_graph_build(monkeypatch, fake_model_fact
         {
             "id": str(i),
             "agent_id": "conversation_assistant",
-            "input": {
-                "latest_message_id": "m",
-                "messages": [{"id": "m", "role": "user", "content": "hi"}],
-            },
+            "input": turn_factory(content="hi").model_dump(mode="json"),
             "expected": {"child_called": False},
         }
         for i in range(2)

@@ -9,17 +9,20 @@ from app.infrastructure.langfuse.client import create_observer
 
 
 @pytest.mark.parametrize("mixed", [False, True])
-def test_nested_compiled_graph_has_one_generation_per_model_request(mixed):
+def test_nested_compiled_graph_has_one_generation_per_model_request(mixed, turn_factory):
     import asyncio
     import json
 
+    from conftest import turn_resources
     from langchain_core.language_models.chat_models import BaseChatModel
     from langchain_core.messages import AIMessage
     from langchain_core.outputs import ChatGeneration, ChatResult
     from langchain_core.runnables import RunnableLambda
+    from langgraph.checkpoint.memory import InMemorySaver
 
     from app.agents import build_agent_registry
     from app.runtime.agent_runtime import AgentRegistry, AgentRuntime
+    from app.schemas.conversation_turn import TurnDocument
 
     class Model(BaseChatModel):
         calls: int = 0
@@ -39,8 +42,8 @@ def test_nested_compiled_graph_has_one_generation_per_model_request(mixed):
                         "target_agent_id": "institution_review",
                         "review_args": {
                             "review_mode": "standard_document",
-                            "draft": {"kind": "user_message", "id": "d"},
-                            "standard": {"kind": "user_message", "id": "s"},
+                            "draft": {"kind": "document", "id": "d"},
+                            "standard": {"kind": "document", "id": "s"},
                         },
                     }
                 )
@@ -87,19 +90,23 @@ def test_nested_compiled_graph_has_one_generation_per_model_request(mixed):
             invoke_agent=runtime.invoke,
             graph_config_factory=observer.graph_config,
             observer=observer,
+            checkpointer=InMemorySaver(),
         )
         draft = "第一条 草稿。\n第二条 草稿。" if mixed else "第一条 草稿。"
-        turn = {
-            "latest_message_id": "last",
-            "messages": [
-                {"id": "d", "role": "user", "content": draft},
-                {"id": "s", "role": "user", "content": "第一条 标准。"},
-                {"id": "last", "role": "user", "content": "按标准审核草稿"},
-            ],
-        }
+        documents = (
+            TurnDocument(id="d", filename="草稿", markdown=draft),
+            TurnDocument(id="s", filename="标准", markdown="第一条 标准。"),
+        )
+
+        async def conversation():
+            turn = turn_factory(content="按标准审核草稿", documents=documents)
+            return await runtime.invoke(
+                "conversation_assistant", turn.model_dump(mode="json"),
+                resources=turn_resources(turn, documents),
+            )
         if mixed:
             await asyncio.gather(
-                runtime.invoke("conversation_assistant", turn),
+                conversation(),
                 runtime.invoke(
                     "institution_review",
                     {
@@ -113,7 +120,7 @@ def test_nested_compiled_graph_has_one_generation_per_model_request(mixed):
             )
         else:
             await asyncio.gather(
-                *(runtime.invoke("conversation_assistant", turn) for _ in range(2))
+                *(conversation() for _ in range(2))
             )
 
     asyncio.run(run())

@@ -1,6 +1,8 @@
 import asyncio
 
 import pytest
+from conftest import turn_resources
+from langgraph.checkpoint.memory import InMemorySaver
 
 from app.agents.conversation_assistant.adapter import ConversationAssistantAgent
 from app.agents.conversation_assistant.config import ConversationAgentConfig
@@ -18,6 +20,7 @@ def agent(model):
             model,
             child,
             config=ConversationAgentConfig(False, 50000),
+            checkpointer=InMemorySaver(),
         )
     )
 
@@ -30,7 +33,9 @@ def test_chat_without_documents_uses_plain_reply(fake_model_factory, turn_factor
     result = asyncio.run(
         agent(model).invoke(
             turn_factory().model_dump(),
-            AgentContext("invoke1", "conversation_assistant"),
+            AgentContext(
+                "invoke1", "conversation_assistant", resources=turn_resources(turn_factory())
+            ),
         )
     )
     assert result.reply == "你好" and result.child_call is None
@@ -50,10 +55,12 @@ def test_review_decision_does_not_generate_fake_output(fake_model_factory, turn_
     result = asyncio.run(
         agent(model).invoke(
             turn_factory().model_dump(),
-            AgentContext("invoke1", "conversation_assistant"),
+            AgentContext(
+                "invoke1", "conversation_assistant", resources=turn_resources(turn_factory())
+            ),
         )
     )
-    assert result.child_call is None and result.continuation is not None
+    assert result.child_call is None and result.checkpoint_id
     assert "草稿" in result.reply and len(model.calls) == 1
 
 
@@ -102,7 +109,12 @@ def test_real_model_chunks_arrive_before_completion_without_intent_tokens(turn_f
         task = asyncio.create_task(
             agent(model).invoke(
                 turn_factory().model_dump(),
-                AgentContext("stream", "conversation_assistant", on_event=emit),
+                AgentContext(
+                    "stream",
+                    "conversation_assistant",
+                    on_event=emit,
+                    resources=turn_resources(turn_factory()),
+                ),
             )
         )
         try:
@@ -154,6 +166,7 @@ def test_review_pushes_real_stage_and_returns_only_complete_child_output(
                 fake_model_factory(intent),
                 child,
                 config=ConversationAgentConfig(True, 50000),
+            checkpointer=InMemorySaver(),
             )
         )
         turn = turn_factory(
@@ -168,7 +181,19 @@ def test_review_pushes_real_stage_and_returns_only_complete_child_output(
         task = asyncio.create_task(
             adapter.invoke(
                 turn.model_dump(),
-                AgentContext("review", "conversation_assistant", on_event=events.append),
+                AgentContext(
+                    "review",
+                    "conversation_assistant",
+                    on_event=events.append,
+                    resources=turn_resources(
+                        turn,
+                        (
+                            TurnDocument(
+                                id="draft", filename="draft.docx", markdown="第一条 采购制度"
+                            ),
+                        ),
+                    ),
+                ),
             )
         )
         try:

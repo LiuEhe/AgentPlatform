@@ -17,7 +17,7 @@ def test_sync_is_read_only_without_apply():
             raise AssertionError("dry run wrote data")
 
     result = sync_prompts(client=Client(), apply=False)
-    assert result == {"created": 0, "missing": 8, "unchanged": 0, "conflict": 0}
+    assert result == {"created": 0, "missing": 9, "unchanged": 0, "conflict": 0}
 
 
 def test_sync_conflict_never_moves_production_label():
@@ -30,7 +30,7 @@ def test_sync_conflict_never_moves_production_label():
         def create_prompt(self, **kw):
             pytest.fail("must not overwrite conflict")
 
-    assert sync_prompts(client=Client(), apply=True)["conflict"] == 8
+    assert sync_prompts(client=Client(), apply=True)["conflict"] == 9
 
 
 def test_sync_same_content_does_not_create_version():
@@ -45,7 +45,7 @@ def test_sync_same_content_does_not_create_version():
         def create_prompt(self, **kwargs):
             pytest.fail("unchanged prompt must not create a version")
 
-    assert sync_prompts(client=Client(), apply=True)["unchanged"] == 8
+    assert sync_prompts(client=Client(), apply=True)["unchanged"] == 9
 
 
 def test_sync_creates_missing_with_public_sdk_signature():
@@ -63,5 +63,5 @@ def test_sync_creates_missing_with_public_sdk_signature():
         def create_prompt(self, *, name, prompt, type, labels):
             created.append((name, prompt, labels))
 
-    assert sync_prompts(client=Client(), apply=True)["created"] == 8
+    assert sync_prompts(client=Client(), apply=True)["created"] == 9
     assert all(labels == [] for _, _, labels in created)

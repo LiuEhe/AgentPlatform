@@ -3,16 +3,20 @@
     "id": "chat",
     "agent_id": "conversation_assistant",
     "input": {
-      "latest_message_id": "m-last",
-      "messages": [
-        {
-          "id": "m-last",
-          "role": "user",
-          "content": "你好，聊聊今天的天气。",
-          "document_ids": []
-        }
-      ],
-      "documents": []
+      "agent_id": "conversation_assistant",
+      "session_id": "00000000-0000-0000-0000-000000000001",
+      "run_id": "experiment-chat",
+      "checkpoint_id": null,
+      "message": {
+        "id": "m-last",
+        "role": "user",
+        "content": "你好，聊聊今天的天气。",
+        "document_ids": [],
+        "sequence": 1
+      },
+      "assistant_message_id": "reply-chat",
+      "assistant_sequence": 2,
+      "material_catalog": []
     },
     "expected": {
       "child_called": false,
@@ -23,16 +27,20 @@
     "id": "qa",
     "agent_id": "conversation_assistant",
     "input": {
-      "latest_message_id": "m-last",
-      "messages": [
-        {
-          "id": "m-last",
-          "role": "user",
-          "content": "制度审核通常关注哪些问题？",
-          "document_ids": []
-        }
-      ],
-      "documents": []
+      "agent_id": "conversation_assistant",
+      "session_id": "00000000-0000-0000-0000-000000000002",
+      "run_id": "experiment-qa",
+      "checkpoint_id": null,
+      "message": {
+        "id": "m-last",
+        "role": "user",
+        "content": "制度审核通常关注哪些问题？",
+        "document_ids": [],
+        "sequence": 1
+      },
+      "assistant_message_id": "reply-qa",
+      "assistant_sequence": 2,
+      "material_catalog": []
     },
     "expected": {
       "child_called": false,
@@ -43,16 +51,20 @@
     "id": "missing",
     "agent_id": "conversation_assistant",
     "input": {
-      "latest_message_id": "m-last",
-      "messages": [
-        {
-          "id": "m-last",
-          "role": "user",
-          "content": "请帮我审核这份制度。",
-          "document_ids": []
-        }
-      ],
-      "documents": []
+      "agent_id": "conversation_assistant",
+      "session_id": "00000000-0000-0000-0000-000000000003",
+      "run_id": "experiment-missing",
+      "checkpoint_id": null,
+      "message": {
+        "id": "m-last",
+        "role": "user",
+        "content": "请帮我审核这份制度。",
+        "document_ids": [],
+        "sequence": 1
+      },
+      "assistant_message_id": "reply-missing",
+      "assistant_sequence": 2,
+      "material_catalog": []
     },
     "expected": {
       "child_called": false,
@@ -63,16 +75,20 @@
     "id": "ambiguous",
     "agent_id": "conversation_assistant",
     "input": {
-      "latest_message_id": "m-last",
-      "messages": [
-        {
-          "id": "m-last",
-          "role": "user",
-          "content": "帮我处理一下。",
-          "document_ids": []
-        }
-      ],
-      "documents": []
+      "agent_id": "conversation_assistant",
+      "session_id": "00000000-0000-0000-0000-000000000004",
+      "run_id": "experiment-ambiguous",
+      "checkpoint_id": null,
+      "message": {
+        "id": "m-last",
+        "role": "user",
+        "content": "帮我处理一下。",
+        "document_ids": [],
+        "sequence": 1
+      },
+      "assistant_message_id": "reply-ambiguous",
+      "assistant_sequence": 2,
+      "material_catalog": []
     },
     "expected": {
       "child_called": false,
@@ -83,16 +99,20 @@
     "id": "change-topic",
     "agent_id": "conversation_assistant",
     "input": {
-      "latest_message_id": "m-last",
-      "messages": [
-        {
-          "id": "m-last",
-          "role": "user",
-          "content": "先不审核了，给我写一句生日祝福。",
-          "document_ids": []
-        }
-      ],
-      "documents": []
+      "agent_id": "conversation_assistant",
+      "session_id": "00000000-0000-0000-0000-000000000005",
+      "run_id": "experiment-change-topic",
+      "checkpoint_id": null,
+      "message": {
+        "id": "m-last",
+        "role": "user",
+        "content": "先不审核了，给我写一句生日祝福。",
+        "document_ids": [],
+        "sequence": 1
+      },
+      "assistant_message_id": "reply-change-topic",
+      "assistant_sequence": 2,
+      "material_catalog": []
     },
     "expected": {
       "child_called": false,
@@ -103,32 +123,62 @@
     "id": "review",
     "agent_id": "conversation_assistant",
     "input": {
-      "latest_message_id": "m-last",
-      "messages": [
+      "agent_id": "conversation_assistant",
+      "session_id": "00000000-0000-0000-0000-000000000006",
+      "run_id": "experiment-review",
+      "checkpoint_id": null,
+      "message": {
+        "id": "m-last",
+        "role": "user",
+        "content": "以上第一段是草稿，第二段是标准，请按标准文档对比审核草稿。",
+        "document_ids": [
+          "draft",
+          "standard"
+        ],
+        "sequence": 1
+      },
+      "assistant_message_id": "reply-review",
+      "assistant_sequence": 2,
+      "material_catalog": [
         {
-          "id": "draft",
-          "role": "user",
-          "content": "第一条 付款无需审批。",
-          "document_ids": []
+          "ref": {
+            "kind": "document",
+            "id": "draft"
+          },
+          "title": "草稿",
+          "chars": 11
         },
         {
-          "id": "standard",
-          "role": "user",
-          "content": "第一条 所有付款必须审批。",
-          "document_ids": []
-        },
-        {
-          "id": "m-last",
-          "role": "user",
-          "content": "以上第一段是草稿，第二段是标准，请按标准文档对比审核草稿。",
-          "document_ids": []
+          "ref": {
+            "kind": "document",
+            "id": "standard"
+          },
+          "title": "标准",
+          "chars": 13
         }
-      ],
-      "documents": []
+      ]
     },
     "expected": {
       "child_called": true,
       "needs_clarification": false
-    }
+    },
+    "materials": [
+      {
+        "ref": {
+          "kind": "document",
+          "id": "draft"
+        },
+        "title": "草稿",
+        "content": "第一条 付款无需审批。"
+      },
+      {
+        "ref": {
+          "kind": "document",
+          "id": "standard"
+        },
+        "title": "标准",
+        "content": "第一条 所有付款必须审批。"
+      }
+    ]
   }
 ]

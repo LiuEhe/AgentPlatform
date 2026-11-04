@@ -204,6 +204,20 @@ def test_configured_relative_root_is_independent_of_cwd(tmp_path, monkeypatch):
     assert Settings(_env_file=None, documents_dir="other").documents_root == root / "other"
 
 
+def test_deletion_is_reusable_across_assistant_ids(tmp_path):
+    from app.infrastructure.documents.local_file_store import LocalFileStore
+
+    store = LocalFileStore(tmp_path)
+    sid, uid = str(uuid4()), str(uuid4())
+    for agent in ("assistant_a", "assistant_b"):
+        store.publish(store.stage(agent, sid, str(uuid4()), b"docx", agent))
+    store.write_deletion_intent("assistant_a", sid, uid)
+    assert store.read_deletion_intent(sid).agent_id == "assistant_a"
+    store.discard_session("assistant_a", sid)
+    assert not (tmp_path / "assistant_a" / sid).exists()
+    assert (tmp_path / "assistant_b" / sid).exists()
+
+
 def test_directory_link_cannot_escape_or_be_cleaned(tmp_path):
     from app.infrastructure.documents.local_file_store import LocalFileStore, StoredPaths
 

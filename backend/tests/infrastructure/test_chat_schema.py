@@ -17,7 +17,7 @@ def test_catalog_and_files_have_metadata_only(postgres_target):
         )
         conn = await manager.__aenter__()
         try:
-            assert await conn.fetchval("SELECT version FROM chat_schema_version") == 3
+            assert await conn.fetchval("SELECT version FROM chat_schema_version") == 4
             assert set(await conn.fetch("SELECT agent_id FROM agents")) == {
                 ("conversation_assistant",), ("institution_review",)
             }

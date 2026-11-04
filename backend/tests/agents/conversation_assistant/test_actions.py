@@ -4,8 +4,8 @@ from pydantic import ValidationError
 from app.agents.conversation_assistant.config import ConversationAgentConfig
 from app.agents.conversation_assistant.nodes.action_prepare import prepare_action
 from app.agents.conversation_assistant.nodes.material_prepare import prepare_materials
-from app.agents.conversation_assistant.schemas import IntentDecision
-from app.schemas.conversation_turn import ContinuationState, TurnDocument
+from app.agents.conversation_assistant.schemas import IntentDecision, PendingReview, ReviewArguments
+from app.schemas.conversation_turn import MaterialReference, TurnDocument
 
 CONFIG = ConversationAgentConfig(True, 50000)
 DRAFT = {"kind": "document", "id": "draft"}
@@ -14,151 +14,95 @@ STANDARD = {"kind": "document", "id": "standard"}
 
 @pytest.fixture
 def review_turn(turn_factory):
-    return turn_factory(
-        documents=(
-            TurnDocument(id="draft", filename="同名.docx", markdown="# 草稿\n第一条 草稿  原文"),
-            TurnDocument(id="standard", filename="同名.docx", markdown="# 标准\n第一条 标准"),
-        )
-    )
+    return turn_factory(documents=(
+        TurnDocument(id="draft", filename="同名.docx", markdown="# 草稿\n第一条 草稿  原文"),
+        TurnDocument(id="standard", filename="同名.docx", markdown="# 标准\n第一条 标准"),
+    ))
 
 
 def decision(**updates):
-    return IntentDecision.model_validate(
-        {
-            "intent": "institution_review",
-            "action": "call_agent",
-            "target_agent_id": "institution_review",
-            **updates,
-        }
-    )
+    return IntentDecision.model_validate({
+        "intent": "institution_review", "action": "call_agent",
+        "target_agent_id": "institution_review", **updates,
+    })
 
 
-@pytest.mark.parametrize(
-    "args",
-    [
-        {},
-        {"draft": DRAFT},
-        {"draft": DRAFT, "review_mode": "standard_document"},
-        {"draft": DRAFT, "standard": DRAFT, "review_mode": "standard_document"},
-    ],
-)
+def act(turn, value, pending=None, config=CONFIG):
+    return prepare_action(value, pending, prepare_materials([], turn), config,
+                          question_message_id=turn.assistant_message_id)
+
+
+@pytest.mark.parametrize("args", [
+    {}, {"draft": DRAFT}, {"draft": DRAFT, "review_mode": "standard_document"},
+    {"draft": DRAFT, "standard": DRAFT, "review_mode": "standard_document"},
+])
 def test_missing_or_conflicting_review_parameters_clarify(review_turn, args):
-    action = prepare_action(
-        review_turn,
-        decision(review_args=args),
-        prepare_materials(review_turn),
-        CONFIG,
-    )
-    assert action.route == "clarify" and action.review is None and action.continuation
+    action = act(review_turn, decision(review_args=args))
+    assert action.route == "clarify" and action.review is None and action.pending_review
+    assert action.pending_review.question_message_id == review_turn.assistant_message_id
 
 
-def test_complete_review_maps_exact_uploaded_content(review_turn):
-    action = prepare_action(
-        review_turn,
-        decision(
-            review_args={
-                "draft": DRAFT,
-                "standard": STANDARD,
-                "review_mode": "standard_document",
-            }
-        ),
-        prepare_materials(review_turn),
-        CONFIG,
-    )
+def test_complete_review_preserves_exact_material_references(review_turn):
+    action = act(review_turn, decision(review_args={
+        "draft": DRAFT, "standard": STANDARD, "review_mode": "standard_document",
+    }))
     assert action.route == "call_agent"
-    assert action.review.payload["content"] == review_turn.documents[0].markdown
-    assert action.review.payload["standard_content"] == review_turn.documents[1].markdown
+    assert action.review.arguments.draft == MaterialReference(**DRAFT)
+    assert action.review.arguments.standard == MaterialReference(**STANDARD)
+    assert not hasattr(action.review, "payload")
 
 
 def test_pasted_text_review_requires_no_upload(review_turn):
-    action = prepare_action(
-        review_turn,
-        decision(
-            review_args={
-                "draft": {"kind": "user_message", "id": "m1"},
-                "standard": STANDARD,
-                "review_mode": "standard_document",
-            }
-        ),
-        prepare_materials(review_turn),
-        CONFIG,
-    )
-    assert action.review.payload["content"] == "你好"
+    action = act(review_turn, decision(review_args={
+        "draft": {"kind": "user_message", "id": "m1"}, "standard": STANDARD,
+        "review_mode": "standard_document",
+    }))
+    assert action.review.arguments.draft.id == review_turn.message.id
 
 
 def test_followup_keeps_draft_and_switch_clears_standard(review_turn):
-    review_turn.continuation = ContinuationState(
-        payload={
-            "arguments": {
-                "draft": DRAFT,
-                "standard": STANDARD,
-                "review_mode": "standard_document",
-            }
-        }
-    )
-    action = prepare_action(
-        review_turn,
-        decision(
-            pending_action="update",
-            review_args={"review_mode": "knowledge_base"},
-        ),
-        prepare_materials(review_turn),
-        CONFIG,
-    )
+    pending = PendingReview(arguments=ReviewArguments(
+        draft=DRAFT, standard=STANDARD, review_mode="standard_document",
+    ), question_message_id="previous")
+    action = act(review_turn, decision(pending_action="update", review_args={
+        "review_mode": "knowledge_base",
+    }), pending)
     assert action.route == "call_agent"
-    assert action.review.payload["content"] == review_turn.documents[0].markdown
-    assert "standard_content" not in action.review.payload
+    assert action.review.arguments.draft == MaterialReference(**DRAFT)
+    assert action.review.arguments.standard is None
 
 
 def test_new_task_does_not_inherit_previous_draft(review_turn):
-    review_turn.continuation = ContinuationState(payload={"arguments": {"draft": DRAFT}})
-    action = prepare_action(
-        review_turn,
-        decision(
-            pending_action="clear",
-            review_args={"review_mode": "knowledge_base"},
-        ),
-        prepare_materials(review_turn),
-        CONFIG,
-    )
-    assert action.route == "clarify"
-    assert action.continuation.payload["arguments"]["draft"] is None
+    pending = PendingReview(arguments=ReviewArguments(draft=DRAFT), question_message_id="previous")
+    action = act(review_turn, decision(pending_action="clear", review_args={
+        "review_mode": "knowledge_base",
+    }), pending)
+    assert action.route == "clarify" and action.pending_review.arguments.draft is None
 
 
 @pytest.mark.parametrize("intent,action", [("general_chat", "answer"), ("ambiguous", "clarify")])
 def test_non_review_clears_pending(review_turn, intent, action):
-    review_turn.continuation = ContinuationState(payload={"arguments": {"draft": DRAFT}})
-    value = IntentDecision(
-        intent=intent, action=action, question="请说明" if action == "clarify" else None
-    )
-    result = prepare_action(review_turn, value, prepare_materials(review_turn), CONFIG)
-    assert result.continuation is None and result.review is None
+    pending = PendingReview(arguments=ReviewArguments(draft=DRAFT), question_message_id="previous")
+    result = act(review_turn, IntentDecision(
+        intent=intent, action=action, question="请说明" if action == "clarify" else None,
+    ), pending)
+    assert result.pending_review is None and result.review is None
 
 
 def test_unconfigured_knowledge_base_clears_pending(review_turn):
-    action = prepare_action(
+    action = act(
         review_turn,
-        decision(
-            review_args={
-                "draft": DRAFT,
-                "review_mode": "knowledge_base",
-            }
-        ),
-        prepare_materials(review_turn),
-        ConversationAgentConfig(False, 50000),
+        decision(review_args={"draft": DRAFT, "review_mode": "knowledge_base"}),
+        config=ConversationAgentConfig(False, 50000),
     )
-    assert action.route == "clarify" and action.continuation is None
+    assert action.route == "clarify" and action.pending_review is None
 
 
 @pytest.mark.parametrize("target", ["conversation_assistant", "unknown"])
 def test_invalid_model_constructed_target_is_revalidated(review_turn, target):
     value = IntentDecision.model_construct(
-        intent="institution_review",
-        action="call_agent",
-        target_agent_id=target,
-        pending_action="clear",
-        review_args=None,
-        question=None,
+        intent="institution_review", action="call_agent", target_agent_id=target,
+        pending_action="clear", review_args=None, question=None,
     )
     with pytest.raises(ValidationError):
-        prepare_action(review_turn, value, prepare_materials(review_turn), CONFIG)
+        act(review_turn, value)

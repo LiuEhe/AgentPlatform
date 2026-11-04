@@ -53,3 +53,26 @@ def test_parallel_runs_and_child_agents_keep_separate_contexts():
         assert observer.current.get() is None
 
     asyncio.run(run())
+
+
+def test_runtime_resources_are_per_invocation_and_not_inherited_by_child():
+    async def scenario():
+        registry = AgentRegistry()
+        runtime = AgentRuntime(registry)
+        resource = object()
+
+        class Child:
+            async def invoke(self, payload, context):
+                assert context.resources is None
+                return "ok"
+
+        class Parent:
+            async def invoke(self, payload, context):
+                assert context.resources is resource
+                return (await runtime.invoke("child", {})).output
+
+        registry.register("parent", Parent())
+        registry.register("child", Child())
+        assert (await runtime.invoke("parent", {}, resources=resource)).output == "ok"
+
+    asyncio.run(scenario())

@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 from io import BytesIO
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -8,7 +9,20 @@ from uuid import uuid4
 import pytest
 from docx import Document
 
-from app.schemas.conversation_turn import ConversationTurnInput, TurnMessage
+from app.schemas.conversation_turn import (
+    ConversationTurnInput,
+    ConversationTurnResources,
+    ConversationTurnResult,
+    MaterialDescriptor,
+    MaterialReference,
+    TurnMaterial,
+    TurnMessage,
+)
+
+
+def pytest_configure():
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 @pytest.fixture(autouse=True)
@@ -44,7 +58,7 @@ def isolate_external_settings(monkeypatch, tmp_path):
 def postgres_target():
     from app.core.config import Settings
     from app.infrastructure.database import BaseDatabase
-    from scripts.manage_users import initialize_v3
+    from scripts.manage_users import initialize_v4
 
     dsn = os.environ.get("TEST_DATABASE_URL")
     if not dsn or urlsplit(dsn).path != "/agent_platform_test":
@@ -55,7 +69,7 @@ def postgres_target():
     async def prepare():
         async with BaseDatabase.maintenance(settings) as db:
             await db.execute(f'CREATE SCHEMA "{schema}"')
-        await initialize_v3(settings, "test-pass123", schema=schema)
+        await initialize_v4(settings, "test-pass123", schema=schema)
         async with BaseDatabase.maintenance(settings, schema=schema) as db:
             uid = await db.fetchval("SELECT user_id FROM users WHERE username='admin'")
             await db.execute(
@@ -115,23 +129,73 @@ def docx_bytes_factory():
 
 @pytest.fixture
 def turn_factory():
-    def make(*, role="user", content="你好", documents=(), continuation=None, history=()):
+    def make(*, role="user", content="你好", documents=(), session_id=None,
+             checkpoint_id=None, sequence=1):
         return ConversationTurnInput(
-            latest_message_id="m1",
-            messages=(
-                *history,
-                TurnMessage(
-                    id="m1",
-                    role=role,
-                    content=content,
-                    document_ids=tuple(d.id for d in documents),
-                ),
-            ),
-            documents=documents,
-            continuation=continuation,
+            agent_id="conversation_assistant", session_id=session_id or str(uuid4()),
+            run_id=str(uuid4()), checkpoint_id=checkpoint_id,
+            message=TurnMessage(id=f"m{sequence}", sequence=sequence, role=role, content=content,
+                                document_ids=tuple(d.id for d in documents)),
+            assistant_message_id=f"m{sequence + 1}", assistant_sequence=sequence + 1,
+            material_catalog=tuple(MaterialDescriptor(
+                ref=MaterialReference(kind="document", id=d.id),
+                title=d.filename, chars=len(d.markdown),
+            ) for d in documents),
         )
 
     return make
+
+
+def turn_resources(turn, documents=(), *, sources=None):
+    from app.core.errors import AppError
+    values = {("document", d.id): (d.filename, d.markdown) for d in documents}
+    values[("user_message", turn.message.id)] = ("粘贴正文", turn.message.content)
+    values.update(sources or {})
+
+    async def read(refs):
+        if any((ref.kind, ref.id) not in values for ref in refs):
+            raise AppError("MATERIAL_NOT_FOUND", "会话材料不存在", 404)
+        return tuple(TurnMaterial(ref=ref, title=values[(ref.kind, ref.id)][0],
+                                  content=values[(ref.kind, ref.id)][1]) for ref in refs)
+    return ConversationTurnResources(read)
+
+
+def runtime_result(payload, reply="你好", child_call=None):
+    """受控运行时替身明确生成新契约；不用于生产或真正记忆验收。"""
+    return ConversationTurnResult(
+        reply=reply, child_call=child_call, checkpoint_id="test-checkpoint-" + uuid4().hex,
+        assistant_message_id=payload["assistant_message_id"],
+        assistant_sequence=payload["assistant_sequence"],
+    )
+
+
+async def invoke_graph(graph, turn, documents=(), *, sources=None):
+    from langchain_core.messages import HumanMessage
+
+    from app.agents.conversation_assistant.schemas import ConversationExecutionContext
+    from app.schemas.conversation_turn import conversation_thread_id
+    config = {"configurable": {"thread_id": conversation_thread_id(turn.agent_id, turn.session_id)}}
+    if turn.checkpoint_id:
+        config["configurable"]["checkpoint_id"] = turn.checkpoint_id
+    return await graph.ainvoke(
+        {"messages": [HumanMessage(id=turn.message.id, content=turn.message.content,
+                     additional_kwargs={"sequence": turn.message.sequence, "run_id": turn.run_id,
+                                        "document_ids": list(turn.message.document_ids)})]},
+        config=config, context=ConversationExecutionContext(
+            turn, turn_resources(turn, documents, sources=sources).read_materials,
+        ), durability="sync",
+    )
+
+
+async def finish_success(store, actor, session_id, run_id, text, *, child_call=None):
+    """仓储事务测试提供不透明定位符；真实 saver 由专门集成用例验证。"""
+    from app.schemas.conversation_session import RunCompletion
+    turn = await store.load_turn(actor, session_id, run_id, assistant_message_id=str(uuid4()))
+    return await store.finish(actor, session_id, run_id, RunCompletion(
+        "succeeded", text, child_call=child_call, assistant_message_id=turn.assistant_message_id,
+        assistant_sequence=turn.assistant_sequence, expected_checkpoint_id=turn.checkpoint_id,
+        memory_checkpoint_id="test-checkpoint-" + uuid4().hex,
+    ))
 
 
 @pytest.fixture(autouse=True)

@@ -3,16 +3,18 @@ import base64
 import json
 
 import pytest
+from conftest import finish_success, runtime_result
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.core.errors import AppError
 from app.infrastructure.conversation.active_runs import ActiveRunRegistry
+from app.infrastructure.conversation.checkpoints import CheckpointResources
 from app.infrastructure.conversation.postgres_store import PostgresConversationStore
 from app.infrastructure.database import Database
 from app.main import create_app
 from app.schemas.conversation import MessageCreate
-from app.schemas.conversation_session import RunCompletion, SessionFile, SessionSubmission
+from app.schemas.conversation_session import SessionFile, SessionSubmission
 from app.services.conversation_service import ConversationService
 
 
@@ -71,7 +73,7 @@ def test_pagination_and_invalid_cursor_have_explicit_errors(actor):
         for i in range(3):
             run = client.portal.call(store.submit, actor, id, SessionSubmission(str(i), f"用户{i}"))
             client.portal.call(
-                store.finish, actor, id, run.run.run_id, RunCompletion("succeeded", f"回复{i}")
+                finish_success, store, actor, id, run.run.run_id, f"回复{i}"
             )
         page = client.get(f"/api/v1/sessions/{id}?after_sequence=0&limit=2").json()
         assert page["last_sequence"] == 6
@@ -114,11 +116,17 @@ def test_terminal_commit_failure_never_emits_done(actor, postgres_target, monkey
             async def invoke(self, *args, **kwargs):
                 self.calls += 1
                 await gate.wait()
-                return SimpleNamespace(output={"reply": "完整但未提交"})
+                return SimpleNamespace(output=runtime_result(args[1], "完整但未提交"))
 
         runtime = Runtime()
+        checkpoints = CheckpointResources(settings, schema=schema)
+        await checkpoints.open()
         service = ConversationService(
-            settings, runtime, store=store, active_runs=ActiveRunRegistry(max_bytes=100000)
+            settings,
+            runtime,
+            store=store,
+            checkpoints=checkpoints,
+            active_runs=ActiveRunRegistry(max_bytes=100000),
         )
         page = await service.create(actor)
         run = await service.submit(actor,
@@ -145,6 +153,7 @@ def test_terminal_commit_failure_never_emits_done(actor, postgres_target, monkey
         }
         monkeypatch.setattr(store, "finish", original)
         await service.aclose()
+        await checkpoints.aclose()
         await store.database.initialize()
         assert await store.recover_interrupted() == 1
         assert (
@@ -233,9 +242,7 @@ def test_foreign_document_and_rolled_back_finish(actor, postgres_target, monkeyp
 
             monkeypatch.setattr(store, "_run", broken)
             with pytest.raises(RuntimeError):
-                await store.finish(actor,
-                    a.summary.session_id, run.run.run_id, RunCompletion("succeeded", "未提交")
-                )
+                await finish_success(store, actor, a.summary.session_id, run.run.run_id, "未提交")
             monkeypatch.setattr(store, "_run", original)
             assert len((await store.read(actor, a.summary.session_id)).messages) == 1
             assert (

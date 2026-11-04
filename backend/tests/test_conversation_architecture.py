@@ -51,3 +51,20 @@ def test_service_has_no_private_agent_orchestration():
 
 def test_legacy_intent_entry_is_removed():
     assert not (APP / "agents" / "conversation_assistant" / "intent.py").exists()
+
+
+def test_shared_memory_and_resources_have_no_agent_policy_dependency():
+    for path in (
+        APP / "nodes" / "llm" / "memory.py",
+        APP / "infrastructure" / "conversation" / "checkpoints.py",
+        APP / "schemas" / "conversation_turn.py",
+    ):
+        assert not any(
+            module.startswith(("app.agents", "app.services"))
+            for module in imports(path)
+        ), path
+    source = (APP / "infrastructure" / "conversation" / "postgres_store.py").read_text(
+        encoding="utf-8"
+    )
+    assert "async def snapshot(" not in source
+    assert "continuation" not in source

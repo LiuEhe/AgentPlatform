@@ -2,12 +2,14 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from conftest import runtime_result
 from pydantic import SecretStr
 from test_observability_runtime import RecordingObserver
 
 from app.core.config import Settings
 from app.core.observability import bind_observation_attributes
 from app.infrastructure.conversation.active_runs import ActiveRunRegistry
+from app.infrastructure.conversation.checkpoints import CheckpointResources
 from app.infrastructure.conversation.postgres_store import PostgresConversationStore
 from app.infrastructure.database import Database
 from app.schemas.conversation import MessageCreate
@@ -23,18 +25,21 @@ def service_target(postgres_target, monkeypatch):
 
 async def build_service():
     class Runtime:
-        async def invoke(self, agent_id, payload, *, on_event=None):
-            return SimpleNamespace(output={"reply": "ok"})
+        async def invoke(self, agent_id, payload, *, on_event=None, resources=None):
+            return SimpleNamespace(output=runtime_result(payload, "ok"))
 
     dsn, schema = POSTGRES_TARGET
     settings = Settings(_env_file=None, database_url=SecretStr(dsn))
     store = PostgresConversationStore(Database(settings , schema=schema))
     await store.database.initialize()
+    checkpoints = CheckpointResources(settings, schema=schema)
+    await checkpoints.open()
     observer = RecordingObserver()
     service = ConversationService(
         settings,
         Runtime(),
         store=store,
+        checkpoints=checkpoints,
         active_runs=ActiveRunRegistry(max_bytes=100000),
         observer=observer,
     )
@@ -56,6 +61,7 @@ def test_run_has_new_root_after_202_and_preserves_request_id(actor):
         assert roots[0]["request_id"] == "request-1"
         assert roots[0]["session_id"] == session.session_id
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
 
     asyncio.run(run())

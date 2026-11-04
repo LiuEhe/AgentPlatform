@@ -3,18 +3,19 @@ import threading
 from uuid import UUID, uuid4
 
 import pytest
+from conftest import finish_success, runtime_result
 
 from app.core.config import Settings
 from app.core.errors import AppError
 from app.infrastructure.conversation.active_runs import ActiveRunRegistry
+from app.infrastructure.conversation.checkpoints import CheckpointResources
 from app.infrastructure.conversation.postgres_store import PostgresConversationStore
 from app.infrastructure.database import Database
 from app.runtime.agent_runtime import AgentEvent, AgentExecution
 from app.schemas.conversation import MessageCreate
 from app.schemas.conversation_turn import (
     ChildAgentResult,
-    ContinuationState,
-    ConversationTurnResult,
+    MaterialReference,
 )
 from app.services.conversation_service import ConversationService
 
@@ -23,18 +24,26 @@ class Runtime:
     def __init__(self, results=None, gate=None):
         self.results = list(results or [])
         self.calls = []
+        self.materials = []
         self.gate = gate
         self.entered = asyncio.Event()
 
-    async def invoke(self, agent_id, payload, *, on_event=None):
+    async def invoke(self, agent_id, payload, *, on_event=None, resources=None):
         self.calls.append((agent_id, payload))
         self.entered.set()
+        refs = tuple(
+            MaterialReference(kind="document", id=id) for id in payload["message"]["document_ids"]
+        )
+        if refs:
+            self.materials = await resources.read_materials(refs)
         if self.gate:
             await self.gate.wait()
         return AgentExecution(
             "invoke",
             agent_id,
-            self.results.pop(0) if self.results else ConversationTurnResult(reply="你好"),
+            runtime_result(payload, **self.results.pop(0))
+            if self.results
+            else runtime_result(payload),
         )
 
 
@@ -96,12 +105,13 @@ def test_delete_failure_boundaries_and_retry(actor, monkeypatch, phase, code):
             assert service._files.read_deletion_intent(sid) is None
         finally:
             await service.aclose()
+            await service._checkpoints.aclose()
             await service._store.database.aclose()
     asyncio.run(scenario())
 
 
 def test_delete_rejects_terminal_run_before_task_exit(actor):
-    from app.schemas.conversation_session import RunCompletion, SessionSubmission
+    from app.schemas.conversation_session import SessionSubmission
 
     async def scenario():
         service = await make_service()
@@ -111,9 +121,7 @@ def test_delete_rejects_terminal_run_before_task_exit(actor):
             with pytest.raises(AppError) as error:
                 await service.delete(actor, sid)
             assert error.value.code == "CONVERSATION_BUSY"
-            await service._store.finish(
-                actor, sid, run.run.run_id, RunCompletion("succeeded", "done")
-            )
+            await finish_success(service._store, actor, sid, run.run.run_id, "done")
             task = asyncio.create_task(asyncio.Event().wait())
             service._tasks[run.run.run_id] = task
             with pytest.raises(AppError) as error:
@@ -125,6 +133,7 @@ def test_delete_rejects_terminal_run_before_task_exit(actor):
             await service.delete(actor, sid)
         finally:
             await service.aclose()
+            await service._checkpoints.aclose()
             await service._store.database.aclose()
     asyncio.run(scenario())
 
@@ -149,6 +158,7 @@ def test_delete_waiter_cancel_and_shutdown_drain_worker(actor, monkeypatch):
         assert not closing.done()
         finish.set()
         await closing
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
         assert not service._deletion_tasks
         assert not service._active._locks
@@ -168,12 +178,14 @@ def test_recovery_after_each_delete_boundary(actor, committed):
         if committed:
             await service._store.delete_session(actor, sid)
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
         service = await make_service()
         await service.recover_deletions()
         assert service._files.read_deletion_intent(sid) is None
         assert (service._files.root / paths.source_path).exists() is not committed
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
     asyncio.run(scenario())
 
@@ -188,6 +200,7 @@ def test_delete_unknown_uuid_does_not_remove_untracked_directory(actor):
         await service.delete(actor, sid)
         assert (service._files.root / paths.source_path).read_bytes() == b"keep"
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
     asyncio.run(scenario())
 
@@ -222,6 +235,7 @@ def test_delete_busy_upload_and_race_with_submit(actor, monkeypatch):
             await submit
         assert missing.value.status_code == 404
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
     asyncio.run(scenario())
 
@@ -231,14 +245,14 @@ def test_stream_snapshot_delta_reconnect_and_multiple_readers_share_one_task(act
         first, finish = asyncio.Event(), asyncio.Event()
 
         class StreamingRuntime(Runtime):
-            async def invoke(self, agent_id, payload, *, on_event=None):
+            async def invoke(self, agent_id, payload, *, on_event=None, resources=None):
                 self.calls.append((agent_id, payload))
                 on_event(AgentEvent("stage", "正在生成回答"))
                 on_event(AgentEvent("text_delta", "你"))
                 first.set()
                 await finish.wait()
                 on_event(AgentEvent("text_delta", "好"))
-                return AgentExecution("stream", agent_id, ConversationTurnResult(reply="你好"))
+                return AgentExecution("stream", agent_id, runtime_result(payload, reply="你好"))
 
         runtime = StreamingRuntime()
         service = await make_service(runtime)
@@ -266,6 +280,7 @@ def test_stream_snapshot_delta_reconnect_and_multiple_readers_share_one_task(act
         assert service._active.used_bytes == 0
         await reconnect.aclose()
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
         assert service._active.used_bytes == 0
 
@@ -277,7 +292,7 @@ def test_stream_delta_arrives_before_completion_and_cancel_wakes_reader(actor):
         emitted, finish = asyncio.Event(), asyncio.Event()
 
         class StreamingRuntime(Runtime):
-            async def invoke(self, agent_id, payload, *, on_event=None):
+            async def invoke(self, agent_id, payload, *, on_event=None, resources=None):
                 await emitted.wait()
                 on_event(AgentEvent("text_delta", "第一段"))
                 await finish.wait()
@@ -302,6 +317,7 @@ def test_stream_delta_arrives_before_completion_and_cancel_wakes_reader(actor):
         assert "第一段" not in done.run.message.content
         await reader.aclose()
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
 
     asyncio.run(scenario())
@@ -310,7 +326,7 @@ def test_stream_delta_arrives_before_completion_and_cancel_wakes_reader(actor):
 def test_stream_capacity_failure_releases_partial_text_and_wakes_subscriber(actor):
     async def scenario():
         class OverflowRuntime(Runtime):
-            async def invoke(self, agent_id, payload, *, on_event=None):
+            async def invoke(self, agent_id, payload, *, on_event=None, resources=None):
                 on_event(AgentEvent("text_delta", "x" * 30))
                 on_event(AgentEvent("text_delta", "x" * 100))
 
@@ -330,6 +346,7 @@ def test_stream_capacity_failure_releases_partial_text_and_wakes_subscriber(acto
         assert (await anext(reader)).event == "done"
         await reader.aclose()
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
 
     asyncio.run(scenario())
@@ -348,6 +365,7 @@ def test_shutdown_wakes_existing_subscriber(actor):
         waiting = asyncio.create_task(anext(reader))
         await asyncio.sleep(0)
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
         event = await asyncio.wait_for(waiting, 1)
         assert event.event == "done" and event.run.status == "cancelled"
@@ -368,6 +386,7 @@ def test_shutdown_publishes_terminal_event_for_a_task_not_scheduled_yet(actor):
         assert (await anext(reader)).run.status in {"queued", "running"}
         # 没有让 _execute 获得调度；取消未启动的 task 不会执行它的 finally。
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
         done = await asyncio.wait_for(anext(reader), 0.1)
         assert done.event == "done" and done.run.status == "cancelled"
@@ -393,10 +412,13 @@ async def make_service(runtime=None, *, settings=None):
     settings = settings.model_copy(update={"database_url": SecretStr(dsn)})
     store = PostgresConversationStore(Database(settings , schema=schema))
     await store.database.initialize()
+    checkpoints = CheckpointResources(settings, schema=schema)
+    await checkpoints.open()
     return ConversationService(
         settings,
         runtime or Runtime(),
         store=store,
+        checkpoints=checkpoints,
         active_runs=ActiveRunRegistry(max_bytes=settings.conversation_transient_max_bytes),
     )
 
@@ -404,6 +426,109 @@ async def make_service(runtime=None, *, settings=None):
 async def complete(actor, service, session, run):
     await service._tasks[run.run_id]
     return await service.read_run(actor, session.session_id, run.run_id)
+
+
+@pytest.mark.parametrize("recover_on_startup", [False, True])
+def test_checkpoint_delete_failure_retains_receipt_and_recovers(
+    actor, monkeypatch, recover_on_startup
+):
+    from langgraph.graph import END, START, StateGraph
+    from typing_extensions import TypedDict
+
+    from app.schemas.conversation_turn import conversation_thread_id
+
+    class State(TypedDict):
+        value: str
+
+    async def scenario():
+        service = await make_service()
+        try:
+            session, other = await service.create(actor), await service.create(actor)
+            sid = session.session_id
+            graph = StateGraph(State)
+            graph.add_node("echo", lambda state: state)
+            graph.add_edge(START, "echo")
+            graph.add_edge("echo", END)
+            graph = graph.compile(checkpointer=service._checkpoints.saver)
+            config, other_config = [{"configurable": {
+                "thread_id": conversation_thread_id("conversation_assistant", item.session_id)
+            }} for item in (session, other)]
+            await graph.ainvoke({"value": "delete"}, config, durability="sync")
+            await graph.ainvoke({"value": "keep"}, other_config, durability="sync")
+            original = service._checkpoints.delete_thread
+
+            async def unavailable(thread_id):
+                raise AppError("STORAGE_UNAVAILABLE", "controlled failure", 503)
+
+            monkeypatch.setattr(service._checkpoints, "delete_thread", unavailable)
+            with pytest.raises(AppError) as error:
+                await service.delete(actor, sid)
+            assert error.value.code == "CONVERSATION_DELETE_INCOMPLETE"
+            assert await service._store.inspect_deletion(actor, sid) is None
+            assert service._files.read_deletion_intent(sid) is not None
+            assert await service._checkpoints.saver.aget_tuple(config) is not None
+            monkeypatch.setattr(service._checkpoints, "delete_thread", original)
+            if recover_on_startup:
+                await service.aclose()
+                await service._checkpoints.aclose()
+                await service._store.database.aclose()
+                service = await make_service()
+                await service.recover_deletions()
+            else:
+                await service.delete(actor, sid)
+            assert service._files.read_deletion_intent(sid) is None
+            assert await service._checkpoints.saver.aget_tuple(config) is None
+            retained = await service._checkpoints.saver.aget_tuple(other_config)
+            assert retained.checkpoint["channel_values"]["value"] == "keep"
+        finally:
+            await service.aclose()
+            await service._checkpoints.aclose()
+            await service._store.database.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_first_failed_turn_cleans_orphan_but_successful_memory_is_preserved(actor, monkeypatch):
+    async def scenario():
+        runtime = Runtime()
+        service = await make_service(runtime)
+        deleted = []
+        original = service._checkpoints.delete_thread
+
+        async def tracked(thread_id):
+            deleted.append(thread_id)
+            await original(thread_id)
+
+        monkeypatch.setattr(service._checkpoints, "delete_thread", tracked)
+        try:
+            session = await service.create(actor)
+            original_invoke = runtime.invoke
+
+            async def fail(*args, **kwargs):
+                raise AppError("MODEL_ERROR", "controlled failure", 502)
+
+            monkeypatch.setattr(runtime, "invoke", fail)
+            run = await service.submit(
+                actor, session.session_id, MessageCreate(client_message_id="1", content="失败")
+            )
+            assert (await complete(actor, service, session, run)).status == "failed"
+            monkeypatch.setattr(runtime, "invoke", original_invoke)
+            for i in range(2, 4):
+                run = await service.submit(
+                    actor,
+                    session.session_id,
+                    MessageCreate(client_message_id=str(i), content="成功"),
+                )
+                assert (await complete(actor, service, session, run)).status == "succeeded"
+            assert len(deleted) == 2
+            assert runtime.calls[0][1]["checkpoint_id"] is None
+            assert runtime.calls[1][1]["checkpoint_id"] is not None
+        finally:
+            await service.aclose()
+            await service._checkpoints.aclose()
+            await service._store.database.aclose()
+
+    asyncio.run(scenario())
 
 
 def test_chat_without_upload_never_calls_child(actor):
@@ -418,39 +543,34 @@ def test_chat_without_upload_never_calls_child(actor):
         assert result.status == "succeeded" and result.message.content == "你好"
         assert [call[0] for call in runtime.calls] == ["conversation_assistant"]
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
 
     asyncio.run(scenario())
 
 
-def test_continuation_is_opaque_and_linked_to_saved_message(actor):
+def test_checkpoint_pointer_is_published_with_stable_saved_message(actor):
     async def scenario():
-        runtime = Runtime(
-            results=[
-                ConversationTurnResult(
-                    reply="请补充", continuation=ContinuationState(payload={"task": {"x": 1}})
-                ),
-                ConversationTurnResult(reply="完成"),
-            ]
-        )
+        runtime = Runtime(results=[{"reply": "请补充"}, {"reply": "完成"}])
         service = await make_service(runtime)
         session = await service.create(actor)
+        previous = None
         for index in range(2):
-            run = await service.submit(actor,
-                session.session_id, MessageCreate(client_message_id=str(index), content="输入")
-            )
+            run = await service.submit(actor, session.session_id,
+                MessageCreate(client_message_id=str(index), content="输入"))
             result = await complete(actor, service, session, run)
-            if index == 0:
-                continuation = (
-                    await service._store.snapshot(actor, session.session_id)
-                ).continuation
-                assert continuation.payload == {"task": {"x": 1}}
-                assert continuation.question_message_id == result.message.message_id
-        assert runtime.calls[1][1]["continuation"]["payload"] == {"task": {"x": 1}}
-        assert (await service._store.snapshot(actor, session.session_id)).continuation is None
+            assert result.status == "succeeded"
+            sent = runtime.calls[index][1]
+            assert sent["checkpoint_id"] == previous
+            assert result.message.message_id == sent["assistant_message_id"]
+            async with service._store.transaction() as db:
+                previous = await db.fetchval(
+                    "SELECT memory_checkpoint_id FROM chat_sessions WHERE session_id=$1",
+                    UUID(session.session_id))
+            assert previous
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
-
     asyncio.run(scenario())
 
 
@@ -472,6 +592,7 @@ def test_same_client_message_id_reuses_run(actor):
         assert len(runtime.calls) == 1
         assert len((await service.read(actor, session.session_id)).messages) == 2
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
 
     asyncio.run(scenario())
@@ -494,6 +615,7 @@ def test_cancel_releases_capacity(actor):
         )
         await complete(actor, service, session, second)
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
 
     asyncio.run(scenario())
@@ -509,6 +631,7 @@ def test_close_waits_for_tasks(actor):
         )
         task = service._tasks[run.run_id]
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
         assert task.done() and not service._tasks
 
@@ -525,7 +648,7 @@ def test_child_result_is_displayed_without_service_dispatch(actor):
             output_type="markdown",
             output="# 原始报告",
         )
-        runtime = Runtime(results=[ConversationTurnResult(reply="完成", child_call=child)])
+        runtime = Runtime(results=[dict(reply="完成", child_call=child)])
         service = await make_service(runtime)
         session = await service.create(actor)
         run = await service.submit(actor,
@@ -537,6 +660,7 @@ def test_child_result_is_displayed_without_service_dispatch(actor):
         assert result.message.agent_call.status == "succeeded"
         assert [c[0] for c in runtime.calls] == ["conversation_assistant"]
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
 
     asyncio.run(scenario())
@@ -568,6 +692,7 @@ def test_uploaded_doc_then_smalltalk_never_reparses_or_calls_child(
         await complete(actor, service, session, run)
         assert len(runtime.calls) == 1
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
 
     asyncio.run(scenario())
@@ -583,6 +708,7 @@ def test_success_is_not_overwritten_by_cancel(actor):
         await complete(actor, service, session, run)
         assert (await service.cancel(actor, session.session_id, run.run_id)).status == "succeeded"
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
 
     asyncio.run(scenario())
@@ -608,6 +734,7 @@ def test_queue_capacity_is_bounded(actor):
             )
         assert raised.value.status_code == 503
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
 
     asyncio.run(scenario())
@@ -627,10 +754,9 @@ def test_output_capacity_failure_does_not_commit_partial_result(actor):
             Runtime(
                 gate=asyncio.Event(),
                 results=[
-                    ConversationTurnResult(
+                    dict(
                         reply="完成",
                         child_call=child,
-                        continuation=ContinuationState(payload={"task": 1}),
                     )
                 ],
             ),
@@ -650,9 +776,17 @@ def test_output_capacity_failure_does_not_commit_partial_result(actor):
         result = await complete(actor, service, session, run)
         assert result.status == "failed" and result.error.code == "CONVERSATION_CAPACITY"
         assert result.message.agent_call is None
-        assert (await service._store.snapshot(actor, session.session_id)).continuation is None
+        async with service._store.transaction() as db:
+            assert (
+                await db.fetchval(
+                    "SELECT memory_checkpoint_id FROM chat_sessions WHERE session_id=$1",
+                    UUID(session.session_id),
+                )
+                is None
+            )
         assert service._active.used_bytes <= 1100
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
 
     asyncio.run(scenario())
@@ -675,6 +809,7 @@ def test_run_timeout_has_one_terminal_message(actor):
         assert result.error.code == "CONVERSATION_TIMEOUT"
         assert len((await service.read(actor, session.session_id)).messages) == 2
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
 
     asyncio.run(scenario())
@@ -712,12 +847,14 @@ def test_parse_cancellation_waits_for_thread_and_releases_once(actor, monkeypatc
             release.set()
         if close:
             await stopping
+            await service._checkpoints.aclose()
             await service._store.database.aclose()
         else:
             with pytest.raises(asyncio.CancelledError):
                 await upload
             assert service._active.used_bytes == 0
             await service.aclose()
+            await service._checkpoints.aclose()
             await service._store.database.aclose()
         assert service._parse_slots._value == 2 and upload.done()
 
@@ -765,6 +902,7 @@ def test_concurrent_upload_cannot_replace_tracked_upload(actor, monkeypatch):
             parse_release.set()
             await asyncio.gather(first, second, return_exceptions=True)
             await service.aclose()
+            await service._checkpoints.aclose()
             await service._store.database.aclose()
 
     asyncio.run(scenario())
@@ -794,6 +932,7 @@ def test_shutdown_cancels_upload_waiting_for_session_read(actor, monkeypatch):
         await entered.wait()
         try:
             await service.aclose()
+            await service._checkpoints.aclose()
             await service._store.database.aclose()
             release.set()
             result = (await asyncio.gather(upload, return_exceptions=True))[0]
@@ -804,6 +943,7 @@ def test_shutdown_cancels_upload_waiting_for_session_read(actor, monkeypatch):
             release.set()
             await asyncio.gather(upload, return_exceptions=True)
             await service.aclose()
+            await service._checkpoints.aclose()
             await service._store.database.aclose()
 
     asyncio.run(scenario())
@@ -837,6 +977,7 @@ def test_lost_commit_ack_is_reconciled_without_model_reexecution(actor, monkeypa
             assert len(service.runtime.calls) == 1
         finally:
             await service.aclose()
+            await service._checkpoints.aclose()
             await service._store.database.aclose()
 
     asyncio.run(scenario())
@@ -863,6 +1004,7 @@ def test_shutdown_does_not_schedule_pending_message_submission(actor, monkeypatc
         await entered.wait()
         try:
             await service.aclose()
+            await service._checkpoints.aclose()
             await service._store.database.aclose()
             release.set()
             result = (await asyncio.gather(request, return_exceptions=True))[0]
@@ -876,6 +1018,7 @@ def test_shutdown_does_not_schedule_pending_message_submission(actor, monkeypatc
             release.set()
             await asyncio.gather(request, return_exceptions=True)
             await service.aclose()
+            await service._checkpoints.aclose()
             await service._store.database.aclose()
 
     asyncio.run(scenario())
@@ -914,6 +1057,7 @@ def test_file_commit_failure_never_removes_referenced_file(actor,
             assert not list((service._files.root / ".staging").glob("*"))
         finally:
             await service.aclose()
+            await service._checkpoints.aclose()
             await service._store.database.aclose()
 
     asyncio.run(scenario())
@@ -933,6 +1077,7 @@ def test_restart_reads_saved_markdown_without_parsing_again(actor, docx_bytes_fa
             "file_id", "original_name", "size_bytes", "content_chars", "created_at",
         }
         await service.aclose()
+        await service._checkpoints.aclose()
         await service._store.database.aclose()
 
         def no_parse(*args, **kwargs):
@@ -949,17 +1094,21 @@ def test_restart_reads_saved_markdown_without_parsing_again(actor, docx_bytes_fa
             )
             result = await complete(actor, service, session, run)
             assert result.status == "succeeded"
-            material = service.runtime.calls[0][1]["documents"][0]
-            assert material["id"] == file.file_id and material["markdown"] == original
+            material = service.runtime.materials[0]
+            assert material.ref.id == file.file_id and material.content == original
+            assert "documents" not in service.runtime.calls[0][1]
             (service._files.root / saved.content_path).write_text("被改动", encoding="utf-8")
-            run = await service.submit(actor,
-                session.session_id, MessageCreate(client_message_id="bad", content="继续"),
+            run = await service.submit(
+                actor,
+                session.session_id,
+                MessageCreate(client_message_id="bad", content="继续", file_ids=[file.file_id]),
             )
             result = await complete(actor, service, session, run)
             assert result.error.code == "FILE_UNAVAILABLE"
-            assert len(service.runtime.calls) == 1
+            assert len(service.runtime.calls) == 2
         finally:
             await service.aclose()
+            await service._checkpoints.aclose()
             await service._store.database.aclose()
 
     asyncio.run(scenario())
@@ -1005,6 +1154,7 @@ def test_cancel_waits_for_file_thread_and_cleans_only_its_upload(actor,
             assert service._parse_slots._value == 2
         finally:
             await service.aclose()
+            await service._checkpoints.aclose()
             await service._store.database.aclose()
 
     asyncio.run(scenario())
