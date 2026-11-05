@@ -7,7 +7,15 @@ from uuid import UUID, uuid4
 
 from app.core.errors import AppError
 from app.infrastructure.database import BaseDatabase, DatabaseConstraintError
-from app.schemas.identity import AuthContext, UserIdentity, UserPage, UserRecord
+from app.schemas.identity import (
+    PROFILE_FIELDS,
+    AuthContext,
+    AvatarChange,
+    UserIdentity,
+    UserPage,
+    UserProfile,
+    UserRecord,
+)
 
 
 def auth_required():
@@ -15,7 +23,14 @@ def auth_required():
 
 
 def _identity(row):
-    return UserIdentity(**{key: row[key] for key in UserIdentity.model_fields})
+    values = {key: row[key] for key in UserIdentity.model_fields if key != "has_avatar"}
+    return UserIdentity(**values, has_avatar=row["avatar_path"] is not None)
+
+
+def _profile(row):
+    return UserProfile(**_identity(row).model_dump(), **{
+        key: row[key] for key in ("email", "gender", "birthday", "phone_number", "address", "bio")
+    })
 
 
 def _context(row):
@@ -163,13 +178,55 @@ class IdentityStore(BaseDatabase):
             await tx.execute("UPDATE auth_sessions SET revoked_at=now() "
                              "WHERE user_id=$1 AND revoked_at IS NULL", actor.user.user_id)
 
-    async def update_profile(self, actor, display_name):
+    async def _profile_row(self, tx, actor, target_user_id=None):
+        if target_user_id is None:
+            await self.lock_actor(tx, actor)
+            target_user_id = actor.user.user_id
+        else:
+            await self._admin(tx, actor)
+        row = await tx.fetchrow("SELECT * FROM users WHERE user_id=$1", target_user_id)
+        if row is None:
+            raise AppError("USER_NOT_FOUND", "用户不存在", 404)
+        return row
+
+    async def read_profile(self, actor, *, target_user_id=None):
+        async with self.transaction(write=True) as tx:
+            return _profile(await self._profile_row(tx, actor, target_user_id))
+
+    async def read_avatar_path(self, actor, *, target_user_id=None):
+        async with self.transaction(write=True) as tx:
+            return (await self._profile_row(tx, actor, target_user_id))["avatar_path"]
+
+    async def update_profile(self, actor, changes):
+        if not changes.keys() <= PROFILE_FIELDS:
+            raise AppError("VALIDATION_ERROR", "资料字段无效", 422)
         async with self.transaction(write=True) as tx:
             await self.lock_actor(tx, actor)
-            return _identity(await tx.fetchrow(
-                "UPDATE users SET display_name=$1,updated_at=now() WHERE user_id=$2 RETURNING *",
-                display_name, actor.user.user_id,
-            ))
+            if not changes:
+                return _profile(await tx.fetchrow("SELECT * FROM users WHERE user_id=$1",
+                                                  actor.user.user_id))
+            names = sorted(changes)
+            assignments = ",".join(f"{name}=${index}" for index, name in enumerate(names, 1))
+            row = await tx.fetchrow(
+                f"UPDATE users SET {assignments},updated_at=now() "
+                f"WHERE user_id=${len(names) + 1} RETURNING *",
+                *(changes[name] for name in names), actor.user.user_id,
+            )
+            return _profile(row)
+
+    async def replace_avatar(self, actor, new_path, *, state):
+        async with self.transaction(write=True) as tx:
+            await self.lock_actor(tx, actor)
+            row = await tx.fetchrow("SELECT * FROM users WHERE user_id=$1", actor.user.user_id)
+            previous = row["avatar_path"]
+            if previous != new_path:
+                row = await tx.fetchrow(
+                    "UPDATE users SET avatar_path=$1,updated_at=now() "
+                    "WHERE user_id=$2 RETURNING *", new_path, actor.user.user_id,
+                )
+            result = AvatarChange(_profile(row), previous)
+            state.commit_started = True
+        return result
 
     async def _target(self, tx, actor, target_user_id):
         await self._admin(tx, actor)

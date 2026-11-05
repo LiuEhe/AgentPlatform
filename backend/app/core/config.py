@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     database_pool_max_size: int = Field(default=5, ge=1)
     database_timeout_seconds: float = Field(default=5, gt=0, allow_inf_nan=False)
     documents_dir: Path | None = None
+    avatars_dir: Path | None = None
     conversation_transient_max_bytes: int = Field(default=134217728, gt=0)
     conversation_concurrency: int = Field(default=3, gt=0)
     conversation_queue_size: int = Field(default=6, ge=0)
@@ -91,6 +92,11 @@ class Settings(BaseSettings):
     def documents_root(self) -> Path:
         root = Path(__file__).resolve().parents[2]
         return (root / (self.documents_dir or "documents")).resolve()
+
+    @property
+    def avatars_root(self) -> Path:
+        root = Path(__file__).resolve().parents[2]
+        return (root / (self.avatars_dir or "avatars")).resolve()
 
     @field_validator("api_prefix")
     @classmethod

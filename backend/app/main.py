@@ -16,6 +16,7 @@ from app.api.conversations import router as conversations_router
 from app.api.document_exports import router as document_exports_router
 from app.api.health import router as health_router
 from app.api.reviews import router as reviews_router
+from app.api.users import AvatarUploadMiddleware
 from app.api.users import router as users_router
 from app.core.config import Settings, get_settings
 from app.core.errors import install_error_handlers
@@ -27,6 +28,7 @@ from app.infrastructure.conversation.postgres_store import PostgresConversationS
 from app.infrastructure.database import Database
 from app.infrastructure.documents.local_file_store import LocalFileStore
 from app.infrastructure.identity.auth_limits import AuthAttemptLimiter
+from app.infrastructure.identity.avatar_store import AvatarStore
 from app.infrastructure.identity.passwords import PasswordHasher
 from app.infrastructure.identity.postgres_store import IdentityStore
 from app.infrastructure.langfuse.client import create_observer, shutdown_observer
@@ -85,7 +87,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             registration_attempts=app_settings.auth_registration_ip_attempts,
             max_keys=app_settings.auth_attempt_max_keys))
         app.state.auth_service = auth
-        app.state.user_service = UserService(identities, passwords)
+        app.state.user_service = UserService(
+            identities, passwords, AvatarStore(app_settings.avatars_root),
+        )
         conversation_store = PostgresConversationStore(database)
         checkpoints = CheckpointResources(database.settings, schema=database.schema)
         conversation_service = ConversationService(
@@ -150,6 +154,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 await conversation_service.aclose()
             finally:
+                await app.state.user_service.aclose()
                 await passwords.aclose()
                 await checkpoints.aclose()
                 await database.aclose()
@@ -174,6 +179,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.conversation_service = None
     app.state.agent_catalog_service = None
     app.state.observer = NullObserver()
+    app.add_middleware(AvatarUploadMiddleware, api_prefix=app_settings.api_prefix)
     install_auth_guard(app)
     app.add_middleware(
         CORSMiddleware,

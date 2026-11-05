@@ -6,10 +6,23 @@ CREATE TABLE users (
     role text NOT NULL CHECK (role IN ('admin','user')),
     status text NOT NULL CHECK (status IN ('active','disabled')),
     must_change_password boolean NOT NULL,
+    avatar_path text,
+    email text,
+    gender text,
+    birthday date,
+    phone_number text,
+    address text,
+    bio text,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     CHECK ((username = 'admin' AND role = 'admin' AND status = 'active')
-        OR (username <> 'admin' AND role = 'user'))
+        OR (username <> 'admin' AND role = 'user')),
+    CONSTRAINT users_profile_avatar_path_check CHECK (avatar_path IS NULL OR char_length(btrim(avatar_path)) > 0),
+    CONSTRAINT users_profile_email_length_check CHECK (email IS NULL OR char_length(email) BETWEEN 1 AND 254),
+    CONSTRAINT users_profile_gender_check CHECK (gender IS NULL OR gender IN ('male','female','other','undisclosed')),
+    CONSTRAINT users_profile_phone_length_check CHECK (phone_number IS NULL OR char_length(phone_number) BETWEEN 1 AND 32),
+    CONSTRAINT users_profile_address_length_check CHECK (address IS NULL OR char_length(address) BETWEEN 1 AND 500),
+    CONSTRAINT users_profile_bio_length_check CHECK (bio IS NULL OR char_length(bio) BETWEEN 1 AND 200)
 );
 CREATE INDEX users_list ON users(created_at DESC,user_id DESC);
 CREATE TABLE auth_sessions (
