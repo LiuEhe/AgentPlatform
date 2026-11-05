@@ -19,6 +19,13 @@
 | `role` | text | 否 | 角色：`admin`（管理员）或 `user`（普通用户） |
 | `status` | text | 否 | 账号状态：`active`（启用）或 `disabled`（停用） |
 | `must_change_password` | boolean | 否 | 是否须先修改临时密码；公开注册为 false，管理员创建或重置普通用户密码时为 true |
+| `avatar_path` | text | 是 | 服务端生成的头像相对路径；非空时不能是空白字符串，不在 API 中返回 |
+| `email` | text | 是 | 联系邮箱，最多 254 字符；仅资料用途，不作为登录凭据，不要求唯一 |
+| `gender` | text | 是 | `male`、`female`、`other`、`undisclosed`；空值表示未填写 |
+| `birthday` | date | 是 | 生日；应用校验真实日期且不晚于 UTC+08:00 的当天，不存年龄 |
+| `phone_number` | text | 是 | 联系手机号，最多 32 字符；允许国家区号，不要求唯一 |
+| `address` | text | 是 | 联系地址，最多 500 字符 |
+| `bio` | text | 是 | 个性签名，最多 200 字符 |
 | `created_at` | timestamptz | 否 | 创建时间，默认 `now()` |
 | `updated_at` | timestamptz | 否 | 最近更新时间，默认 `now()`，后续由应用更新 |
 
@@ -168,6 +175,7 @@
 | `DATABASE_POOL_MIN_SIZE` / `DATABASE_POOL_MAX_SIZE` | 业务池和检查点池各自的大小，默认 1 / 5（总连接额度需计两池） |
 | `DATABASE_TIMEOUT_SECONDS` | 数据库操作超时，默认 5 秒 |
 | `DOCUMENTS_DIR` | 附件根目录，默认 `backend/documents`；相对路径按 `backend` 解析 |
+| `AVATARS_DIR` | 用户头像根目录，默认 `backend/avatars`；相对路径按 `backend` 解析，与数据库共同备份 |
 
 ## 初始化
 
@@ -180,6 +188,8 @@ uv run python -m scripts.manage_users initialize
 直接执行 `schema_v4.sql` 建表后，会自动插入开发/测试账号 `admin / 123456`，密码以 Argon2id 哈希保存。使用上述管理命令时，隐藏输入并确认 6–20 字符的管理员密码；命令先执行官方 `setup()`，再在同一业务事务中执行 SQL，并将默认管理员密码替换为输入值，不重复插入账号。官方 setup 使用 autocommit，不能与业务事务宣称原子：若业务初始化失败，仅残留官方表时可重试 initialize；出现已有业务表或其他未知表时拒绝初始化。应用启动只检查管理员及官方表是否存在，不调用 setup 或自动迁移。
 
 本次仅支持空环境初始化，不提供 v3 数据迁移或兼容分支；现有测试环境请另建空数据库或在明确确认清理范围后重建，不能在旧表上重复初始化。此代码变更不会自动清空现有库。Windows 启动须使用后端 README 中的 Selector loop 参数，官方异步驱动不支持 Proactor。
+
+### 现有 v4 库补充用户资料列
 
 如果已直接执行 `schema_v4.sql`，但启动报“检查点结构尚未初始化”，先停止后端，再在 `backend/` 运行 `uv run python -m scripts.manage_users setup-checkpoints`。该命令仅调用官方 `setup()` 补建或更新检查点表，可重复执行，保留业务表和管理员密码。
 
@@ -210,11 +220,14 @@ VALUES (
 | 事务一致性 | 身份校验与会话写入需要一起完成时，使用同一数据库连接和事务，成功时一起提交，失败时一起回滚 |
 | 运行方式 | 同库仅允许一个应用进程；重启将未完成任务标为中断，不自动重做 |
 | 附件位置 | `<DOCUMENTS_DIR>/<agent_id>/<session_id>/<file_id>/` 下保存 `source.docx` 和 `content.md` |
+| 用户头像 | `<AVATARS_DIR>/<user_id>/<uuid>.png`；头像经有权限的接口读取，不开放静态目录；备份和恢复须包含此目录 |
 | 文件操作 | 暂存目录为 `.staging`，删除凭据目录为 `.deletions`；数据库提交未知时保留文件待核实 |
 | 永久删除 | 通过会话删除接口依次清理业务历史、对应 thread 检查点和附件；检查点或附件清理失败保留凭据可重试，不清理备份或用户下载副本 |
 | 备份恢复 | 停服务后共同备份数据库与整个附件根目录（含 `.staging`、`.deletions`），恢复时使用同一备份点；先在隔离环境演练，覆盖已有数据须另行确认 |
 
 会话与附件操作分别见 [postgres_store.py](../backend/app/infrastructure/conversation/postgres_store.py) 和 [local_file_store.py](../backend/app/infrastructure/documents/local_file_store.py)，失败响应见[错误码](errors.md)。
+
+头像文件操作见 [avatar_store.py](../backend/app/infrastructure/identity/avatar_store.py)。
 
 ## 测试与维护
 

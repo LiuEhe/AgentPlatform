@@ -79,7 +79,11 @@ uv run python -m scripts.manage_users setup-checkpoints
 
 `GET /auth/me` 返回 user、auth_session_id、csrf_token、expires_at。其他私有请求携带 Cookie 和 `X-Auth-Session-ID`，写请求再加 `X-CSRF-Token`；SSE 通过查询参数携带 auth_session_id。写请求的 Origin 或 Referer 须与 `AUTH_TRUSTED_ORIGINS` 精确匹配，前端请求使用 credentials。
 
-`POST /auth/logout`、`POST /auth/password` 撤销登录并返回 204；`PATCH /users/me` 修改显示名称。管理员通过 GET/POST `/admin/users`、PATCH `/admin/users/{id}` 和 POST `/admin/users/{id}/password-reset` 管理普通用户，内置 admin 恢复使用离线命令。
+`POST /auth/logout`、`POST /auth/password` 撤销登录并返回 204；`GET/PATCH /users/me` 读取或局部更新本人资料。显示名称必填，邮箱、性别、生日、手机号、地址、签名选填，省略字段保持原值，空值/空白清空可选项。生日仅接收 YYYY-MM-DD，不晚于 UTC+08:00 当天；邮箱和手机号仅为资料，不参与登录或验证。登录、注册和 `/auth/me` 继续返回账号摘要，额外提供 `has_avatar`，不附带联系方式等完整资料。
+
+`POST /users/me/avatar` 接收唯一 multipart 文件字段 `file`，支持 JPG/PNG/WebP，文件最多 2 MiB、请求含开销最多 2 MiB+64 KiB。Pillow 13.0.0 验证静态图片、像素边界并归一化为最长边 512px 的 PNG，去除元数据；email-validator 2.3.0 通过 Pydantic EmailStr 做邮箱语法校验，不探测 DNS。头像处理同进程最多两个请求，无无限队列。`GET/DELETE /users/me/avatar` 读取或移除头像，读取也须带身份上下文头，前端经受保护 blob 请求展示；移除重复请求均返回 204。头像保存是独立操作，不与文字资料保存捆绑。
+
+管理员通过 GET/POST `/admin/users`、PATCH `/admin/users/{id}` 和 POST `/admin/users/{id}/password-reset` 管理普通用户；另可通过 `GET /admin/users/{id}` 和 `GET /admin/users/{id}/avatar` 只读查看目标资料和头像，包括停用用户和内置 admin 本人，不增加代编辑能力。内置 admin 恢复仍使用离线命令。
 
 登录有效期固定 12 小时；Cookie 使用 HttpOnly、SameSite=Lax、Path=/，非 development 环境还使用 Secure 和 `__Host-` 前缀。生产部署须配置 `APP_ENV`、可信来源和同源或同站 HTTPS 入口。用户名为 3–32 位小写字母、数字或下划线且字母开头；密码为 6–20 个 Unicode 字符，不去空格，采用 Argon2 哈希。限额配置见 [.env.example](.env.example)，错误响应见[错误码](../docs/errors.md)。
 

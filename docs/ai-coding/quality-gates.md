@@ -24,6 +24,10 @@
 
 账号回归覆盖公开注册、登录撤销、强制改密、来源/CSRF/上下文、admin管理、会话归属、删除凭据和SSE重新授权；数据库用例使用显式专用PostgreSQL测试库，准备与边界见[数据库说明](../database.md#测试与维护)。前端另运行 `node --test src/features/auth/useAuth.test.cjs src/features/auth/appLifecycle.test.cjs src/api/auth.test.cjs`，使用真实Vue KeepAlive验证同身份导航保留和身份代次销毁，并验证刷新指针、退出乱序与旧响应丢弃。多标签页和离线退出另做实际浏览器验收，不能用Node替身代替。
 
+用户资料扩展可独立运行 `uv run pytest --noconftest tests/test_user_profile_schema.py tests/test_user_profile_sql.py tests/test_user_profile_store.py tests/test_user_profile_api.py tests/infrastructure/test_avatar_store.py tests/test_user_avatar_service.py tests/test_user_avatar_api.py`：使用内存事务替身、真实HTTP守卫、Pillow与临时目录，SQL仅文本检查，不连接数据库。前端新增 `src/api/users.test.cjs`、`src/features/auth/ProfileForm.test.cjs`、`UserAvatar.test.cjs`、`UserManagement.test.cjs`，通过已有Vue编译器/renderer覆盖差量保存、草稿保留、头像URL释放和旧目标结果过滤，不新增测试框架。上述检查不代表SQL实际执行或真实数据库持久化联调通过。
+
+账号界面另有`AccountMenu.test.cjs`、`AvatarCropper.test.cjs`，与ProfileForm回归覆盖取消退出、确认后才上传、原图超限、裁剪坐标/缩放/边缘限制、坏图及迟到bitmap释放。在`frontend/`执行`node --test`可运行全部Node回归；Canvas和原生dialog的真实浏览器行为及手机布局另行检查，Node宿主替身不代表实际像素渲染通过。
+
 文档导出测试另覆盖输入与大小边界、内容和样式结构、跨请求共享并发、取消及进程回收、流式 JSON 和无模型配置的独立入口。`tests/test_document_export_integration.py` 使用已声明 Python 依赖的真实包内 Pandoc，不消耗模型额度；发布验收必须实际运行，不能用缺依赖跳过代替通过。Word/WPS 的实际分页、字体替代和复杂表格布局仍须单独进行目视验收，结构测试通过不表示版式已验收。
 
 前端会话状态另有 Node 内置回归测试：在 `frontend/` 运行 `node --test src/features/conversation-assistant/useConversation.test.cjs`，复用现有 Vue/TypeScript，覆盖网络响应丢失、5xx 幂等标识、会话记录切换、草稿和附件隔离、停用后的迟到响应、切换期间停止的竞态、每会话失败重试目标，以及 SSE 增量、快照替换、断线恢复、原生 EventSource 重连上限和关闭，不依赖新增测试框架。当前没有通用前端测试框架、已纳入仓库的浏览器端到端测试、独立类型检查任务或依赖漏洞扫描。

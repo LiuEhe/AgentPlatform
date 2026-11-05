@@ -1,8 +1,8 @@
 # 项目架构目录
 
-- 更新日期：2026-11-04。
+- 更新日期：2026-11-05。
 - 本文件集中维护项目目录；[AGENTS.md](../../AGENTS.md)是阅读入口，新增或迁移模块前先阅读本文和[架构规则](architecture-rules.md)。
-- 当前目录按源码核对，包含账号、会话归属和统一数据库基类；仓库仅保留当前结构初始化与管理员密码恢复。
+- 当前目录按源码核对，包含账号、会话归属和统一数据库基类；维护资产包含当前结构初始化、管理员密码恢复及现有v4用户资料列增量。
 
 ## 当前目录
 
@@ -19,7 +19,7 @@ Agent/
 │   │   ├── services/                     # 应用用例，模块按 *_service.py 命名
 │   │   ├── infrastructure/
 │   │   │   ├── database.py               # 统一查询/事务基类、共享连接池与运行权
-│   │   │   ├── identity/                # 账号仓储、Argon2计算与有界尝试计数
+│   │   │   ├── identity/                # 账号仓储、密码、尝试计数与头像图片/文件
 │   │   │   ├── conversation/             # PostgreSQL归档、官方检查点资源与活动资源
 │   │   │   ├── documents/                # 本地原件、解析正文与删除凭据
 │   │   │   ├── llm/                      # 模型客户端创建与适配
@@ -37,10 +37,12 @@ Agent/
 │   │   └── main.py                       # 资源与应用服务装配、生命周期
 │   ├── database/
 │   │   ├── create_databases.sql          # 显式新建应用库与专用测试库
-│   │   └── schema_v4.sql                 # 当前结构，由维护脚本在事务内执行
+│   │   ├── schema_v4.sql                 # 当前结构，由维护脚本在事务内执行
+│   │   └── add_user_profile_fields.sql   # 现有v4资料列增量；维护者核对后手动执行
 │   ├── scripts/                          # 显式运维和实验入口
 │   ├── tests/                            # pytest、受控模型与真实隔离数据库回归
 │   ├── documents/                        # 运行时附件根，不纳入Git
+│   ├── avatars/                          # 运行时用户头像根，不纳入Git
 │   └── README.md                         # 后端配置、启动与接口说明
 ├── frontend/
 │   ├── src/
@@ -81,15 +83,16 @@ Agent/
 | `backend/app/infrastructure/database.py` | BaseDatabase封装查询、执行与绑定同一连接的事务；Database拥有共享池、运行权和生命周期。只有该模块直接使用asyncpg，仓储继承基类，维护脚本和Python数据库测试引用基类 |
 | `backend/app/infrastructure/conversation/postgres_store.py` | 会话仓储继承BaseDatabase，增加可信拥有者过滤；业务SQL、DTO映射和所有权判断保留在仓储 |
 | `backend/app/infrastructure/identity/postgres_store.py` | 身份仓储继承BaseDatabase，维护users/auth_sessions、注册与撤销事务；账号服务和同事务授权回调使用 |
+| `backend/app/infrastructure/identity/avatar_store.py` | 受限本地头像存储；输入可信用户ID、文件名与字节，借Pillow验证/归一化为PNG，输出相对路径或图片字节；用户服务调用，不处理HTTP或账号权限 |
 | `backend/app/infrastructure/identity/passwords.py` | 复用密码库与有界线程计算；账号服务和显式管理脚本使用，不自行实现密码算法 |
 | `backend/app/infrastructure/identity/auth_limits.py` | 有界登录失败与注册尝试计数；AuthService使用 |
 | `backend/app/services/auth_service.py` | 公开注册、登录、身份查询、退出、改密及尝试策略；认证API使用 |
-| `backend/app/services/user_service.py` | 本人资料、管理员创建/启停/重置普通用户；用户API使用 |
-| `backend/app/api/auth.py`、`users.py` | HTTP、Cookie、来源/CSRF/上下文与身份依赖；业务路由复用，业务规则不进入Agent |
+| `backend/app/services/user_service.py` | 本人资料和头像用例、同进程头像额度与取消收尾、管理员只读资料和既有账号管理；依赖身份仓储/头像文件实现，用户API使用 |
+| `backend/app/api/auth.py`、`users.py` | HTTP、Cookie、来源/CSRF/上下文与身份依赖；users内局部ASGI适配限制头像上传总量并复用官方multipart解析，普通账号JSON保持原限额；业务规则不进入Agent |
 | `backend/app/schemas/identity.py` | 中立账号/身份记录与公开请求响应；内部密码哈希不进入公开View |
 | `backend/database/schema_v4.sql` | 新环境当前结构初始化资产；不在应用启动时执行 |
 | `backend/scripts/manage_users.py` | 当前 v4 结构初始化与 admin 密码恢复；业务 SQL 经 BaseDatabase，官方 setup 经 CheckpointResources，密码隐藏输入 |
-| `frontend/src/features/auth/` | 注册/登录/资料/改密/用户管理表单，以及认证代次、状态清理和跨标签页重新核验 |
+| `frontend/src/features/auth/` | 注册/登录/资料/改密/用户管理表单，以及认证代次、状态清理和跨标签页重新核验；UserAvatar复用受保护blob读取，ProfileForm与管理详情隔离草稿/只读数据；AvatarCropper输入File，通过原生dialog、Canvas和Pointer Events管理裁剪/bitmap生命周期，输出确认PNG或取消事件，仅供ProfileForm调用 |
 | `frontend/src/api/auth.ts`、`users.ts` | 注册、认证、个人与管理员HTTP契约，复用统一客户端 |
 | `frontend/src/views/`、`router/`、`App.vue` | 新增页面组合与守卫，身份变化时整体销毁私有KeepAlive缓存 |
 

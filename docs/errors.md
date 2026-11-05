@@ -118,6 +118,12 @@
 | `REGISTRATION_RATE_LIMITED` | 429 | 同一来源 IP 的 600 秒注册窗口超过 10 次有效尝试，按 Retry-After 等待 |
 | `AUTH_BUSY` | 429 | 密码计算并发或等待容量已满，按 Retry-After 等待 |
 | `AUTH_REQUEST_TOO_LARGE` | 413 | 认证或用户写请求超过 16384 字节 |
+| `AVATAR_TOO_LARGE` | 413 | 头像文件超过2 MiB或multipart请求超过2 MiB+64 KiB |
+| `AVATAR_TYPE_UNSUPPORTED` | 415 | 头像文件类型不支持，选择JPG、PNG或WebP |
+| `AVATAR_INVALID` | 422 | 头像为空、损坏、多帧或像素尺寸超限 |
+| `AVATAR_BUSY` | 429 | 同进程两个头像处理额度已满，稍后重试 |
+| `AVATAR_NOT_FOUND` | 404 | 未设置头像或对应文件缺失，展示默认头像 |
+| `AVATAR_UNAVAILABLE` | 503 | 头像文件读写故障，保留资料草稿并重试 |
 | `USER_NOT_FOUND` | 404 | 管理员操作的目标用户不存在 |
 
 ## 维护
