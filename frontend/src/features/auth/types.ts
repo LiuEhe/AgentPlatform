@@ -7,9 +7,20 @@ export interface UserView {
   role: 'admin' | 'user'
   status: 'active' | 'disabled'
   must_change_password: boolean
+  has_avatar: boolean
   created_at: string
   updated_at: string
 }
+export type Gender = 'male' | 'female' | 'other' | 'undisclosed'
+export interface UserProfile extends UserView {
+  email: string | null
+  gender: Gender | null
+  birthday: string | null
+  phone_number: string | null
+  address: string | null
+  bio: string | null
+}
+export type ProfilePatch = Partial<Pick<UserProfile, 'display_name' | 'email' | 'gender' | 'birthday' | 'phone_number' | 'address' | 'bio'>>
 export interface AuthView { user: UserView; auth_session_id: string; csrf_token: string; expires_at: string }
 export interface LoginInput { username: string; password: string }
 export interface RegisterInput extends LoginInput { display_name: string }
