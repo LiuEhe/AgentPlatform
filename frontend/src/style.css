@@ -116,7 +116,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .platform-header .brand { font-size: 15px; }
   .platform-header .brand svg { width: 23px; height: 23px; }
   .site-nav { gap: 20px; }
-  .header-cta { display: none; }
   .tool-header { height: 68px; }
   .tool-header .brand { display: none; }
   .site-footer { margin: 0 20px; padding: 24px 0; flex-wrap: wrap; gap: 16px; }

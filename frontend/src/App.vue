@@ -29,10 +29,7 @@ const isPublic = computed(() => ['agent-home', 'agent-plaza'].includes(String(ro
         <ArrowLeft :size="16" aria-hidden="true" />智能体目录
       </RouterLink>
       <AccountMenu v-if="!isAuthPage && (identityReady || auth.phase.value === 'anonymous')" />
-      <RouterLink v-if="isPublic && !isAuthPage" class="button header-cta" :class="{ 'button-primary': route.name === 'agent-home' }" to="/agents">
-        探索智能体 <ArrowUpRight :size="17" aria-hidden="true" />
-      </RouterLink>
-      <span v-else-if="!isAuthPage" class="badge">独立工作空间</span>
+      <span v-if="!isPublic && !isAuthPage" class="badge">独立工作空间</span>
     </header>
 
     <main class="main-content">
