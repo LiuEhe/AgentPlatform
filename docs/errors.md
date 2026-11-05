@@ -1,12 +1,32 @@
 # 错误码
 
-本文列出当前已实现的错误码。客户端依据 HTTP 状态与 `code` 判断，使用 `message` 展示安全提示、`request_id` 定位问题；同一码的状态差异以具体入口为准。响应格式见 [core/errors.py](../backend/app/core/errors.py)：
+遇到错误时先读 `message`，再用 `code` 查下表；排查日志时提供 `request_id`。本文只列当前已实现的错误码，不必从头通读。
+
+| 问题出在哪里 | 跳到 |
+| --- | --- |
+| 服务启动、配置、数据库 | [通用与运行环境](#通用与运行环境) |
+| 聊天、附件引用、永久删除 | [会话、文件引用与删除](#会话文件引用与删除) |
+| DOCX 上传或审核材料 | [文档解析与审核输入](#文档解析与审核输入) |
+| Word 下载 | [Word 导出](#word-导出) |
+| 模型、Agent、知识库 | [Agent、模型与知识库](#agent模型与知识库) |
+| 提交后任务失败 | [运行结果中的错误码](#运行结果中的错误码) |
+| 登录、权限、资料、头像 | [账号与认证](#账号与认证) |
+
+## 怎样读错误响应
+
+普通请求结合 HTTP 状态和 `error.code` 判断，同一码的状态可能因入口而异。响应格式见 [core/errors.py](../backend/app/core/errors.py)：
 
 ```json
-{"error":{"code":"CONVERSATION_NOT_FOUND","message":"会话不存在","request_id":"请求标识"}}
+{
+  "error": {
+    "code": "CONVERSATION_NOT_FOUND",
+    "message": "会话不存在",
+    "request_id": "请求标识"
+  }
+}
 ```
 
-参数验证可附带 `details:[{field,message}]`，响应不得包含密钥、内部路径或异常原文。
+参数验证可能附带 `details: [{field, message}]`。响应不含密钥、内部路径或异常原文。
 
 | 场景 | 处理说明 |
 | --- | --- |
@@ -118,8 +138,8 @@
 | `REGISTRATION_RATE_LIMITED` | 429 | 同一来源 IP 的 600 秒注册窗口超过 10 次有效尝试，按 Retry-After 等待 |
 | `AUTH_BUSY` | 429 | 密码计算并发或等待容量已满，按 Retry-After 等待 |
 | `AUTH_REQUEST_TOO_LARGE` | 413 | 认证或用户写请求超过 16384 字节 |
-| `AVATAR_TOO_LARGE` | 413 | 头像文件超过2 MiB或multipart请求超过2 MiB+64 KiB |
-| `AVATAR_TYPE_UNSUPPORTED` | 415 | 头像文件类型不支持，选择JPG、PNG或WebP |
+| `AVATAR_TOO_LARGE` | 413 | 头像文件超过 2 MiB 或 multipart 请求超过 2 MiB+64 KiB |
+| `AVATAR_TYPE_UNSUPPORTED` | 415 | 头像文件类型不支持，选择 JPG、PNG 或 WebP |
 | `AVATAR_INVALID` | 422 | 头像为空、损坏、多帧或像素尺寸超限 |
 | `AVATAR_BUSY` | 429 | 同进程两个头像处理额度已满，稍后重试 |
 | `AVATAR_NOT_FOUND` | 404 | 未设置头像或对应文件缺失，展示默认头像 |

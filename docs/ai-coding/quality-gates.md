@@ -1,49 +1,50 @@
 # 质量门禁
 
-## 当前已有的检查能力
+先运行与改动相关的检查，报告实际结果。下面说明现有检查能证明什么，以及哪些仍需真实环境验收。
 
-| 能力 | 当前状态 | 使用方式/限制 |
+## 常用命令
+
+| 范围 | 执行目录与命令 | 前提 |
 | --- | --- | --- |
-| Ruff | `backend/pyproject.toml` 配置了规则并在 `dev` 依赖组声明 Ruff | 在 `backend/` 运行 `uv run ruff check app scripts tests`。 |
-| 后端测试 | `backend/tests/` 使用 pytest 覆盖双文档输入、DOCX 解析、条款分组、跨请求并发额度与取消清理、发现定位、报告、完整审核图和 ASGI 入口及启动就绪 | 在 `backend/` 运行 `uv run pytest`。通过假运行时、假模型和假检索器隔离外部服务，不消耗真实账户额度。 |
-| 前端类型检查与构建 | `frontend/package.json` 的 `build` 脚本运行 `vue-tsc -b && vite build` | 在 `frontend/` 运行 `pnpm build`。当前没有单独 lint 或前端测试脚本。 |
-| 依赖锁定 | `backend/uv.lock`、`frontend/pnpm-lock.yaml` 已跟踪 | 依赖声明变化时检查对应锁文件；不得只改锁文件来掩盖依赖决策。 |
-| CI | `.github/workflows/ci.yml` 在 Pull Request 和推送到 `main`、`dev` 时运行检查 | 后端覆盖 Python 3.12/3.13；前端执行冻结锁文件安装和生产构建。 |
+| 后端静态检查 | `backend/`：`uv run ruff check app scripts tests` | 已安装开发依赖 |
+| 后端测试 | `backend/`：`uv run pytest` | 数据库用例须显式设置专用 `TEST_DATABASE_URL`，见[数据库测试](../database.md#测试与维护) |
+| 前端回归 | `frontend/`：`node --test` | 使用 Node 内置测试及已有 Vue/TypeScript |
+| 前端类型与构建 | `frontend/`：`pnpm build` | 脚本为 `vue-tsc -b && vite build` |
+| 纯文档 | 核对链接、路径、命令、规则与实现的一致性 | 无需运行无关业务测试 |
 
-## 代码任务的检查要求
+依赖锁为 `backend/uv.lock` 和 `frontend/pnpm-lock.yaml`。准备开发依赖使用 `uv sync --locked --group dev`，前端使用冻结锁文件安装；依赖变更仍需审批。当前没有独立前端 lint/test 脚本、浏览器端到端测试框架或依赖漏洞扫描。
 
-- 新功能应添加与用户场景一致的测试；Bug 修复尽可能先建立能失败的复现，再验证修复。
-- 优先运行改动对应的检查，并在汇报中写明实际命令、结果和未覆盖范围。
-- 检查失败时调查原因并报告；不得删除有效测试、降低断言或改变输入数据来制造通过结果。
-- 测试数量不是覆盖质量的替代指标。关键验收应验证可观察行为、边界条件和错误路径。
-- 只改文档时进行链接、路径、命令和规则一致性检查；除非任务明确要求，不运行与文档改动无关的测试。
+## CI 实际运行什么
 
-## 当前覆盖范围与后续扩展
+[ci.yml](../../.github/workflows/ci.yml) 在 Pull Request 和推送到 main/dev 时执行：
 
-当前测试覆盖制度审核应用服务、真实编译审核图及 ASGI 生命周期；模型和检索器使用受控替身。未覆盖真实模型准确率、上下文上限、真实 RAGFlow 网络调用、账户额度和生产吞吐，这些事项需在对应服务可用时另行验收。
+- 后端：Python 3.12、3.13，专用 PostgreSQL 18 测试库，Ruff 和 pytest。
+- 前端：冻结锁文件安装，以下 4 个 Node 测试文件，再运行生产构建。
 
-账号回归覆盖公开注册、登录撤销、强制改密、来源/CSRF/上下文、admin管理、会话归属、删除凭据和SSE重新授权；数据库用例使用显式专用PostgreSQL测试库，准备与边界见[数据库说明](../database.md#测试与维护)。前端另运行 `node --test src/features/auth/useAuth.test.cjs src/features/auth/appLifecycle.test.cjs src/api/auth.test.cjs`，使用真实Vue KeepAlive验证同身份导航保留和身份代次销毁，并验证刷新指针、退出乱序与旧响应丢弃。多标签页和离线退出另做实际浏览器验收，不能用Node替身代替。
+```powershell
+node --test src/features/conversation-assistant/useConversation.test.cjs src/features/auth/useAuth.test.cjs src/features/auth/appLifecycle.test.cjs src/api/auth.test.cjs
+```
 
-用户资料扩展可独立运行 `uv run pytest --noconftest tests/test_user_profile_schema.py tests/test_user_profile_sql.py tests/test_user_profile_store.py tests/test_user_profile_api.py tests/infrastructure/test_avatar_store.py tests/test_user_avatar_service.py tests/test_user_avatar_api.py`：使用内存事务替身、真实HTTP守卫、Pillow与临时目录，SQL仅文本检查，不连接数据库。前端新增 `src/api/users.test.cjs`、`src/features/auth/ProfileForm.test.cjs`、`UserAvatar.test.cjs`、`UserManagement.test.cjs`，通过已有Vue编译器/renderer覆盖差量保存、草稿保留、头像URL释放和旧目标结果过滤，不新增测试框架。上述检查不代表SQL实际执行或真实数据库持久化联调通过。
+CI 没有运行其余资料、头像和账号组件测试；本地 `node --test` 可运行全部现有前端回归。可按文件路径单独运行相关用例。
 
-账号界面另有`AccountMenu.test.cjs`、`AvatarCropper.test.cjs`，与ProfileForm回归覆盖取消退出、确认后才上传、原图超限、裁剪坐标/缩放/边缘限制、坏图及迟到bitmap释放。在`frontend/`执行`node --test`可运行全部Node回归；Canvas和原生dialog的真实浏览器行为及手机布局另行检查，Node宿主替身不代表实际像素渲染通过。
+## 已有覆盖与验收边界
 
-文档导出测试另覆盖输入与大小边界、内容和样式结构、跨请求共享并发、取消及进程回收、流式 JSON 和无模型配置的独立入口。`tests/test_document_export_integration.py` 使用已声明 Python 依赖的真实包内 Pandoc，不消耗模型额度；发布验收必须实际运行，不能用缺依赖跳过代替通过。Word/WPS 的实际分页、字体替代和复杂表格布局仍须单独进行目视验收，结构测试通过不表示版式已验收。
+| 领域 | 现有检查 | 仍需另行验收 |
+| --- | --- | --- |
+| 会话与记忆 | 真实编译图、意图/补参、材料引用、摘要预算、父子调用、幂等、分页；失败不推进成功位置 | 真实模型识别和摘要质量、上下文上限、账户额度 |
+| 制度审核 | DOCX 解析、双模式、分组顺序、共享额度、取消、报告与 HTTP 入口；模型/检索使用替身 | 真实模型准确性、RAGFlow 网络、生产吞吐 |
+| 数据库与删除 | 专用库随机 schema、官方 setup/checkpointer、事务、归属、回滚、重启与清理重试；文件用临时目录 | 生产备份恢复与容量 |
+| 账号与头像 | 登录/撤销、强制改密、CSRF/来源/身份上下文、资料差量、图片处理、状态未知后的恢复 | 真实多标签页、离线退出、浏览器缓存与身份切换 |
+| SSE | 标准帧、分块、快照、重连不重跑、多订阅、取消唤醒、临时容量 | 真实模型分块时序与代理及时转发 |
+| 前端交互 | 会话切换、草稿隔离、迟到响应、取消与删除重试；资料/头像组件用受控宿主 | 输入法、键盘、手机布局、Canvas、原生 dialog 和实际像素效果 |
+| Word 导出 | 输入/输出限制、内容样式、并发、取消、进程回收及包内 Pandoc 集成 | 目标 Word/WPS 的分页、字体替代、复杂表格 |
 
-前端会话状态另有 Node 内置回归测试：在 `frontend/` 运行 `node --test src/features/conversation-assistant/useConversation.test.cjs`，复用现有 Vue/TypeScript，覆盖网络响应丢失、5xx 幂等标识、会话记录切换、草稿和附件隔离、停用后的迟到响应、切换期间停止的竞态、每会话失败重试目标，以及 SSE 增量、快照替换、断线恢复、原生 EventSource 重连上限和关闭，不依赖新增测试框架。当前没有通用前端测试框架、已纳入仓库的浏览器端到端测试、独立类型检查任务或依赖漏洞扫描。
+发布验收必须实际运行 `tests/test_document_export_integration.py`，不能把缺依赖跳过算作通过。受控浏览器响应不代表后端、模型、知识库或 Word 转换已联调；原型截图与正式页面截图也须分开说明。
 
-SSE 后端回归覆盖实际 LangChain 模型分块在结束前到达、意图输出过滤、审核阶段与完整结果、标准事件帧、重连快照、多订阅不重复执行、取消/到期/关闭唤醒和临时文本容量回收。HTTP 测试通过受控模型验证协议；真实代理与模型分块时序需小规模开发环境联调，不能把内存生成器通过等同于网络代理已及时转发。
+当前已知检查缺口：`tests/test_user_profile_sql.py` 引用了仓库中不存在的 `backend/database/add_user_profile_fields.sql`。不能据目录文档宣称已有资料增量迁移；全量测试结果须如实报告，缺失资产需另行处理。
 
-前端视觉与交互改版可使用独立浏览器和受控 HTTP 响应检查真实 Vue 页面、请求结构、响应恢复、完整 Markdown 与导出失败重试；这类检查不证明真实模型、后端 DOCX 解析、知识库连通或 Word 转换已联调通过。截图验收应区分已确认的独立设计预览与正式前端页面。
+## 交付要求
 
-## 变更范围审查
+新功能检查用户场景，修复问题尽可能先建立失败复现；验证可观察行为、边界和错误路径，不用测试数量替代覆盖质量。失败应调查，不删有效测试、不降断言、不改数据来凑通过。
 
-会话永久删除回归使用真实 PostgreSQL 专用测试 schema 和临时目录，覆盖外键删除顺序、事务回滚、等待原事务的提交复核、文件与凭据部分失败、进程重建恢复、客户端取消、服务关闭和上传/提交竞态。前端 Node 用例覆盖204空响应、空历史不隐式创建、当前/非当前删除、草稿及SSE保留、迟到历史过滤、多目标删除重试和刷新恢复。浏览器验收使用隔离页面与受控HTTP检查桌面、390px移动布局、键盘确认/Esc取消、文字标题、409及清理未完重试；这不代表已对用户实际会话执行删除，也不代替真实模型或外部服务验收。
-
-会话测试使用受控模型覆盖意图/动作非法组合、无附件聊天、粘贴原文、文档引用、上下文预算、审核补参和转移话题、幂等、取消以及完整注册表到制度审核图的调用链。替身测试不能证明真实模型语义识别准确率；真实模型、浏览器键盘/输入法、网络中断与手机布局仍需分别验收。
-
-会话重构后另覆盖真实编译会话图的条件分支、并发调用隔离、父子共用运行时及审核图只构建一次；公共预算按最终 JSON 转义大小检查。存储测试覆盖持久历史、原文按 ID 读取与失败轮次隔离；服务测试覆盖不可中止解析线程的重复取消与关闭等待、结果容量失败不推进记忆指针。`tests/test_conversation_architecture.py` 检查明确的依赖边界和旧路径清理。模型、RAG 和账户能力仍由受控替身隔离，不据此宣称真实服务验收通过。
-
-短期记忆另覆盖真实 PostgreSQL 官方 setup、业务初始化回滚重试、无建表启动检查、两个 Agent 图共享 saver 且策略隔离、官方 thread 删除；真实编译图覆盖只传新消息、从成功位置分支、摘要失败重试和完整原文审核。服务层覆盖检查点删除失败的凭据保留、重复请求及重建恢复。模型仍受控替代；测试不表示真实模型摘要质量、生产吞吐或远端代理时序已验收。
-
-每次任务完成前查看 diff，确认改动集中于任务需要的文件；检查意外修改的依赖锁、配置、数据库相关文件、生成产物、密钥和无关文档。发现额外修改时先还原到本任务预期范围，不能覆盖用户已有改动。
+完成前检查 diff：只保留本任务必要改动，核对密钥、配置、锁文件、数据库资产和生成物，不能覆盖用户已有工作。汇报分清已实现、已运行及结果、未运行和未验收，不能将替身通过或未执行写成真实环境验收通过。

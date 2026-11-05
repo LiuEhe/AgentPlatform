@@ -1,10 +1,122 @@
 # 数据库设计与初始化
 
-项目使用 PostgreSQL 18、asyncpg 0.32.0，保存账号、登录会话和业务历史；上传原件与解析正文保存在本地文件目录。业务字段、类型、约束和索引以 [schema_v4.sql](../backend/database/schema_v4.sql) 为准；官方检查点表由其库维护。
+项目使用 PostgreSQL 18。数据库保存账号、登录和完整会话历史；附件与头像保存在本地目录。应用启动只检查，不自动建表或迁移。
+
+首次部署读“连接与配置”和“初始化”；日常运维读“存储与维护”；查字段时跳到[表结构](#表结构)。业务结构以 [schema_v4.sql](../backend/database/schema_v4.sql) 为准，官方记忆表由 LangGraph 库维护。
+
+## 连接与配置
+
+本地默认地址为 `127.0.0.1:5432`，用户 `postgres`；应用库 `agent_platform`，专用测试库 `agent_platform_test`。按实际环境调整，连接串密码中的保留字符需 URL 编码。
+
+| 配置 | 用途与默认值 |
+| --- | --- |
+| `DATABASE_URL` | 应用连接串，放在被 Git 忽略的 `backend/.env` |
+| `TEST_DATABASE_URL` | 测试终端显式提供，只允许 `agent_platform_test`，不回退应用库 |
+| `DATABASE_POOL_MIN_SIZE/MAX_SIZE` | 业务池和检查点池各默认 1 / 5；另有一个独立运行权连接，总连接预算需一起计算 |
+| `DATABASE_TIMEOUT_SECONDS` | 数据库操作超时，默认 5 秒 |
+| `DOCUMENTS_DIR` | 附件根目录，默认 `backend/documents` |
+| `AVATARS_DIR` | 头像根目录，默认 `backend/avatars` |
+
+两个文件目录的相对路径均按 `backend/` 解析。
+
+## 初始化
+
+**仅用于新环境。** 已有业务表不能重复初始化；当前结构为 v4，没有旧版数据升级或兼容入口。
+
+1. 在 PostgreSQL 的 `postgres` 管理库执行 [create_databases.sql](../backend/database/create_databases.sql)，创建应用库和测试库。
+2. 配置 `backend/.env`，确认 `DATABASE_URL` 指向目标应用库。
+3. 在 `backend/` 执行：
+
+```powershell
+uv run python -m scripts.manage_users initialize
+```
+
+按隐藏输入提示设置并确认管理员密码，长度 6–20 字符。完成后按[后端说明](../backend/README.md#安装与启动)启动；Windows 须保留 Selector loop 参数。
+
+推荐用管理命令完成初始化。直接执行 `schema_v4.sql` 会写入开发/测试默认管理员账号；管理命令会将其替换为现场输入的密码，且一并创建官方检查点表。
+
+初始化先执行官方 `setup()`，再用业务事务建表并设置密码。两步并非一个原子事务：若失败后只残留官方表，可重试；已有业务表或未知表时拒绝初始化。旧环境需另建空库，或经明确批准后重建，不能直接覆盖原数据。
+
+### 补建官方检查点表
+
+已直接执行 `schema_v4.sql`、启动提示“检查点结构尚未初始化”时，先停后端，再在 `backend/` 执行：
+
+```powershell
+uv run python -m scripts.manage_users setup-checkpoints
+```
+
+只调用官方 `setup()` 补建或更新检查点表，可重复执行，保留业务表和管理员密码。这不是用户资料字段迁移命令。
+
+### admin密码恢复
+
+停服务、核对目标库后，在 `backend/` 执行：
+
+```powershell
+uv run python -m scripts.manage_users reset-admin
+```
+
+命令修改内置 admin 密码、清除强制改密标记并撤销其全部登录，不改变会话归属。
+
+如果已有业务表但缺少 admin，不能重复 initialize。仅在确认目标库确实没有该记录、后端保持停止时，执行：
+
+```sql
+INSERT INTO users (
+    user_id, username, display_name, password_hash,
+    role, status, must_change_password
+)
+VALUES (
+    gen_random_uuid(), 'admin', '管理员', 'RESET_REQUIRED',
+    'admin', 'active', true
+);
+```
+
+`RESET_REQUIRED` 只是占位值，不能登录。**插入后立即运行 reset-admin 设置真实密码，再启动服务。** admin 已存在时只用密码恢复命令，不执行插入。实现见 [manage_users.py](../backend/scripts/manage_users.py)。
+
+## 存储与维护
+
+| 存在哪里 | 内容 | 实现 |
+| --- | --- | --- |
+| 业务表 | 用户、登录、会话、消息、执行状态、完整审核结果与附件引用 | [身份仓储](../backend/app/infrastructure/identity/postgres_store.py)、[会话仓储](../backend/app/infrastructure/conversation/postgres_store.py) |
+| 官方检查点表 | 图的短期消息、摘要、待补参数 | [检查点资源](../backend/app/infrastructure/conversation/checkpoints.py) |
+| 附件目录 | `<DOCUMENTS_DIR>/<agent_id>/<session_id>/<file_id>/source.docx` 和 `content.md` | [文件存储](../backend/app/infrastructure/documents/local_file_store.py) |
+| 头像目录 | `<AVATARS_DIR>/<user_id>/<uuid>.png`，通过受保护接口读取 | [头像存储](../backend/app/infrastructure/identity/avatar_store.py) |
+| 进程内存 | 活动任务、通知、SSE 临时文本与锁 | [活动资源](../backend/app/infrastructure/conversation/active_runs.py) |
+
+- **运行**：同库只允许一个应用进程；重启把未完成任务标记中断，不自动重做。历史与检查点持久化不表示任务可恢复。
+- **事务**：身份与会话仓储共享 asyncpg 池，通过 [Database/BaseDatabase](../backend/app/infrastructure/database.py) 使用同一事务完成授权与写入。模型调用期间不持有业务事务。
+- **删除**：会话接口先确认业务记录已删，再清理官方 thread 检查点、附件和凭据。清理未完保留凭据供重试；提交结果未知时保留文件待核实。只返回空 204 才算全部完成，不会清理备份或用户下载副本。
+- **备份**：停服务后，按同一备份点保存数据库、整个附件根目录（含 `.staging`、`.deletions`）和头像目录。恢复先在隔离环境演练，覆盖现有数据另行确认。
+
+失败语义见[错误码](errors.md)，数据操作遵守[风险管理](ai-coding/risk-management.md)。
+
+## 测试与维护
+
+数据库测试须在运行测试的终端显式设置 `TEST_DATABASE_URL`，库名必须为 `agent_platform_test`。未设置时相关测试失败，不会跳过或回退应用库。
+
+测试为每项用例创建 `history_test_<uuid>` schema，以当前初始化流程准备表和测试身份，结束只清理本次 schema；文件用临时目录，不操作真实用户文件。完成上述建库后，在配置好测试连接串的终端、`backend/` 目录运行 `uv run pytest`。
+
+结构变化须同步 SQL、实现、测试和本文。命令、已知检查缺口与验收边界见[质量门禁](ai-coding/quality-gates.md)。
+
+## 官方短期记忆表
+
+锁定 `langgraph-checkpoint-postgres==3.2.0`、`langgraph-checkpoint==4.3.0`、Psycopg 3.2.12 / pool 3.2.7，见 [uv.lock](../backend/uv.lock)。
+
+官方 `AsyncPostgresSaver.setup()` 在相同 schema 维护以下表。字段和索引以安装包 `BasePostgresSaver.MIGRATIONS` 为准，项目不复制 DDL：
+
+| 表 | 用途 |
+| --- | --- |
+| `checkpoint_migrations` | 官方结构版本 |
+| `checkpoints` | 图检查点元数据和状态版本 |
+| `checkpoint_blobs` | 状态通道值 |
+| `checkpoint_writes` | 节点待写记录 |
+
+官方 saver 使用独立 Psycopg 池，与业务池同库同 schema。多个助手共享 saver，thread_id 由可信 Agent ID 与规范会话 UUID 组成，各图状态和策略独立。
+
+检查点先持久化，业务事务再同时提交助手消息、完整子结果、成功状态及 `memory_checkpoint_id`。失败、取消、中断或容量拒绝不推进指针，下轮从已成功位置继续。检查点不替代完整历史和附件；删除使用官方 `adelete_thread`，不手写删表 SQL。
 
 ## 表结构
 
-以下按数据库表说明全部字段。UUID 由应用生成；`timestamptz` 表示带时区的时间，`now()` 为数据库当前时间。外键不级联删除，业务历史不自动过期。
+以下是按需查阅的字段字典。UUID 由应用生成；`timestamptz` 表示带时区的时间，`now()` 为数据库当前时间。外键不级联删除，业务历史不自动过期。
 
 ### users：用户账号
 
@@ -148,89 +260,3 @@
 | --- | --- | --- | --- |
 | `singleton` | boolean | 否 | 主键且只能为 true，保证最多一条记录 |
 | `version` | integer | 否 | 初始化版本号，当前约束为 4，初始化写入 4 |
-
-## 官方短期记忆表
-
-使用 `langgraph-checkpoint-postgres==3.2.0`、`langgraph-checkpoint==4.3.0` 和 Psycopg 3.2.12 / pool 3.2.7。官方 `AsyncPostgresSaver.setup()` 在相同 schema 创建并维护以下表，字段、主键与索引直接以安装版本的 `langgraph.checkpoint.postgres.base.BasePostgresSaver.MIGRATIONS` 为准，项目不复制 DDL：
-
-| 官方表 | 用途 |
-| --- | --- |
-| `checkpoint_migrations` | 官方 schema 迁移版本 |
-| `checkpoints` | 图检查点元数据和状态版本 |
-| `checkpoint_blobs` | 状态通道值 |
-| `checkpoint_writes` | 节点待写入记录 |
-
-资源适配见 [checkpoints.py](../backend/app/infrastructure/conversation/checkpoints.py)，官方能力见 [LangGraph 持久化](https://docs.langchain.com/oss/python/langgraph/persistence)。同一 saver 由多个会话图复用；thread_id 用可信会话记录的 Agent ID 与规范 UUID 组成，Agent 图定义自己的状态和策略。检查点不替代完整消息、附件及报告归档。
-
-官方 saver 使用独立 Psycopg 连接池，业务与身份继续共享 asyncpg 池；两种驱动遵循相同数据库、schema、运行权和关闭顺序。图执行及摘要时不持有业务事务。官方检查点先持久化，业务事务随后同时提交助手消息、完整子结果、运行成功状态与 `memory_checkpoint_id`；失败、取消、中断或容量拒绝不推进指针，下轮只从已提交位置执行。删除通过官方 `adelete_thread`，不手写删表 SQL。
-
-## 连接与配置
-
-本地数据库地址为 `127.0.0.1:5432`，用户为 `postgres`；应用库为 `agent_platform`，测试库为 `agent_platform_test`。连接串放在被 Git 忽略的 `backend/.env` 中，密码中的保留字符须 URL 编码。
-
-| 配置项 | 用途与默认值 |
-| --- | --- |
-| `DATABASE_URL` | 应用数据库连接串 |
-| `TEST_DATABASE_URL` | 测试终端显式提供，仅允许连接 `agent_platform_test` |
-| `DATABASE_POOL_MIN_SIZE` / `DATABASE_POOL_MAX_SIZE` | 业务池和检查点池各自的大小，默认 1 / 5（总连接额度需计两池） |
-| `DATABASE_TIMEOUT_SECONDS` | 数据库操作超时，默认 5 秒 |
-| `DOCUMENTS_DIR` | 附件根目录，默认 `backend/documents`；相对路径按 `backend` 解析 |
-| `AVATARS_DIR` | 用户头像根目录，默认 `backend/avatars`；相对路径按 `backend` 解析，与数据库共同备份 |
-
-## 初始化
-
-仅新环境执行：先在 `postgres` 管理库运行 [create_databases.sql](../backend/database/create_databases.sql)，再配置 `backend/.env`，在 `backend/` 目录执行：
-
-```powershell
-uv run python -m scripts.manage_users initialize
-```
-
-直接执行 `schema_v4.sql` 建表后，会自动插入开发/测试账号 `admin / 123456`，密码以 Argon2id 哈希保存。使用上述管理命令时，隐藏输入并确认 6–20 字符的管理员密码；命令先执行官方 `setup()`，再在同一业务事务中执行 SQL，并将默认管理员密码替换为输入值，不重复插入账号。官方 setup 使用 autocommit，不能与业务事务宣称原子：若业务初始化失败，仅残留官方表时可重试 initialize；出现已有业务表或其他未知表时拒绝初始化。应用启动只检查管理员及官方表是否存在，不调用 setup 或自动迁移。
-
-本次仅支持空环境初始化，不提供 v3 数据迁移或兼容分支；现有测试环境请另建空数据库或在明确确认清理范围后重建，不能在旧表上重复初始化。此代码变更不会自动清空现有库。Windows 启动须使用后端 README 中的 Selector loop 参数，官方异步驱动不支持 Proactor。
-
-### 现有 v4 库补充用户资料列
-
-如果已直接执行 `schema_v4.sql`，但启动报“检查点结构尚未初始化”，先停止后端，再在 `backend/` 运行 `uv run python -m scripts.manage_users setup-checkpoints`。该命令仅调用官方 `setup()` 补建或更新检查点表，可重复执行，保留业务表和管理员密码。
-
-### admin密码恢复
-
-停服务并核对目标库后，在 `backend/` 执行 `uv run python -m scripts.manage_users reset-admin`。命令修改内置管理员密码并撤销其全部登录，不改变会话归属。实现见 [manage_users.py](../backend/scripts/manage_users.py)。
-
-如果数据库已初始化但 `users` 表中缺少 `admin` 记录，`initialize` 会因已有业务表而拒绝重复初始化。仅在确认连接的是目标应用库且没有 `admin` 记录后，保持后端停止，在该数据库执行以下 SQL：
-
-```sql
-INSERT INTO users (
-    user_id, username, display_name, password_hash,
-    role, status, must_change_password
-)
-VALUES (
-    gen_random_uuid(), 'admin', '管理员', 'RESET_REQUIRED',
-    'admin', 'active', true
-);
-```
-
-`RESET_REQUIRED` 是临时占位值，不是可用于登录的密码哈希。插入后不要启动后端；立即在 `backend/` 运行 `uv run python -m scripts.manage_users reset-admin`，按提示设置真实密码。该命令会写入应用使用的密码哈希并清除 `must_change_password` 标记；完成后再启动服务。若 `admin` 记录已存在，不执行上述插入，直接使用密码恢复命令。
-
-## 存储与维护
-
-| 项目 | 说明 |
-| --- | --- |
-| 数据库访问 | [IdentityStore](../backend/app/infrastructure/identity/postgres_store.py) 负责用户与登录记录，[PostgresConversationStore](../backend/app/infrastructure/conversation/postgres_store.py) 负责业务会话历史；两者复用同一个连接池，统一由 [Database](../backend/app/infrastructure/database.py) 管理连接 |
-| 事务一致性 | 身份校验与会话写入需要一起完成时，使用同一数据库连接和事务，成功时一起提交，失败时一起回滚 |
-| 运行方式 | 同库仅允许一个应用进程；重启将未完成任务标为中断，不自动重做 |
-| 附件位置 | `<DOCUMENTS_DIR>/<agent_id>/<session_id>/<file_id>/` 下保存 `source.docx` 和 `content.md` |
-| 用户头像 | `<AVATARS_DIR>/<user_id>/<uuid>.png`；头像经有权限的接口读取，不开放静态目录；备份和恢复须包含此目录 |
-| 文件操作 | 暂存目录为 `.staging`，删除凭据目录为 `.deletions`；数据库提交未知时保留文件待核实 |
-| 永久删除 | 通过会话删除接口依次清理业务历史、对应 thread 检查点和附件；检查点或附件清理失败保留凭据可重试，不清理备份或用户下载副本 |
-| 备份恢复 | 停服务后共同备份数据库与整个附件根目录（含 `.staging`、`.deletions`），恢复时使用同一备份点；先在隔离环境演练，覆盖已有数据须另行确认 |
-
-会话与附件操作分别见 [postgres_store.py](../backend/app/infrastructure/conversation/postgres_store.py) 和 [local_file_store.py](../backend/app/infrastructure/documents/local_file_store.py)，失败响应见[错误码](errors.md)。
-
-头像文件操作见 [avatar_store.py](../backend/app/infrastructure/identity/avatar_store.py)。
-
-## 测试与维护
-
-数据库测试显式使用 `TEST_DATABASE_URL`，不回退应用库；每项测试创建随机 `history_test_<uuid>` schema，通过当前初始化流程准备结构与身份，只清理本次 schema。文件测试使用临时目录，不操作实际用户文件。
-
-结构变化时同步更新 SQL、相关实现、测试和本文；检查要求见[质量门禁](ai-coding/quality-gates.md)，数据操作遵守[风险规则](ai-coding/risk-management.md)。

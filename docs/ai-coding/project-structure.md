@@ -1,119 +1,95 @@
 # 项目架构目录
 
-- 更新日期：2026-11-05。
-- 本文件集中维护项目目录；[AGENTS.md](../../AGENTS.md)是阅读入口，新增或迁移模块前先阅读本文和[架构规则](architecture-rules.md)。
-- 当前目录按源码核对，包含账号、会话归属和统一数据库基类；维护资产包含当前结构初始化、管理员密码恢复及现有v4用户资料列增量。
+更新日期：2026-11-05。本文集中维护当前目录，省略缓存、依赖、运行数据和任务过程材料；其他文档只链接，不重复维护目录树。
 
 ## 当前目录
 
-以下为主要源码、部署资产与治理文档的目录摘要，省略缓存、依赖和任务过程材料。
-
 ```text
-Agent/
-├── AGENTS.md                             # 协作规则与按场景阅读入口
-├── README.md                             # 当前能力、限制和启动入口
+AgentPlatform/
+├── AGENTS.md                         # 协作规则与阅读入口
+├── README.md                         # 功能、启动与文档导航
 ├── backend/
 │   ├── app/
-│   │   ├── api/                          # FastAPI会话、审核、导出、目录、流程、健康接口
-│   │   ├── core/                         # 配置、错误响应、日志与中立观测接口
-│   │   ├── services/                     # 应用用例，模块按 *_service.py 命名
-│   │   ├── infrastructure/
-│   │   │   ├── database.py               # 统一查询/事务基类、共享连接池与运行权
-│   │   │   ├── identity/                # 账号仓储、密码、尝试计数与头像图片/文件
-│   │   │   ├── conversation/             # PostgreSQL归档、官方检查点资源与活动资源
-│   │   │   ├── documents/                # 本地原件、解析正文与删除凭据
-│   │   │   ├── llm/                      # 模型客户端创建与适配
-│   │   │   ├── ragflow/                  # 外部知识库适配
-│   │   │   ├── langfuse/                 # 追踪与Prompt适配
-│   │   │   └── pandoc.py                 # 文档转换进程适配
+│   │   ├── api/                      # HTTP、身份依赖与上传接收
+│   │   ├── core/                     # 配置、错误、日志、中立观测接口
+│   │   ├── services/                 # 应用用例，文件名 *_service.py
+│   │   ├── runtime/                  # 通用 Agent 注册与执行
+│   │   ├── schemas/                  # 共享记录与接口契约
 │   │   ├── agents/
-│   │   │   ├── conversation_assistant/   # 会话Agent的适配、图、节点、提示与审核工具
-│   │   │   └── institution_review/       # 制度审核Agent及Send条款子图
+│   │   │   ├── conversation_assistant/ # 会话图、节点、提示与审核调用
+│   │   │   └── institution_review/   # 审核图、条款子图、节点与提示
 │   │   ├── nodes/
-│   │   │   ├── document/                 # 公共DOCX解析与格式转换
-│   │   │   └── llm/                      # 公共上下文预算、分片摘要与Prompt契约
-│   │   ├── runtime/                      # 通用注册、调用上下文与执行
-│   │   ├── schemas/                      # 应用中立记录与HTTP契约
-│   │   └── main.py                       # 资源与应用服务装配、生命周期
+│   │   │   ├── document/             # 公共 DOCX 解析与格式转换
+│   │   │   └── llm/                  # 公共预算、摘要与 Prompt 契约
+│   │   ├── infrastructure/
+│   │   │   ├── database.py           # 连接池、运行权、查询与事务
+│   │   │   ├── conversation/         # 历史仓储、官方检查点、活动资源
+│   │   │   ├── identity/             # 账号、密码、尝试计数与头像
+│   │   │   ├── documents/            # 原件、解析正文与删除凭据
+│   │   │   ├── llm/                  # 模型客户端适配
+│   │   │   ├── ragflow/              # 知识库适配
+│   │   │   ├── langfuse/             # 追踪与 Prompt 适配
+│   │   │   └── pandoc.py             # 文档转换进程
+│   │   └── main.py                   # 资源装配与生命周期
 │   ├── database/
-│   │   ├── create_databases.sql          # 显式新建应用库与专用测试库
-│   │   ├── schema_v4.sql                 # 当前结构，由维护脚本在事务内执行
-│   │   └── add_user_profile_fields.sql   # 现有v4资料列增量；维护者核对后手动执行
-│   ├── scripts/                          # 显式运维和实验入口
-│   ├── tests/                            # pytest、受控模型与真实隔离数据库回归
-│   ├── documents/                        # 运行时附件根，不纳入Git
-│   ├── avatars/                          # 运行时用户头像根，不纳入Git
-│   └── README.md                         # 后端配置、启动与接口说明
+│   │   ├── create_databases.sql      # 创建应用库与专用测试库
+│   │   └── schema_v4.sql             # 新环境初始化结构
+│   ├── scripts/                      # 初始化、密码恢复、Prompt 与实验
+│   ├── tests/                        # pytest、受控模型、隔离数据库
+│   ├── documents/                    # 运行时附件，不纳入 Git
+│   ├── avatars/                      # 运行时头像，不纳入 Git
+│   └── README.md                     # 后端配置、启动与接口
 ├── frontend/
 │   ├── src/
-│   │   ├── api/                          # HTTP与SSE客户端
+│   │   ├── api/                      # HTTP/SSE 客户端
 │   │   ├── features/
-│   │   │   ├── auth/                     # 认证状态、账号表单和用户管理
-│   │   │   ├── conversation-assistant/   # 会话交互、快照、草稿、文件与流式状态
-│   │   │   └── institution-review/       # 审核上传、报告与Word下载
-│   │   ├── components/                   # 实际共享的品牌与工作台组件
-│   │   ├── views/                        # 路由页组合
-│   │   ├── router/                       # Vue Router
-│   │   ├── App.vue                       # 公共外壳与会话KeepAlive
-│   │   ├── main.ts                       # 前端启动
-│   │   └── style.css                     # 设计tokens和全局样式
-│   └── README.md                         # 前端运行、交互与检查说明
+│   │   │   ├── auth/                 # 认证、资料、头像与用户管理
+│   │   │   ├── conversation-assistant/ # 会话、草稿、附件与流式状态
+│   │   │   └── institution-review/    # 审核上传、报告与 Word 下载
+│   │   ├── components/               # 品牌与共享工作台组件
+│   │   ├── views/                    # 页面组合
+│   │   ├── router/                   # 路由与守卫
+│   │   ├── App.vue                   # 公共外壳与助手 KeepAlive
+│   │   ├── main.ts                   # 启动入口
+│   │   └── style.css                 # 全局样式与设计变量
+│   └── README.md                     # 页面、开发与交互
 ├── docs/
-│   ├── database.md                       # 当前数据库与文件持久化说明
-│   ├── errors.md                         # 接口错误码
+│   ├── database.md                   # 数据库操作与字段字典
+│   ├── errors.md                     # 错误与恢复方式
 │   └── ai-coding/
-│       ├── project-structure.md          # 本文件：项目架构目录
-│       ├── architecture-rules.md         # 当前调用关系、职责和依赖边界
-│       ├── governance.md                 # 治理优先级与变更机制
-│       ├── development-workflow.md       # 开发、验证与交付流程
-│       ├── context-management.md         # 长期与任务上下文
-│       ├── quality-gates.md              # 检查能力与验收边界
-│       └── risk-management.md            # 数据、依赖、配置与外部操作风险
-└── .github/workflows/ci.yml               # 后端检查/测试与前端构建
+│       ├── project-structure.md      # 当前目录（本文）
+│       ├── architecture-rules.md     # 职责与依赖边界
+│       ├── governance.md             # 优先级与变更确认
+│       ├── development-workflow.md   # 开发与交付
+│       ├── context-management.md     # 长期文档与任务恢复
+│       ├── quality-gates.md          # 检查与验收边界
+│       └── risk-management.md        # 数据、安全与外部操作
+└── .github/workflows/ci.yml           # 后端检查、前端回归子集与构建
 ```
 
-当前使用 PostgreSQL，账号、登录与会话拥有者保存在数据库，附件正文存本地文件；活动执行/SSE临时文本仍在单进程内存。应用启动不读取或限制数据库结构版本号。同库只允许一个应用实例。会话图已采用官方 PostgreSQL checkpointer 保存短期记忆；没有引入ORM、Redis、消息队列或长期 Store。新环境显式初始化当前结构，已有库不重复初始化；旧版升级入口已移除。
+## 关键实现位置
 
-## 账号与数据库模块职责
+以下均为当前实现，职责边界以[架构规则](architecture-rules.md)为准。
 
-以下模块已实现，均位于现有一级模块内。
-
-| 位置 | 职责与实际调用方 |
+| 要找什么 | 位置与调用关系 |
 | --- | --- |
-| `backend/app/infrastructure/database.py` | BaseDatabase封装查询、执行与绑定同一连接的事务；Database拥有共享池、运行权和生命周期。只有该模块直接使用asyncpg，仓储继承基类，维护脚本和Python数据库测试引用基类 |
-| `backend/app/infrastructure/conversation/postgres_store.py` | 会话仓储继承BaseDatabase，增加可信拥有者过滤；业务SQL、DTO映射和所有权判断保留在仓储 |
-| `backend/app/infrastructure/identity/postgres_store.py` | 身份仓储继承BaseDatabase，维护users/auth_sessions、注册与撤销事务；账号服务和同事务授权回调使用 |
-| `backend/app/infrastructure/identity/avatar_store.py` | 受限本地头像存储；输入可信用户ID、文件名与字节，借Pillow验证/归一化为PNG，输出相对路径或图片字节；用户服务调用，不处理HTTP或账号权限 |
-| `backend/app/infrastructure/identity/passwords.py` | 复用密码库与有界线程计算；账号服务和显式管理脚本使用，不自行实现密码算法 |
-| `backend/app/infrastructure/identity/auth_limits.py` | 有界登录失败与注册尝试计数；AuthService使用 |
-| `backend/app/services/auth_service.py` | 公开注册、登录、身份查询、退出、改密及尝试策略；认证API使用 |
-| `backend/app/services/user_service.py` | 本人资料和头像用例、同进程头像额度与取消收尾、管理员只读资料和既有账号管理；依赖身份仓储/头像文件实现，用户API使用 |
-| `backend/app/api/auth.py`、`users.py` | HTTP、Cookie、来源/CSRF/上下文与身份依赖；users内局部ASGI适配限制头像上传总量并复用官方multipart解析，普通账号JSON保持原限额；业务规则不进入Agent |
-| `backend/app/schemas/identity.py` | 中立账号/身份记录与公开请求响应；内部密码哈希不进入公开View |
-| `backend/database/schema_v4.sql` | 新环境当前结构初始化资产；不在应用启动时执行 |
-| `backend/scripts/manage_users.py` | 当前 v4 结构初始化与 admin 密码恢复；业务 SQL 经 BaseDatabase，官方 setup 经 CheckpointResources，密码隐藏输入 |
-| `frontend/src/features/auth/` | 注册/登录/资料/改密/用户管理表单，以及认证代次、状态清理和跨标签页重新核验；UserAvatar复用受保护blob读取，ProfileForm与管理详情隔离草稿/只读数据；AvatarCropper输入File，通过原生dialog、Canvas和Pointer Events管理裁剪/bitmap生命周期，输出确认PNG或取消事件，仅供ProfileForm调用 |
-| `frontend/src/api/auth.ts`、`users.ts` | 注册、认证、个人与管理员HTTP契约，复用统一客户端 |
-| `frontend/src/views/`、`router/`、`App.vue` | 新增页面组合与守卫，身份变化时整体销毁私有KeepAlive缓存 |
+| 业务数据库 | `infrastructure/database.py` 提供 Database/BaseDatabase，身份与会话仓储共享池和事务；维护脚本及数据库测试也复用基类 |
+| 账号与资料 | `api/auth.py、users.py` → `auth_service.py、user_service.py` → `infrastructure/identity/`；共享契约在 `schemas/identity.py` |
+| 头像处理 | `identity/avatar_store.py` 接收可信用户 ID、文件名和字节，输出相对路径或图片字节；用户服务协调额度与提交，API 约束请求量 |
+| 完整会话历史 | `conversation/postgres_store.py` 保存业务历史与归属；`conversation_service.py` 协调用例，`active_runs.py` 只管进程内活动资源 |
+| 短期记忆资源 | `conversation/checkpoints.py` 接收配置/schema，提供官方 saver；应用、初始化脚本和删除用例使用，独立 Psycopg 池仅供官方 API |
+| 记忆输入输出 | `schemas/conversation_turn.py` 定义当前轮、材料 reader、成功位置和 thread_id；服务与 Agent 适配器共用 |
+| 摘要与图状态 | 公共 `nodes/llm/memory.py` 接收历史、策略和 Prompt，返回摘要及移除 ID；会话 Agent 的 `nodes/memory_summarize.py` 选择历史，`graph/state.py` 定义持久字段和本轮非持久字段 |
+| 前端账号 | `features/auth/` 管表单和身份控制；`api/client.ts、auth.ts、users.ts` 管请求；`App.vue/router/` 处理私有页面清理与守卫 |
+| 头像裁剪 | `AvatarCropper.vue` 用 dialog、Canvas、Pointer Events 将 File 转成确认 PNG 或取消事件，仅供 `ProfileForm.vue` 调用；`UserAvatar.vue` 读取受保护图片 |
+| 数据库维护 | `scripts/manage_users.py` 负责当前结构初始化、检查点建表和 admin 密码恢复，不是旧版数据迁移器 |
 
-注册只创建启用的普通用户，不签发登录、不替换原Cookie；管理员创建/重置的临时密码仍要求改密。chat_sessions.user_id是不可变拥有者，子对象经会话继承；admin角色不绕过他人正文权限。原会话和稳定附件路径保留。
+表内后端路径相对 `backend/app/`（脚本相对 `backend/`），前端路径相对 `frontend/src/`。
 
-两个仓储必须共享同一Database资源，跨仓储授权和写入使用同一BaseDatabase事务对象；不能按子类各建池，不能在业务事务中另取连接，也不能保留业务 driver 旁路。官方 checkpointer 作为受限例外由独立 Psycopg 池承载，只用于官方检查点 API，不开放业务 SQL。用户/会话策略留在仓储与服务，Agent/runtime不依赖账号或存储。详细约束见[架构规则](architecture-rules.md)，持久化见[数据库说明](../database.md)，对外失败语义见[错误码](../errors.md)。
-
-## 短期记忆模块职责
-
-| 位置 | 职责、输入输出、依赖及实际调用方 |
-| --- | --- |
-| `backend/app/infrastructure/conversation/checkpoints.py` | 输入配置/schema，输出官方 saver；依赖 Psycopg pool 与 AsyncPostgresSaver，应用装配、维护初始化和删除用例调用；统一开关池、就绪检查、官方 thread 删除及 Windows loop factory |
-| `backend/app/schemas/conversation_turn.py` | 当前用户消息、确认位置、稳定助手标识、材料目录/reader 与完成位置的中立契约；服务和 Agent 适配器使用；共享 thread_id helper 校验 Agent ID 和 UUID |
-| `backend/app/nodes/llm/memory.py` | 输入 Agent 已选择的完整旧轮次、策略、旧摘要和 Prompt，输出摘要、覆盖序号及待移除 ID；复用公共预算和模型调用，不决定审核业务；会话图摘要节点调用 |
-| `backend/app/agents/conversation_assistant/nodes/memory_summarize.py` | 根据当前助手策略选择旧轮次，调用公共摘要，原子返回摘要和 RemoveMessage 更新；材料 ID 与待补参留在自身状态 |
-| `backend/app/agents/conversation_assistant/graph/state.py` | 官方 add_messages 通道、摘要、覆盖序号、材料目录、待补参和完成 run_id；模型上下文、完整报告及本轮临时对象使用 UntrackedValue，不进入持久通道 |
-| `backend/app/services/conversation_service.py` | 读取当前轮与按需原文，透传授权 reader；在归档事务提交完成位置；删除和恢复按可信 Agent/session 身份操作官方 saver；不含具体助手记忆策略 |
+当前已使用 PostgreSQL、官方会话 checkpointer 和本地文件；没有 ORM、Redis、消息队列或长期 Store。活动执行仍在单进程内，应用启动不按结构版本号迁移，旧版升级入口已移除。备份、初始化与恢复限制见[数据库说明](../database.md)。
 
 ## 维护方式
 
-- 项目目录在本文集中维护，README和协作入口只链接，不重复维护完整目录树。
-- 新增或迁移模块时，同步职责、输入输出、依赖和实际调用方；实施后才将对应条目从拟变更移入当前目录。
-- 正式架构与运行文档应可独立阅读，只引用源码、部署资产及治理文档；任务设计与执行记录不作为长期规则的依赖入口。
-- 更新本文不等于授权源码重构、依赖安装、迁移或安全配置变更，具体操作仍按[治理流程](governance.md)与[风险规则](risk-management.md)执行。
+新增或迁移模块时，说明职责、输入输出、依赖与实际调用方；获准实施后再更新当前目录。正式说明引用源码、部署资产和治理文档，不依赖任务记录。
+
+更新本文不授权源码重构、依赖安装、迁移、删除或安全配置变更，仍按[治理流程](governance.md)和[风险管理](risk-management.md)执行。
