@@ -5,6 +5,7 @@ import { CircleQuestionMark, Network, ShieldCheck, Square } from '@lucide/vue'
 import { ApiError } from '../api/client'
 import { submitReview } from '../api/reviews'
 import ExecutionStatus from '../components/workbench/ExecutionStatus.vue'
+import ConfirmDialog from '../components/ConfirmDialog.vue'
 import ReviewReport from '../features/institution-review/ReviewReport.vue'
 import ReviewUpload from '../features/institution-review/ReviewUpload.vue'
 import type { ReviewSource, ReviewStatus, ReviewSubmission } from '../features/institution-review/types'
@@ -17,16 +18,18 @@ const statusMessage = ref('')
 const report = ref('')
 const source = ref<ReviewSource>()
 const stopped = ref(false)
-const stopDialog = ref<HTMLDialogElement>()
+const stopOpen = ref(false)
 let controller: AbortController | null = null
 function reset() {
   controller?.abort(); controller = null
+  stopOpen.value = false
   status.value = 'idle'; statusMessage.value = ''; report.value = ''; stopped.value = false
 }
 watch(agentId, reset)
-onBeforeUnmount(() => { controller?.abort(); stopDialog.value?.close() })
+onBeforeUnmount(() => { controller?.abort() })
 async function runReview(submission: ReviewSubmission) {
   if (status.value === 'submitting') return
+  stopOpen.value = false
   const request = new AbortController()
   controller = request
   status.value = 'submitting'; stopped.value = false
@@ -44,14 +47,14 @@ async function runReview(submission: ReviewSubmission) {
     status.value = 'error'
     statusMessage.value = error instanceof ApiError ? error.message : '审核未能完成，请稍后重试。'
   } finally {
-    if (controller === request) { controller = null; stopDialog.value?.close() }
+    if (controller === request) { controller = null; stopOpen.value = false }
   }
 }
 function stopWaiting() {
-  if (status.value !== 'submitting') { stopDialog.value?.close(); return }
+  if (status.value !== 'submitting') { stopOpen.value = false; return }
   controller?.abort(); controller = null
   status.value = 'idle'; stopped.value = true
-  stopDialog.value?.close()
+  stopOpen.value = false
 }
 function revise() { report.value = ''; status.value = 'idle'; statusMessage.value = '' }
 </script>
@@ -67,11 +70,13 @@ function revise() { report.value = ''; status.value = 'idle'; statusMessage.valu
     <ReviewUpload v-show="!report" :disabled="status === 'submitting'" @submit="runReview" />
     <div v-if="status === 'submitting'" class="review-waiting">
       <ExecutionStatus :status="status" :message="statusMessage" />
-      <div class="row between"><span class="muted small">停止等待不会撤回已提交的审核。</span><button class="button button-danger" type="button" @click="stopDialog?.showModal()"><Square :size="16" aria-hidden="true" />停止等待</button></div>
+      <div class="row between"><span class="muted small">停止等待不会撤回已提交的审核。</span><button class="button button-danger" type="button" @click="stopOpen = true"><Square :size="16" aria-hidden="true" />停止等待</button></div>
     </div>
     <ExecutionStatus v-else-if="status === 'error'" :status="status" :message="statusMessage" />
     <p v-if="stopped" class="inline-note" role="status">已停止等待。材料仍在当前页面，已提交的审核可能继续执行；重新提交会从头开始。</p>
     <ReviewReport v-if="report" :markdown="report" :source="source" @restart="revise" />
-    <dialog ref="stopDialog" class="confirm-dialog" aria-labelledby="stop-title"><h2 id="stop-title">停止等待报告？</h2><p>停止等待不会撤回已提交的审核。若重新提交，将从头开始。</p><div class="dialog-actions"><button class="button" type="button" @click="stopDialog?.close()">继续等待</button><button class="button button-danger" type="button" @click="stopWaiting">停止等待</button></div></dialog>
+    <ConfirmDialog id="stop-review" v-model:open="stopOpen" title="停止等待报告？" cancel-label="继续等待" confirm-label="停止等待" variant="danger" @confirm="stopWaiting">
+      <p>停止等待不会撤回已提交的审核。若重新提交，将从头开始。</p>
+    </ConfirmDialog>
   </section>
 </template>

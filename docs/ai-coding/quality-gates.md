@@ -19,13 +19,13 @@
 [ci.yml](../../.github/workflows/ci.yml) 在 Pull Request 和推送到 main/dev 时执行：
 
 - 后端：Python 3.12、3.13，专用 PostgreSQL 18 测试库，Ruff 和 pytest。
-- 前端：冻结锁文件安装，以下 4 个 Node 测试文件，再运行生产构建。
+- 前端：冻结锁文件安装，以下 8 个 Node 测试文件，再运行生产构建。
 
 ```powershell
-node --test src/features/conversation-assistant/useConversation.test.cjs src/features/auth/useAuth.test.cjs src/features/auth/appLifecycle.test.cjs src/api/auth.test.cjs
+node --test src/features/conversation-assistant/useConversation.test.cjs src/features/auth/useAuth.test.cjs src/features/auth/appLifecycle.test.cjs src/api/auth.test.cjs src/components/ConfirmDialog.test.cjs src/components/confirmationFlows.test.cjs src/features/auth/AccountMenu.test.cjs src/features/auth/UserManagement.test.cjs
 ```
 
-CI 没有运行其余资料、头像和账号组件测试；本地 `node --test` 可运行全部现有前端回归。可按文件路径单独运行相关用例。
+确认框回归覆盖取消/焦点恢复、忙碌与重复确认、删除目标、账号身份变化及过时停止提示。CI 尚未运行其余资料、头像和会话状态模块独立测试；本地 `node --test` 可运行全部现有前端回归。可按文件路径单独运行相关用例。
 
 ## 已有覆盖与验收边界
 

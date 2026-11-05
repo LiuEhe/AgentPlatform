@@ -1,0 +1,107 @@
+/* Institution review workbench, uploads and report layout. */
+.workbench-page { max-width: 1320px; padding: 24px 56px 56px; margin: auto; }
+.page-title { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 32px; }
+.page-title .eyebrow { margin-bottom: 10px; }
+.page-title h1 { font-size: 28px; }
+.page-title p { font-size: 13px; color: var(--muted); margin-top: 8px; }
+.review-grid { display: grid; grid-template-columns: minmax(0, 680px) minmax(260px, 1fr); gap: 24px; }
+.form-card { border: 1px solid var(--border); border-radius: 12px; margin: 0 0 24px; padding: 24px; min-width: 0; background: var(--surface); }
+.form-title { display: flex; align-items: center; gap: 12px; font-size: 16px; margin-bottom: 20px; }
+.step { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); font: 500 13px 'Segoe UI', sans-serif; }
+.form-note { margin-top: 12px; font-size: 11px; color: var(--muted); }
+.form-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.mode-options { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 18px; }
+.mode-card { display: flex; align-items: center; gap: 10px; padding: 14px 12px; min-height: 72px; border: 1px solid var(--border); border-radius: 9px; background: var(--canvas); cursor: pointer; }
+.mode-card.active { border-color: var(--accent); background: var(--accent-soft); }
+.mode-card.active > svg { color: var(--accent); }
+.mode-card:focus-within { outline: 2px solid var(--accent); outline-offset: 3px; }
+.mode-card strong { display: block; font-size: 13px; font-weight: 500; }
+.mode-card small { display: block; margin-top: 3px; font-size: 10px; color: var(--muted); }
+.review-file-field { min-width: 0; }
+.review-file-field:focus-within { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 10px; }
+.review-file { display: flex; align-items: center; gap: 12px; border: 1px solid var(--border); border-radius: 9px; padding: 15px; }
+.file-symbol { width: 38px; height: 42px; flex-shrink: 0; display: grid; place-items: center; border-radius: 6px; color: var(--accent); background: var(--accent-soft); }
+.file-description { flex: 1; min-width: 0; }
+.file-description strong { display: block; font-size: 12px; font-weight: 400; overflow-wrap: anywhere; }
+.file-description span { display: block; font-size: 11px; color: var(--muted); margin-top: 4px; }
+.dropzone { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; min-height: 148px; padding: 20px; text-align: center; border: 1px dashed #c7bfb0; border-radius: 10px; background: var(--canvas); cursor: pointer; }
+.dropzone > svg { color: var(--accent); }
+.dropzone strong { font-size: 13px; font-weight: 400; }
+.dropzone > span { font-size: 11px; color: var(--muted); }
+.dropzone:hover, .is-dragging .dropzone { border-color: var(--accent); background: var(--sidebar); }
+.dropzone-disabled { opacity: .65; pointer-events: none; }
+.inline-note { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; border-radius: 6px; margin-top: 16px; background: var(--accent-soft); color: #854027; font-size: 12px; }
+.inline-note > svg { margin-top: 2px; }
+.summary-card { padding: 24px; background: var(--sidebar); border-radius: 12px; min-width: 0; }
+.summary-card h2 { font-size: 16px; }
+.summary-card dl { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); padding: 16px 0; margin: 18px 0; display: grid; gap: 20px; }
+.summary-card dt { color: var(--muted); font-size: 11px; margin-bottom: 5px; }
+.summary-card dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.summary-note { display: flex; align-items: center; gap: 8px; font-size: 11px; color: #854027; }
+.output-note { padding: 26px 8px; }
+.output-note h2 { font-size: 15px; margin-bottom: 16px; }
+.output-note ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 13px; }
+.output-note li { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
+.output-note > p { font-size: 11px; color: var(--muted); margin-top: 24px; }
+.knowledge-note { display: flex; gap: 12px; padding: 20px; border: 1px solid var(--border); border-radius: 10px; font-size: 13px; }
+.knowledge-note > svg { color: var(--accent); margin-top: 3px; }
+.knowledge-note p { margin-top: 5px; color: var(--muted); font-size: 12px; }
+.review-waiting > .row { margin-top: 12px; }
+.report-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 24px; }
+.report-document-name { font-size: 13px; overflow-wrap: anywhere; }
+.report-actions { display: flex; gap: 10px; flex-shrink: 0; }
+.report-layout { display: grid; grid-template-columns: 144px minmax(0, 1fr) 240px; gap: 24px; align-items: start; }
+.report-without-source { grid-template-columns: 144px minmax(0, 1fr); }
+.report-toc { position: sticky; top: 24px; display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.report-toc .section-kicker { color: var(--muted); margin-bottom: 12px; }
+.report-toc a { padding: 8px 12px; font-size: 12px; color: var(--muted); border-radius: 6px; overflow-wrap: anywhere; }
+.report-toc a.active { color: #854027; background: var(--selection); }
+.report-toc .text-button { margin-top: 18px; align-self: start; }
+.report-paper { min-width: 0; padding: 32px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.paper-kicker { color: var(--muted); font-size: 11px; letter-spacing: .06em; }
+.report-paper > h1 { font-size: 28px; margin: 16px 0 12px; }
+.report-meta { font-size: 11px; line-height: 1.9; color: var(--muted); overflow-wrap: anywhere; border-bottom: 1px solid var(--border); padding-bottom: 24px; margin-bottom: 24px; }
+.report-source { min-width: 0; }
+.report-source .summary-card { padding: 18px; }
+.source-file { margin-top: 20px; }
+.source-file > span { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; }
+.source-file p { font-size: 12px; margin-top: 8px; overflow-wrap: anywhere; }
+.source-footnote { color: var(--muted); border-top: 1px solid var(--border); padding-top: 14px; margin-top: 18px; font-size: 10px; }
+.save-note { padding: 26px 8px; }
+.save-note > svg { color: var(--accent); margin-bottom: 12px; }
+.save-note h3 { font-size: 14px; }
+.save-note p { font-size: 11px; color: var(--muted); line-height: 1.9; margin-top: 8px; }
+.copy-fallback { margin-bottom: 20px; font-size: 12px; color: var(--muted); }
+.copy-fallback textarea { display: block; width: 100%; min-height: 140px; margin-top: 8px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+@media (max-width: 1300px) {
+  .workbench-page { padding-right: 40px; padding-left: 40px; }
+  .review-grid { grid-template-columns: minmax(0, 1fr) 300px; }
+  .report-layout { grid-template-columns: 132px minmax(0, 1fr); }
+  .report-source { display: none; }
+}
+@media (max-width: 950px) {
+  .review-grid { grid-template-columns: 1fr; }
+  .review-summary { display: none; }
+  .report-layout { grid-template-columns: 1fr; }
+  .report-toc { position: static; flex-direction: row; gap: 6px; overflow-x: auto; align-items: center; padding: 4px; }
+  .report-toc a { flex-shrink: 0; white-space: nowrap; }
+  .report-toc .section-kicker { display: none; }
+  .report-toc .text-button { flex-shrink: 0; margin: 0; }
+}
+@media (max-width: 650px) {
+  .workbench-page { padding: 20px 20px 40px; }
+  .page-title { align-items: start; gap: 16px; }
+  .page-title h1 { font-size: 25px; }
+  .page-title > .button { padding: 9px 10px; font-size: 0; }
+  .page-title > .button svg { width: 20px; height: 20px; }
+  .form-card { padding: 18px; }
+  .mode-options { grid-template-columns: 1fr; }
+  .form-actions { flex-direction: column-reverse; align-items: stretch; }
+  .review-waiting > .row { flex-wrap: wrap; }
+  .report-toolbar { flex-direction: column; align-items: start; }
+  .report-document-name { display: none; }
+  .report-paper { padding: 22px; }
+  .report-paper > h1 { font-size: 26px; }
+  .report-toc a { min-height: 44px; display: flex; align-items: center; }
+  .report-toc .text-button { font-size: 11px; }
+}

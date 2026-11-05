@@ -1,5 +1,11 @@
 import { createApp, watch } from 'vue'
+// Keep feature styles eager and ordered; navigation must not change the cascade.
+import './features/auth/auth.css'
 import './style.css'
+import './views/public-pages.css'
+import './features/conversation-assistant/conversation.css'
+import './features/institution-review/review.css'
+import './features/auth/account.css'
 import App from './App.vue'
 import { router, installAuthRouting } from './router'
 import { authKey, createAuthController } from './features/auth/useAuth'

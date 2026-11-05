@@ -99,7 +99,13 @@ pnpm dev
 
 ## 开发与检查
 
-代码分工：`views/` 组合页面，`features/` 管业务交互，`api/` 管 HTTP/SSE，`components/` 放共享组件；`App.vue/style.css` 管公共外壳、缓存与样式。认证使用 Vue provide/inject，未引入全局状态管理库。完整路径见[项目目录](../docs/ai-coding/project-structure.md)。
+删除对话、退出登录、账号停用/启用及停止等待审核共用 `components/ConfirmDialog.vue`。组件只负责确认界面：默认聚焦取消，Esc 和右上角关闭均取消，点击遮罩保持打开，关闭后恢复触发位置；危险操作为红色确认，普通操作为深色确认。
+
+业务动作仍由各页面处理；账号确认绑定打开时的目标与身份，审核结束会关闭过时的停止提示。头像裁剪、用户资料、创建用户及重置密码仍使用各自专用界面。
+
+代码分工：`views/` 组合页面，`features/` 管业务交互，`api/` 管 HTTP/SSE，`components/` 放共享组件。会话的 `useConversation.ts` 协调页面状态，`conversationSnapshots.ts` 管草稿及会话快照，`conversationDeletions.ts` 管删除请求与清理重试。
+
+`App.vue` 管公共外壳与缓存；`style.css` 保留主题、基础和公共样式，账号、会话、审核及公共页面 CSS 放在各自目录，由 `main.ts` 按固定顺序加载，保持页面切换前后的样式一致。认证使用 Vue provide/inject，未引入全局状态管理库。完整路径见[项目目录](../docs/ai-coding/project-structure.md)。
 
 在 `frontend/` 运行：
 

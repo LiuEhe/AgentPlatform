@@ -1,23 +1,24 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
-import { ChevronDown, KeyRound, LogOut, UserRound, UsersRound, X } from '@lucide/vue'
+import { ChevronDown, KeyRound, LogOut, UserRound, UsersRound } from '@lucide/vue'
 import { useAuth } from './useAuth'
 import UserAvatar from './UserAvatar.vue'
+import ConfirmDialog from '../../components/ConfirmDialog.vue'
 const auth = useAuth(), router = useRouter()
-const dropdown = ref<HTMLDetailsElement>(), logoutDialog = ref<HTMLDialogElement>(), busy = ref(false)
+const dropdown = ref<HTMLDetailsElement>(), logoutOpen = ref(false), busy = ref(false)
 function closeMenu() { if (dropdown.value) dropdown.value.open = false }
 function focusTrigger() { dropdown.value?.querySelector('summary')?.focus() }
 function dismissMenu() { closeMenu(); focusTrigger() }
 function outside(event: PointerEvent) { if (!dropdown.value?.contains(event.target as Node)) closeMenu() }
 onMounted(() => document.addEventListener('pointerdown', outside))
-onBeforeUnmount(() => { document.removeEventListener('pointerdown', outside); logoutDialog.value?.close() })
+onBeforeUnmount(() => { document.removeEventListener('pointerdown', outside) })
 watch(auth.phase, closeMenu)
-function askLogout() { dismissMenu(); logoutDialog.value?.showModal() }
+function askLogout() { dismissMenu(); logoutOpen.value = true }
 async function logout() {
   if (busy.value) return
   busy.value = true
-  try { logoutDialog.value?.close(); await auth.logout(); await router.replace('/login') }
+  try { logoutOpen.value = false; await auth.logout(); await router.replace('/login') }
   finally { busy.value = false }
 }
 </script>
@@ -33,7 +34,10 @@ async function logout() {
           <button id="account-logout-trigger" class="account-logout" type="button" @click="askLogout"><LogOut :size="16" aria-hidden="true" />退出登录</button>
         </div>
       </details>
-      <dialog ref="logoutDialog" class="account-confirm-dialog" aria-labelledby="account-logout-title" @close="focusTrigger"><div class="account-dialog-heading"><h2 id="account-logout-title">退出登录？</h2><button type="button" class="icon-button" aria-label="取消退出登录" @click="logoutDialog?.close()"><X :size="20" /></button></div><p class="account-confirm-body">退出后，未发送的会话草稿、附件选择和本页未保存的更改将被清除。</p><div class="account-dialog-actions"><button id="account-logout-cancel" class="button" type="button" @click="logoutDialog?.close()">取消</button><button id="account-logout-confirm" class="button account-primary" type="button" :disabled="busy" @click="logout">退出登录</button></div></dialog>
+      <ConfirmDialog id="account-logout" v-model:open="logoutOpen" title="退出登录？" confirm-label="退出登录" :busy="busy" @confirm="logout">
+        <p>退出后，未发送的会话草稿、附件选择和本页未保存的更改将被清除。</p>
+        <p>已保存的会话历史仍会保留。</p>
+      </ConfirmDialog>
     </template>
     <RouterLink v-else to="/login">登录</RouterLink>
   </div>

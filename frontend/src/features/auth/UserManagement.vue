@@ -1,13 +1,16 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { LockKeyhole, X } from '@lucide/vue'
 import { createUser, getUserProfile, listUsers, resetUserPassword, setUserStatus } from '../../api/users'
 import { useAuth } from './useAuth'
-import type { UserProfile, UserView } from './types'
+import type { AuthTicket, UserProfile, UserView } from './types'
 import UserAvatar from './UserAvatar.vue'
+import ConfirmDialog from '../../components/ConfirmDialog.vue'
 const auth = useAuth(), users = ref<UserView[]>([]), cursor = ref<string | null>(null)
 const busy = ref(false), error = ref(''), message = ref(''), dialog = ref<HTMLDialogElement>()
 const target = ref<UserView | null>(null), username = ref(''), name = ref(''), password = ref('')
+const statusTarget = ref<{ user: UserView; ticket: AuthTicket } | null>(null)
+watch(auth.epoch, () => { statusTarget.value = null })
 let alive = true
 const detailDialog = ref<HTMLDialogElement>(), detailProfile = ref<UserProfile | null>(null)
 const detailBusy = ref(false), detailError = ref('')
@@ -57,14 +60,20 @@ async function save() {
   finally { password.value = ''; if (alive && auth.isCurrent(ticket)) busy.value = false }
   if (alive && auth.isCurrent(ticket) && !dialog.value?.open) await load()
 }
-async function toggle(user: UserView) {
-  if (!window.confirm(user.status === 'active' ? '停用后该用户的所有登录立即失效，历史内容保留。是否继续？' : '重新启用该账号？')) return
+function toggle(user: UserView) {
   const ticket = auth.capture(); if (!ticket || busy.value) return
+  statusTarget.value = { user: { ...user }, ticket }
+}
+async function confirmStatus() {
+  const pending = statusTarget.value
+  statusTarget.value = null
+  if (!pending || !auth.capture() || !auth.isCurrent(pending.ticket) || busy.value) return
+  const { user, ticket } = pending
   busy.value = true; error.value = ''
   try { await setUserStatus(user.user_id, user.status === 'active' ? 'disabled' : 'active') }
-  catch (reason) { if (auth.isCurrent(ticket)) error.value = reason instanceof Error ? reason.message : '操作失败。' }
-  finally { if (auth.isCurrent(ticket)) busy.value = false }
-  if (auth.isCurrent(ticket)) await load()
+  catch (reason) { if (alive && auth.isCurrent(ticket)) error.value = reason instanceof Error ? reason.message : '操作失败。' }
+  finally { if (alive && auth.isCurrent(ticket)) busy.value = false }
+  if (alive && auth.isCurrent(ticket)) await load()
 }
 </script>
 <template>
@@ -77,6 +86,11 @@ async function toggle(user: UserView) {
     </table></div>
     <p v-if="busy" role="status">正在处理…</p><button v-if="cursor" class="button" :disabled="busy" @click="load(true)">加载更多</button>
     <p class="auth-note">这里只管理账号；管理员不能查看其他用户的对话正文。</p>
+    <ConfirmDialog id="user-status" :open="statusTarget !== null" :title="statusTarget?.user.status === 'active' ? '停用账号？' : '启用账号？'"
+      :confirm-label="statusTarget?.user.status === 'active' ? '停用账号' : '启用账号'" :variant="statusTarget?.user.status === 'active' ? 'danger' : 'default'"
+      :subject="statusTarget?.user.username" subject-label="用户名" :busy="busy" @update:open="open => { if (!open) statusTarget = null }" @confirm="confirmStatus">
+      <p>{{ statusTarget?.user.status === 'active' ? '停用后，该账号的所有登录立即失效。历史内容将保留。' : '启用后，该账号可以重新登录。历史内容保持不变。' }}</p>
+    </ConfirmDialog>
     <dialog id="profile-dialog" ref="detailDialog" class="profile-detail-dialog" aria-labelledby="profile-dialog-title" @close="closeDetails">
       <div class="account-dialog-heading"><div><h2 id="profile-dialog-title">用户资料</h2><p>由用户本人维护</p></div><button type="button" class="icon-button" aria-label="关闭用户资料" @click="closeDetails"><X :size="20" /></button></div>
       <div class="profile-detail-body">

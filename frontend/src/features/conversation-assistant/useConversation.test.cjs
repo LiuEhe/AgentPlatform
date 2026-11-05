@@ -6,6 +6,7 @@ const path = require('node:path')
 const Module = require('node:module')
 const ts = require('typescript')
 const vue = require('vue')
+const loadConversationModule = require('./loadConversationModule.cjs')
 
 class ApiError extends Error {
   constructor(status, code) { super('simulated request failure'); this.status = status; this.code = code }
@@ -61,22 +62,12 @@ function fixture(overrides = {}, initialStorage = []) {
     })
     return close
   }
-  const filename = path.join(__dirname, 'useConversation.ts')
-  const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText
-  const loaded = new Module(filename, module)
-  loaded.filename = filename
-  loaded.paths = module.paths
-  loaded.require = id => {
-    if (id === 'vue') return { ...vue, onBeforeUnmount: callback => cleanup.push(callback) }
-    if (id === '../../api/conversations') return api
-    if (id === '../../api/client') return { ApiError }
-    if (id === './types') return { isTerminal: status => ['succeeded', 'failed', 'cancelled'].includes(status) }
-    return require(id)
-  }
-  loaded._compile(compiled, filename)
-  return { hook: loaded.exports.useConversation(), cleanup: () => cleanup.forEach(fn => fn()), calls, api, completed, storage, subscriptions }
+  const loaded = loadConversationModule('useConversation.ts', {
+    vue: { ...vue, onBeforeUnmount: callback => cleanup.push(callback) },
+    '../../api/conversations': api,
+    '../../api/client': { ApiError },
+  })
+  return { hook: loaded.useConversation(), cleanup: () => cleanup.forEach(fn => fn()), calls, api, completed, storage, subscriptions }
 }
 
 test('empty history stays empty across initialization and activation', async () => {

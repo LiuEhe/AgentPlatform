@@ -73,5 +73,14 @@ jobs:
           version: 10.32.1
           run_install: false
       - run: pnpm install --frozen-lockfile
-      - run: node --test src/features/conversation-assistant/useConversation.test.cjs src/features/auth/useAuth.test.cjs src/features/auth/appLifecycle.test.cjs src/api/auth.test.cjs
+      - run: >-
+          node --test
+          src/features/conversation-assistant/useConversation.test.cjs
+          src/features/auth/useAuth.test.cjs
+          src/features/auth/appLifecycle.test.cjs
+          src/api/auth.test.cjs
+          src/components/ConfirmDialog.test.cjs
+          src/components/confirmationFlows.test.cjs
+          src/features/auth/AccountMenu.test.cjs
+          src/features/auth/UserManagement.test.cjs
       - run: pnpm build

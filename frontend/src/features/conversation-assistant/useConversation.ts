@@ -3,27 +3,13 @@ import * as api from '../../api/conversations'
 import { ApiError } from '../../api/client'
 import type { AuthController } from '../auth/types'
 import { isTerminal } from './types'
-import type { SessionSummary, SessionView, FileView, MessageCreate, MessageView, RunView, PendingSessionDeletion } from './types'
+import type { SessionSummary, SessionView, FileView, MessageCreate, MessageView, RunView } from './types'
+import { ConversationSnapshots, type RetryAction } from './conversationSnapshots'
+import { createConversationDeletions } from './conversationDeletions'
 
 const SESSION_KEY = 'agent-platform-session'
 const PENDING_KEY = 'agent-platform-session-pending-id'
 const DELETIONS_KEY = 'agent-platform-session-deletions'
-type RetryAction = 'initialize' | 'create' | 'send' | 'stream' | 'refresh' | 'switch' | null
-interface ConversationSnapshot {
-  messages: MessageView[]
-  files: FileView[]
-  selectedIds: string[]
-  draft: string
-  run: RunView | null
-  pending: MessageCreate | null
-  retryAction: RetryAction
-  retryTarget: string | null
-  error: string
-  streamingText: string
-  earlierCursor: number | null
-  receivedSequence: number
-}
-
 export function useConversation(options?: { auth: AuthController }) {
   const owner = options?.auth.capture()
   const storageKey = (key: string) => owner ? `${key}:${owner.userId}` : key
@@ -46,21 +32,26 @@ export function useConversation(options?: { auth: AuthController }) {
   const hasEarlierMessages = computed(() => earlierCursor.value !== null)
   const loadingEarlier = ref(false)
   const loadingHistory = ref(false)
-  const deleting = ref(false)
-  const deletionError = ref('')
-  const pendingDeletions = ref<PendingSessionDeletion[]>(readPendingDeletions())
+  const deletions = createConversationDeletions({
+    canDelete: () => canDelete.value,
+    readPending: () => stored(DELETIONS_KEY),
+    writePending: value => remember(DELETIONS_KEY, value),
+    remove: (id, signal) => api.deleteSession(id, signal),
+    onRemoved: async (id, resume) => {
+      const wasCurrent = id === sessionId.value
+      invalidateSession(id)
+      if (wasCurrent && resume) await initializeSession()
+    },
+  })
+  const { deleting, deletionError, pendingDeletions, deleteSession, retryDeletion } = deletions
   const deletedSessionIds = new Set(pendingDeletions.value.filter(item => item.phase === 'cleanup_pending').map(item => item.session_id))
   let historyVersion = 0
-  let deletionVersion = 0
-  let suspended = false
-  const deletionRequests = new Map<string, number>()
-  let deletionController = new AbortController()
   const listCursor = ref<string | null>(null)
   const hasMoreSessions = computed(() => listCursor.value !== null)
   let pending: MessageCreate | null = null
   let retryAction: RetryAction = null
   let retryTarget: string | null = null
-  const snapshots = new Map<string, ConversationSnapshot>()
+  const snapshots = new ConversationSnapshots()
   let generation = 0
   let controller = new AbortController()
   let unsubscribe: (() => void) | undefined
@@ -69,31 +60,13 @@ export function useConversation(options?: { auth: AuthController }) {
     Boolean(activeRun.value && !isTerminal(activeRun.value.status)))
   const canDelete = computed(() => !initializing.value && !sending.value && !uploading.value && !deleting.value)
 
-  function readPendingDeletions(): PendingSessionDeletion[] {
-    try {
-      const value: unknown = JSON.parse(stored(DELETIONS_KEY) ?? '[]')
-      if (!Array.isArray(value)) return []
-      const valid = value.filter((item): item is PendingSessionDeletion => item &&
-        typeof item.session_id === 'string' && item.session_id.length > 0 &&
-        (item.phase === 'unconfirmed' || item.phase === 'cleanup_pending'))
-      return [...new Map(valid.map(item => [item.session_id, { session_id: item.session_id, phase: item.phase }])).values()]
-    } catch { return [] }
-  }
-  function setDeletion(id: string, phase: PendingSessionDeletion['phase'] | null) {
-    pendingDeletions.value = pendingDeletions.value.filter(item => item.session_id !== id)
-    if (phase) pendingDeletions.value.push({ session_id: id, phase })
-    remember(DELETIONS_KEY, pendingDeletions.value.length ? JSON.stringify(pendingDeletions.value) : null)
-  }
-  function hasDraft(id: string) { return Boolean(id === sessionId.value ? draft.value : snapshots.get(id)?.draft) }
+  function hasDraft(id: string) { return id === sessionId.value ? Boolean(draft.value) : snapshots.hasDraft(id) }
   function invalidateSession(id: string) {
     deletedSessionIds.add(id)
     historyVersion += 1
     loadingHistory.value = false
     sessions.value = sessions.value.filter(item => item.session_id !== id)
-    snapshots.delete(id)
-    for (const snapshot of snapshots.values()) {
-      if (snapshot.retryTarget === id) { snapshot.retryTarget = null; snapshot.retryAction = null }
-    }
+    snapshots.invalidate(id)
     if (retryTarget === id) { retryTarget = null; retryAction = null; retryable.value = false }
     if (stored(SESSION_KEY) === id) { remember(SESSION_KEY, null); remember(PENDING_KEY, null) }
     if (sessionId.value === id) {
@@ -101,73 +74,32 @@ export function useConversation(options?: { auth: AuthController }) {
       restore(null)
     }
   }
-  async function deleteSession(id: string) {
-    if (!canDelete.value) return
-    const version = ++deletionVersion
-    deletionRequests.set(id, version)
-    deletionController = new AbortController()
-    const signal = deletionController.signal
-    deleting.value = true
-    deletionError.value = ''
-    const previous = pendingDeletions.value.find(item => item.session_id === id)?.phase
-    setDeletion(id, previous ?? 'unconfirmed')
-    let removed = false
-    try {
-      await api.deleteSession(id, signal)
-      if (deletionRequests.get(id) !== version) return
-      setDeletion(id, null)
-      removed = true
-    } catch (reason) {
-      if (deletionRequests.get(id) !== version) return
-      if (reason instanceof ApiError && reason.code === 'CONVERSATION_DELETE_INCOMPLETE') {
-        setDeletion(id, 'cleanup_pending')
-        if (version === deletionVersion) deletionError.value = '对话已删除，附件清理未完成。'
-        removed = true
-      } else if (reason instanceof ApiError && reason.status === 409) {
-        setDeletion(id, null)
-        if (version === deletionVersion) deletionError.value = '请等待上传完成，或停止任务并等其结束后再删除。'
-      } else if (version === deletionVersion && !signal.aborted) deletionError.value = '删除结果尚未确认，请重试。'
-    } finally {
-      // 确定的资源结果独立于页面导航；停用后也必须失效该目标缓存。
-      if (removed) {
-        const wasCurrent = id === sessionId.value
-        invalidateSession(id)
-        if (wasCurrent && !suspended && (version === deletionVersion || !deleting.value)) await initializeSession()
-      }
-      if (version === deletionVersion) deleting.value = false
-      if (deletionRequests.get(id) === version) deletionRequests.delete(id)
-    }
-  }
-  async function retryDeletion(id: string) {
-    if (pendingDeletions.value.some(item => item.session_id === id)) await deleteSession(id)
-  }
-
   function saveCurrent() {
     const id = sessionId.value
     if (!id) return
-    snapshots.set(id, {
-      messages: [...messages.value], files: [...files.value],
-      selectedIds: [...selectedFileIds.value], draft: draft.value, run: activeRun.value,
+    snapshots.save(id, {
+      messages: messages.value, files: files.value,
+      selectedIds: selectedFileIds.value, draft: draft.value, run: activeRun.value,
       pending, retryAction: retryAction ?? (pending ? 'send' : null), retryTarget, error: error.value,
       streamingText: streamingText.value, earlierCursor: earlierCursor.value, receivedSequence: receivedSequence.value,
     })
   }
   function restore(id: string | null) {
-    const snapshot = id ? snapshots.get(id) : undefined
+    const snapshot = snapshots.restore(id)
     sessionId.value = id
-    messages.value = [...(snapshot?.messages ?? [])]
-    files.value = [...(snapshot?.files ?? [])]
-    selectedFileIds.value = [...(snapshot?.selectedIds ?? [])]
-    draft.value = snapshot?.draft ?? ''
-    activeRun.value = snapshot?.run ?? null
-    pending = snapshot?.pending ?? null
-    error.value = snapshot?.error ?? ''
-    retryAction = snapshot?.retryAction ?? null
-    retryTarget = snapshot?.retryTarget ?? null
+    messages.value = snapshot.messages
+    files.value = snapshot.files
+    selectedFileIds.value = snapshot.selectedIds
+    draft.value = snapshot.draft
+    activeRun.value = snapshot.run
+    pending = snapshot.pending
+    error.value = snapshot.error
+    retryAction = snapshot.retryAction
+    retryTarget = snapshot.retryTarget
     retryable.value = retryAction !== null
-    streamingText.value = snapshot?.streamingText ?? ''
-    earlierCursor.value = snapshot?.earlierCursor ?? null
-    receivedSequence.value = snapshot?.receivedSequence ?? 0
+    streamingText.value = snapshot.streamingText
+    earlierCursor.value = snapshot.earlierCursor
+    receivedSequence.value = snapshot.receivedSequence
   }
   async function resume(view: SessionView, current: number) {
     if (view.active_run_id) watchRun(view.session_id, view.active_run_id, current)
@@ -341,7 +273,7 @@ export function useConversation(options?: { auth: AuthController }) {
     } catch (reason) { void disconnected(reason) }
   }
   async function initialize() {
-    suspended = false
+    deletions.resume()
     if (!deleting.value) await initializeSession()
   }
   async function initializeSession() {
@@ -366,7 +298,7 @@ export function useConversation(options?: { auth: AuthController }) {
           if (!(reason instanceof ApiError && reason.status === 404)) throw reason
           // 当前初始化已隔离旧请求；只失效目标，保持本轮请求代次。
           deletedSessionIds.add(id)
-          snapshots.delete(id)
+          snapshots.discard(id)
           sessions.value = sessions.value.filter(item => item.session_id !== id)
           if (sessionId.value === id) restore(null)
           remember(SESSION_KEY, null); remember(PENDING_KEY, null)
@@ -558,10 +490,7 @@ export function useConversation(options?: { auth: AuthController }) {
     else if (activeRun.value && sessionId.value) watchRun(sessionId.value, activeRun.value.run_id, generation)
   }
   function suspend() {
-    suspended = true
-    deletionVersion += 1
-    deletionController.abort()
-    deleting.value = false
+    deletions.suspend()
     saveCurrent()
     resetRequests()
     initializing.value = false
@@ -569,7 +498,7 @@ export function useConversation(options?: { auth: AuthController }) {
   function resetForIdentityChange() {
     identityCleared = true
     suspend()
-    snapshots.clear(); deletedSessionIds.clear(); deletionRequests.clear()
+    snapshots.clear(); deletedSessionIds.clear(); deletions.clear()
     sessionId.value = null; sessions.value = []; messages.value = []; files.value = []
     selectedFileIds.value = []; draft.value = ''; activeRun.value = null; streamingText.value = ''
     pending = null; retryAction = null; retryTarget = null

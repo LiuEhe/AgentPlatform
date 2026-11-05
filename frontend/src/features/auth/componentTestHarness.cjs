@@ -5,29 +5,40 @@ const ts = require('typescript')
 const vue = require('vue')
 const { parse, compileScript } = require('vue/compiler-sfc')
 function mount(name, imports, props = {}, configureElement = () => ({})) {
-  const filename = path.join(__dirname, name)
-  const source = compileScript(parse(fs.readFileSync(filename, 'utf8')).descriptor, {
-    id: name, inlineTemplate: true,
-  }).content
-  const m = new Module(filename, module)
-  m.paths = module.paths
-  m.require = id => {
-    if (id === 'vue') return vue
-    if (id === 'vue-router') return { RouterLink: vue.defineComponent({ setup: (_, { slots }) => () => vue.h('a', slots.default?.()) }), onBeforeRouteLeave() {}, ...imports[id] }
-    if (id === '@lucide/vue') return require('@lucide/vue')
-    if (id in imports) return imports[id]
-    throw new Error(`Unexpected import ${id}`)
+  const modules = new Map()
+  function load(filename) {
+    if (modules.has(filename)) return modules.get(filename).exports
+    const source = compileScript(parse(fs.readFileSync(filename, 'utf8')).descriptor, {
+      id: filename, inlineTemplate: true,
+    }).content
+    const m = new Module(filename, module)
+    m.paths = module.paths
+    modules.set(filename, m)
+    m.require = id => {
+      if (id === 'vue') return vue
+      if (id === 'vue-router') return { RouterLink: vue.defineComponent({ setup: (_, { slots }) => () => vue.h('a', slots.default?.()) }), onBeforeRouteLeave() {}, ...imports[id] }
+      if (id === '@lucide/vue') return require('@lucide/vue')
+      if (id in imports) return imports[id]
+      if (id.startsWith('.') && id.endsWith('.vue')) return load(path.resolve(path.dirname(filename), id))
+      throw new Error(`Unexpected import ${id}`)
+    }
+    m._compile(ts.transpileModule(source, {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+    }).outputText, filename)
+    return m.exports
   }
-  m._compile(ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText, filename)
+  const component = load(path.resolve(__dirname, name)).default
   function element(tag) {
-    return { tag, tagName: tag.toUpperCase(), style: {}, children: [], parent: null, listeners: {},
+    return vue.markRaw({ tag, tagName: tag.toUpperCase(), style: {}, children: [], parent: null, listeners: {},
       addEventListener(type, fn) { this.listeners[type] = fn },
       removeEventListener(type) { delete this.listeners[type] },
       get options() { return this.children.filter(c => c.tag === 'option') },
-      showModal() { this.open = true }, close() { this.open = false }, ...configureElement(tag),
-    }
+      get isConnected() { let node = this; while (node.parent) node = node.parent; return node.tag === 'root' },
+      focus() { if (global.document) global.document.activeElement = this },
+      showModal() { this.open = true },
+      close() { if (!this.open) return; this.open = false; queueMicrotask(() => this.onClose?.({ target: this })) },
+      ...configureElement(tag),
+    })
   }
   const renderer = vue.createRenderer({
     createElement: element, createText: text => ({ text }), createComment: text => ({ text }),
@@ -51,9 +62,10 @@ function mount(name, imports, props = {}, configureElement = () => ({})) {
     remove(node) {
       if (node.parent) { const at = node.parent.children.indexOf(node); if (at >= 0) node.parent.children.splice(at, 1) }
       node.parent = null
+      node.parent = null
     },
   })
-  const root = element('root'), app = renderer.createApp({ setup: () => () => vue.h(m.exports.default, { ...props }) })
+  const root = element('root'), app = renderer.createApp({ setup: () => () => vue.h(component, { ...props }) })
   app.mount(root)
   return { root, app }
 }

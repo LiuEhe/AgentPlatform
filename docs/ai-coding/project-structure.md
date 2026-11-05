@@ -43,15 +43,15 @@ AgentPlatform/
 │   ├── src/
 │   │   ├── api/                      # HTTP/SSE 客户端
 │   │   ├── features/
-│   │   │   ├── auth/                 # 认证、资料、头像与用户管理
-│   │   │   ├── conversation-assistant/ # 会话、草稿、附件与流式状态
-│   │   │   └── institution-review/    # 审核上传、报告与 Word 下载
-│   │   ├── components/               # 品牌与共享工作台组件
-│   │   ├── views/                    # 页面组合
+│   │   │   ├── auth/                 # 认证、资料、头像、用户管理及对应 CSS
+│   │   │   ├── conversation-assistant/ # 会话协调、快照、删除恢复、组件及 CSS
+│   │   │   └── institution-review/    # 审核上传、报告、Word 下载及 CSS
+│   │   ├── components/               # 品牌、通用确认框与共享工作台组件
+│   │   ├── views/                    # 页面组合与公共页面 CSS
 │   │   ├── router/                   # 路由与守卫
 │   │   ├── App.vue                   # 公共外壳与助手 KeepAlive
-│   │   ├── main.ts                   # 启动入口
-│   │   └── style.css                 # 全局样式与设计变量
+│   │   ├── main.ts                   # 启动入口与固定顺序的样式加载
+│   │   └── style.css                 # 主题、基础、公共样式与无障碍
 │   └── README.md                     # 页面、开发与交互
 ├── docs/
 │   ├── database.md                   # 数据库操作与字段字典
@@ -81,6 +81,9 @@ AgentPlatform/
 | 记忆输入输出 | `schemas/conversation_turn.py` 定义当前轮、材料 reader、成功位置和 thread_id；服务与 Agent 适配器共用 |
 | 摘要与图状态 | 公共 `nodes/llm/memory.py` 接收历史、策略和 Prompt，返回摘要及移除 ID；会话 Agent 的 `nodes/memory_summarize.py` 选择历史，`graph/state.py` 定义持久字段和本轮非持久字段 |
 | 前端账号 | `features/auth/` 管表单和身份控制；`api/client.ts、auth.ts、users.ts` 管请求；`App.vue/router/` 处理私有页面清理与守卫 |
+| 前端会话状态 | `features/conversation-assistant/useConversation.ts` 协调历史、消息和流式运行；`conversationSnapshots.ts` 保存/恢复快照并失效引用，`conversationDeletions.ts` 维护删除待重试项与请求生命周期，两者仅供会话协调入口使用 |
+| 前端样式 | `style.css` 管公共规则；账号的 `auth.css/account.css`、会话的 `conversation.css`、审核的 `review.css`、页面的 `public-pages.css` 管各自样式，全部从 `main.ts` 按固定顺序加载 |
+| 通用确认框 | `components/ConfirmDialog.vue` 接收打开状态、标题、说明、目标标签、按钮语气及禁用状态，输出关闭和确认事件；会话删除、退出登录、账号状态与停止等待共用，原生 dialog 负责模态，业务操作留在调用方 |
 | 头像裁剪 | `AvatarCropper.vue` 用 dialog、Canvas、Pointer Events 将 File 转成确认 PNG 或取消事件，仅供 `ProfileForm.vue` 调用；`UserAvatar.vue` 读取受保护图片 |
 | 数据库维护 | `scripts/manage_users.py` 负责当前结构初始化、检查点建表和 admin 密码恢复，不是旧版数据迁移器 |
 

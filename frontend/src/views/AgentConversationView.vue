@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onActivated, onDeactivated, ref } from 'vue'
+import { onActivated, onDeactivated, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { ArrowLeft, ArrowUpRight, CircleAlert, Menu, MessagesSquare } from '@lucide/vue'
 import ConversationComposer from '../features/conversation-assistant/ConversationComposer.vue'
@@ -9,6 +9,7 @@ import ConversationHistory from '../features/conversation-assistant/Conversation
 import AccountMenu from '../features/auth/AccountMenu.vue'
 import { useAuth } from '../features/auth/useAuth'
 import { useConversation } from '../features/conversation-assistant/useConversation'
+import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 defineOptions({ name: 'AgentConversationView' })
 const { sessionId, sessions, messages, files, selectedFileIds, draft, activeRun, streamingText, busy,
@@ -17,13 +18,11 @@ const { sessionId, sessions, messages, files, selectedFileIds, draft, activeRun,
   switchSession, suspend, retry, loadMoreSessions, loadEarlierMessages, hasMoreSessions, hasEarlierMessages, loadingHistory, loadingEarlier } = useConversation({ auth: useAuth() })
 const fileInput = ref<HTMLInputElement>()
 const historyDialog = ref<HTMLDialogElement>()
-const deletionDialog = ref<HTMLDialogElement>()
-const cancelDeletionButton = ref<HTMLButtonElement>()
 const deletionTarget = ref<{ id: string; title: string; hasDraft: boolean } | null>(null)
-let deletionTrigger: HTMLElement | null = null
+const deletionTrigger = ref<HTMLElement | null>(null)
 const prompts = ['你好，介绍一下你自己', '帮我写一封会议邀请', '聊聊怎么整理工作思路']
 onActivated(() => { void initialize() })
-onDeactivated(() => { historyDialog.value?.close(); deletionDialog.value?.close(); suspend() })
+onDeactivated(() => { historyDialog.value?.close(); closeDeletion(); suspend() })
 function attach(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
@@ -32,26 +31,22 @@ function attach(event: Event) {
 }
 function select(id: string) { historyDialog.value?.close(); void switchSession(id) }
 function create() { historyDialog.value?.close(); void newSession() }
-async function requestDeletion(id: string) {
+function requestDeletion(id: string) {
   if (!canDelete.value) return
   const target = sessions.value.find(item => item.session_id === id)
   if (!target) return
-  deletionTrigger = historyDialog.value?.open
+  deletionTrigger.value = historyDialog.value?.open
     ? document.querySelector<HTMLElement>('.mobile-history') : document.activeElement as HTMLElement | null
   historyDialog.value?.close()
   deletionTarget.value = { id, title: target.title, hasDraft: hasDraft(id) }
-  deletionDialog.value?.showModal()
-  await nextTick()
-  cancelDeletionButton.value?.focus()
 }
 function closeDeletion() {
   deletionTarget.value = null
-  deletionTrigger?.focus()
 }
 async function confirmDeletion() {
   const id = deletionTarget.value?.id
   if (!id || !canDelete.value) return
-  deletionDialog.value?.close()
+  closeDeletion()
   await deleteSession(id)
 }
 </script>
@@ -105,17 +100,10 @@ async function confirmDeletion() {
     <dialog ref="historyDialog" class="history-dialog" aria-label="会话记录" @click="($event.target === historyDialog) && historyDialog?.close()">
       <ConversationHistory :sessions="sessions" :active-id="sessionId" :disabled="initializing || deleting" :delete-disabled="!canDelete" :has-more="hasMoreSessions" :loading="loadingHistory" @more="loadMoreSessions" closable @select="select" @delete="requestDeletion" @new="create" @close="historyDialog?.close()" />
     </dialog>
-    <dialog ref="deletionDialog" class="confirm-dialog" aria-labelledby="delete-session-title" @close="closeDeletion" @click="($event.target === deletionDialog) && deletionDialog?.close()">
-      <form @submit.prevent="confirmDeletion">
-        <h2 id="delete-session-title">永久删除对话？</h2>
-        <p class="deletion-title">{{ deletionTarget?.title }}</p>
-        <p>将永久删除此对话、消息和上传文件，无法恢复。</p>
-        <p v-if="deletionTarget?.hasDraft">此对话尚未发送的草稿也将被清除。</p>
-        <div class="dialog-actions">
-          <button ref="cancelDeletionButton" class="button" type="button" autofocus @click="deletionDialog?.close()">取消</button>
-          <button class="button button-danger" type="submit" :disabled="!canDelete">永久删除</button>
-        </div>
-      </form>
-    </dialog>
+    <ConfirmDialog id="delete-session" :open="deletionTarget !== null" title="永久删除对话？" confirm-label="永久删除" variant="danger"
+      :subject="deletionTarget?.title" subject-label="会话" :return-focus="deletionTrigger" :confirm-disabled="!canDelete" @update:open="open => { if (!open) closeDeletion() }" @confirm="confirmDeletion">
+      <p>将永久删除此对话、消息和上传文件，无法恢复。</p>
+      <p v-if="deletionTarget?.hasDraft">此对话尚未发送的草稿也将被清除。</p>
+    </ConfirmDialog>
   </section>
 </template>
