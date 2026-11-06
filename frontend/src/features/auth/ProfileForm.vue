@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { RouterLink, onBeforeRouteLeave } from 'vue-router'
 import { Pencil } from '@lucide/vue'
 import { ApiError } from '../../api/client'
@@ -7,6 +7,10 @@ import { getProfile, updateProfile, uploadAvatar } from '../../api/users'
 import type { AuthTicket, Gender, ProfilePatch, UserProfile } from './types'
 import UserAvatar from './UserAvatar.vue'
 import AvatarCropper from './AvatarCropper.vue'
+import ConfirmDialog from '../../components/ConfirmDialog.vue'
+import ProfileGenderField from './ProfileGenderField.vue'
+import ProfileBirthdayField from './ProfileBirthdayField.vue'
+import { parseProfileDate } from './profileDates'
 import { useAuth } from './useAuth'
 const auth = useAuth(), baseline = ref<UserProfile | null>(null)
 const draft = reactive({ display_name: '', email: '', gender: '' as Gender | '', birthday: '', phone_number: '', address: '', bio: '' })
@@ -21,7 +25,24 @@ const today = () => new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10
 const birthdayMax = ref(today())
 const keys = ['display_name', 'email', 'gender', 'birthday', 'phone_number', 'address', 'bio'] as const
 const dirty = computed(() => !!baseline.value && keys.some(key => (draft[key].trim() || (key === 'display_name' ? '' : null)) !== baseline.value?.[key]))
-onBeforeRouteLeave(() => !dirty.value || window.confirm('离开后，本页尚未保存的资料更改将被放弃。头像更新不受影响，是否继续？'))
+const leaveOpen = ref(false)
+let resolveLeave: ((allowed: boolean) => void) | undefined
+let leaveEpoch = 0
+function settleLeave(allowed: boolean) {
+  const resolve = resolveLeave
+  resolveLeave = undefined
+  leaveOpen.value = false
+  resolve?.(allowed)
+}
+onBeforeRouteLeave(() => {
+  if (!dirty.value) return true
+  settleLeave(false)
+  leaveEpoch = auth.epoch.value
+  return new Promise<boolean>(resolve => { resolveLeave = resolve; leaveOpen.value = true })
+})
+watch(leaveOpen, open => { if (!open) settleLeave(false) })
+watch(auth.epoch, () => settleLeave(false))
+function confirmLeave() { settleLeave(alive && leaveEpoch === auth.epoch.value) }
 function accept(profile: UserProfile) {
   baseline.value = profile
   avatarUnconfirmed.value = false
@@ -35,7 +56,7 @@ async function load() {
   finally { if (alive && auth.isCurrent(ticket)) loading.value = false }
 }
 onMounted(() => { void load() })
-onBeforeUnmount(() => { alive = false; controller.abort() })
+onBeforeUnmount(() => { alive = false; settleLeave(false); controller.abort() })
 function changes(): ProfilePatch | null {
   fields.value = {}
   const limits = { display_name: 50, email: 254, phone_number: 32, address: 500, bio: 200 }
@@ -43,7 +64,8 @@ function changes(): ProfilePatch | null {
     if (Array.from(draft[key as keyof typeof draft].trim()).length > limit) fields.value[key] = `最多${limit}个字符。`
   }
   if (!draft.display_name.trim()) fields.value.display_name = '请输入显示名称。'
-  if (draft.birthday && draft.birthday > today()) fields.value.birthday = '生日不能晚于今天。'
+  if (draft.birthday && !parseProfileDate(draft.birthday)) fields.value.birthday = '请输入有效日期，格式为 YYYY-MM-DD。'
+  else if (draft.birthday && draft.birthday > today()) fields.value.birthday = '生日不能晚于今天。'
   if (draft.phone_number.trim() && (!/^\+?[0-9 ()-]+$/.test(draft.phone_number.trim()) || !/[0-9]/.test(draft.phone_number))) fields.value.phone_number = '手机号格式无效。'
   if (Object.keys(fields.value).length) return null
   const patch: ProfilePatch = {}
@@ -126,8 +148,8 @@ function confirmCrop(file: File) {
       </div>
       <section id="profile-basic" class="profile-section"><h2>基本资料</h2><div class="profile-grid">
         <label class="profile-field profile-wide" for="profile-display-name"><span>显示名称 <span class="profile-required">*</span></span><input id="profile-display-name" v-model="draft.display_name" autocomplete="nickname" required :disabled="busy" :aria-invalid="!!fields.display_name"><span v-if="fields.display_name" class="profile-field-error" role="alert">{{ fields.display_name }}</span></label>
-        <label class="profile-field" for="profile-gender">性别<select id="profile-gender" v-model="draft.gender" :disabled="busy"><option value="">未填写</option><option value="male">男</option><option value="female">女</option><option value="other">其他</option><option value="undisclosed">不愿透露</option></select></label>
-        <label class="profile-field" for="profile-birthday">生日<input id="profile-birthday" v-model="draft.birthday" type="date" :max="birthdayMax" :disabled="busy" :aria-invalid="!!fields.birthday" @focus="birthdayMax = today()"><span v-if="fields.birthday" class="profile-field-error" role="alert">{{ fields.birthday }}</span></label>
+        <div class="profile-field"><label id="profile-gender-label" for="profile-gender">性别</label><ProfileGenderField id="profile-gender" v-model="draft.gender" :disabled="busy" /></div>
+        <div class="profile-field"><label for="profile-birthday">生日</label><ProfileBirthdayField id="profile-birthday" v-model="draft.birthday" :max="birthdayMax" :disabled="busy" :invalid="!!fields.birthday" @focus="birthdayMax = today()" /><span v-if="fields.birthday" id="profile-birthday-error" class="profile-field-error" role="alert">{{ fields.birthday }}</span></div>
         <label class="profile-field profile-wide" for="profile-bio">个性签名<textarea id="profile-bio" v-model="draft.bio" rows="2" placeholder="写一句介绍自己的话" :disabled="busy" :aria-invalid="!!fields.bio"></textarea><span class="profile-field-footer"><span v-if="fields.bio" class="profile-field-error" role="alert">{{ fields.bio }}</span><small>{{ Array.from(draft.bio).length }} / 200</small></span></label>
       </div></section>
       <section id="profile-contact" class="profile-section"><h2>联系方式</h2><div class="profile-grid">
@@ -142,5 +164,8 @@ function confirmCrop(file: File) {
     <p class="profile-password"><span>密码与登录安全单独管理</span><RouterLink to="/account/password">修改密码 ↗</RouterLink></p>
   </form>
   <AvatarCropper v-if="cropFile" :file="cropFile" @confirm="confirmCrop" @cancel="cancelCrop" />
+  <ConfirmDialog id="profile-leave" v-model:open="leaveOpen" title="放弃未保存的修改？" variant="danger" @confirm="confirmLeave">
+    <p>离开后，本页尚未保存的资料更改将被放弃。已保存的头像不受影响。</p>
+  </ConfirmDialog>
   </div>
 </template>

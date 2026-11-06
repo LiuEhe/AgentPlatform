@@ -5,23 +5,141 @@ const profile = { user_id: 'a', username: 'alice', display_name: 'Alice', role: 
   email: 'old@example.com', gender: null, birthday: null, phone_number: null, address: null, bio: 'old' }
 function setup(api) {
   const identity = auth()
+  let leaveGuard
   const previous = global.document
-  global.document = { activeElement: null }
+  global.document = { activeElement: null, addEventListener() {}, removeEventListener() {} }
   const f = mount('ProfileForm.vue', { '../../api/client': { ApiError: class extends Error {} }, '../../api/users': { getProfile: async () => ({ ...profile }), ...api },
+    'vue-router': { onBeforeRouteLeave: guard => { leaveGuard = guard } },
     './useAuth': { useAuth: () => identity }, './UserAvatar.vue': { __esModule: true, default: vue.defineComponent({ setup: () => () => vue.h('span') }) },
     './AvatarCropper.vue': { __esModule: true, default: vue.defineComponent({ props: ['file'], emits: ['confirm', 'cancel'], setup: (_, { emit }) => () => vue.h('div', [
       vue.h('button', { id: 'test-confirm-crop', onClick: () => emit('confirm', new File(['cropped'], 'avatar.png', { type: 'image/png' })) }, 'Confirm crop'),
       vue.h('button', { id: 'test-cancel-crop', onClick: () => emit('cancel') }, 'Cancel crop'),
     ]) }) },
   })
-  return { ...f, identity, dispose() { f.app.unmount(); global.document = previous } }
+  return { ...f, identity, leave: () => leaveGuard(), dispose() { f.app.unmount(); global.document = previous } }
 }
 function edit(f, id, value) {
   const input = find(f.root, n => n.id === id)
   assert.ok(input, `Missing ${id}`)
   input.value = value
-  input.listeners.input({ target: input })
+  ;(input.listeners.input ?? input.onInput)({ target: input })
 }
+test('unsaved profile navigation waits for shared confirmation; cancel keeps draft and confirm leaves', async () => {
+  const previous = global.window
+  global.window = { confirm: () => { throw Error('native confirmation must not be used') } }
+  const f = setup({})
+  try {
+    await flush()
+    assert.equal(f.leave(), true)
+    edit(f, 'profile-bio', 'keep unsaved signature'); await flush()
+    const cancelled = f.leave()
+    assert.ok(cancelled instanceof Promise)
+    await flush()
+    find(f.root, n => n.id === 'profile-leave-cancel').onClick()
+    await flush()
+    assert.equal(await cancelled, false)
+    assert.equal(find(f.root, n => n.id === 'profile-bio').value, 'keep unsaved signature')
+    const confirmed = f.leave(); await flush()
+    find(f.root, n => n.id === 'profile-leave-confirm').onClick()
+    assert.equal(await confirmed, true)
+  } finally { f.dispose(); global.window = previous }
+})
+test('identity change and unmount settle pending profile navigation without allowing stale confirmation', async () => {
+  const f = setup({})
+  try {
+    await flush(); edit(f, 'profile-bio', 'draft'); await flush()
+    const pending = f.leave(); await flush()
+    const confirm = find(f.root, n => n.id === 'profile-leave-confirm').onClick
+    f.identity.epoch.value++; await flush()
+    assert.equal(await pending, false)
+    confirm(); await flush()
+    const next = f.leave(); await flush()
+    f.app.unmount()
+    assert.equal(await next, false)
+  } finally { f.dispose() }
+})
+test('manual birthday rejects impossible dates and saves leap dates or clearing as ISO/null', async () => {
+  const calls = [], f = setup({ updateProfile: async patch => { calls.push(patch); return { ...profile, ...patch } } })
+  try {
+    await flush()
+    for (const value of ['2001-02-29', '1900-02-29', '2000-13-01', '0000-01-01', '2000-2-1', '9999-01-01']) {
+      edit(f, 'profile-birthday', value); await flush()
+      await find(f.root, n => n.tag === 'form').onSubmit({ preventDefault() {} }); await flush()
+      assert.equal(calls.length, 0, `invalid birthday ${value} must not be sent`)
+    }
+    edit(f, 'profile-birthday', '2000-02-29'); await flush()
+    await find(f.root, n => n.tag === 'form').onSubmit({ preventDefault() {} }); await flush()
+    assert.deepEqual(calls, [{ birthday: '2000-02-29' }])
+    edit(f, 'profile-birthday', ''); await flush()
+    await find(f.root, n => n.tag === 'form').onSubmit({ preventDefault() {} }); await flush()
+    assert.deepEqual(calls[1], { birthday: null })
+  } finally { f.dispose() }
+})
+test('gender popup supports keyboard selection, cancellation and clearing without changing API values', async () => {
+  const calls = [], f = setup({ updateProfile: async patch => { calls.push(patch); return { ...profile, ...patch } } })
+  const key = (node, value) => node.onKeydown({ key: value, preventDefault() {}, stopPropagation() {} })
+  try {
+    await flush()
+    const trigger = find(f.root, n => n.id === 'profile-gender')
+    assert.equal(trigger.tag, 'button', 'gender must use a styled keyboard picker')
+    trigger.onClick(); await flush()
+    let list = find(f.root, n => n.role === 'listbox')
+    key(list.parent, 'ArrowDown'); await flush()
+    global.document.activeElement.onClick(); await flush()
+    await find(f.root, n => n.tag === 'form').onSubmit({ preventDefault() {} }); await flush()
+    assert.deepEqual(calls, [{ gender: 'male' }])
+    trigger.onClick(); await flush()
+    list = find(f.root, n => n.role === 'listbox')
+    key(list.parent, 'Escape'); await flush()
+    assert.equal(find(f.root, n => n.role === 'listbox'), undefined)
+    assert.equal(global.document.activeElement, trigger)
+    trigger.onClick(); await flush()
+    find(f.root, n => n.role === 'option' && text(n).includes('未填写')).onClick(); await flush()
+    await find(f.root, n => n.tag === 'form').onSubmit({ preventDefault() {} }); await flush()
+    assert.deepEqual(calls[1], { gender: null })
+  } finally { f.dispose() }
+})
+test('birthday calendar supports leap-day keyboard movement, quick year/month selection and no future choices', async () => {
+  const calls = [], f = setup({ updateProfile: async patch => { calls.push(patch); return { ...profile, ...patch } } })
+  try {
+    await flush(); edit(f, 'profile-birthday', '2000-02-28'); await flush()
+    const trigger = find(f.root, n => n['aria-label'] === '选择生日')
+    assert.ok(trigger, 'birthday must offer a styled calendar')
+    trigger.onClick(); await flush()
+    const day = find(f.root, n => n['data-date'] === '2000-02-28')
+    day.onKeydown({ key: 'ArrowRight', preventDefault() {}, shiftKey: false }); await flush()
+    assert.equal(global.document.activeElement['data-date'], '2000-02-29')
+    global.document.activeElement.onClick(); await flush()
+    await find(f.root, n => n.tag === 'form').onSubmit({ preventDefault() {} }); await flush()
+    assert.deepEqual(calls, [{ birthday: '2000-02-29' }])
+    trigger.onClick(); await flush()
+    find(f.root, n => n['aria-label'] === '快速选择年月').onClick(); await flush()
+    const year = find(f.root, n => n['data-year'] === 2001)
+    year.focus(); year.onClick(); await flush()
+    const month = find(f.root, n => n['data-month'] === 4)
+    month.focus(); month.onClick(); await flush()
+    assert.equal(global.document.activeElement['data-date'], '2001-04-01')
+    find(f.root, n => n['data-date'] === '2001-04-07').onClick(); await flush()
+    assert.equal(find(f.root, n => n.id === 'profile-birthday').value, '2001-04-07')
+    edit(f, 'profile-birthday', ''); await flush()
+    trigger.onClick(); await flush()
+    const today = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10)
+    const tomorrow = new Date(`${today}T00:00:00Z`); tomorrow.setUTCDate(tomorrow.getUTCDate() + 1)
+    const future = find(f.root, n => n['data-date'] === tomorrow.toISOString().slice(0, 10))
+    assert.ok(future?.disabled)
+  } finally { f.dispose() }
+})
+test('calendar can move forward from a valid birthday with a year below 1000', async () => {
+  const f = setup({})
+  try {
+    await flush(); edit(f, 'profile-birthday', '0099-06-15'); await flush()
+    await find(f.root, n => n['aria-label'] === '选择生日').onClick(); await flush()
+    const next = find(f.root, n => n['aria-label'] === '下个月')
+    assert.equal(next.disabled, false)
+    next.onClick(); await flush()
+    assert.ok(find(f.root, n => n['data-date'] === '0099-07-15'))
+  } finally { f.dispose() }
+})
 test('signature save sends only changed field and failed save keeps draft', async () => {
   const calls = [], f = setup({ updateProfile: async input => { calls.push(input); throw Error('controlled failure') } })
   try {
@@ -161,10 +279,15 @@ test('birthday picker refreshes platform date when focused after midnight', asyn
   try {
     await flush()
     const input = find(f.root, n => n.id === 'profile-birthday')
-    assert.equal(input.max, '2026-11-04')
+    const trigger = find(f.root, n => n['aria-label'] === '选择生日')
+    await trigger.onClick(); await flush()
+    assert.equal(find(f.root, n => n['data-date'] === '2026-11-05').disabled, true)
+    const picker = find(f.root, n => n.id === 'profile-birthday-calendar').parent
+    picker.onKeydown({ key: 'Escape', preventDefault() {}, stopPropagation() {} }); await flush()
     Date.now = () => Date.parse('2026-11-04T16:00:00Z')
     input.onFocus()
     await flush()
-    assert.equal(input.max, '2026-11-05')
+    await trigger.onClick(); await flush()
+    assert.equal(find(f.root, n => n['data-date'] === '2026-11-05').disabled, false)
   } finally { f.dispose(); Date.now = now }
 })

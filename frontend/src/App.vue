@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, KeepAlive } from 'vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
-import { ArrowLeft, ArrowUpRight } from '@lucide/vue'
+import { ArrowUpRight } from '@lucide/vue'
 import PlatformBrand from './components/PlatformBrand.vue'
 import AccountMenu from './features/auth/AccountMenu.vue'
 import { useAuth } from './features/auth/useAuth'
@@ -19,17 +19,13 @@ const isPublic = computed(() => ['agent-home', 'agent-plaza'].includes(String(ro
 
 <template>
   <div class="app-shell" :class="{ 'conversation-shell': isConversation }">
-    <header v-if="!isConversation" class="platform-header" :class="{ 'tool-header': !isPublic && !isAuthPage }">
+    <header v-if="!isConversation" class="platform-header">
       <PlatformBrand />
-      <nav v-if="isPublic && !isAuthPage" class="site-nav" aria-label="网站导航">
+      <nav v-if="!isAuthPage" class="site-nav" aria-label="网站导航">
         <RouterLink to="/" exact-active-class="active">首页</RouterLink>
         <RouterLink to="/agents" active-class="active">智能体</RouterLink>
       </nav>
-      <RouterLink v-else-if="!isAuthPage" class="back-link" to="/agents">
-        <ArrowLeft :size="16" aria-hidden="true" />智能体目录
-      </RouterLink>
       <AccountMenu v-if="!isAuthPage && (identityReady || auth.phase.value === 'anonymous')" />
-      <span v-if="!isPublic && !isAuthPage" class="badge">独立工作空间</span>
     </header>
 
     <main class="main-content">

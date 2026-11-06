@@ -23,7 +23,6 @@
 .account-settings-nav h2 { margin: 0 0 22px 12px; font-size: 22px; font-weight: 500; }
 .account-settings-nav > button, .account-settings-nav > a { display: flex; gap: 10px; align-items: center; min-height: 40px; padding: 8px 12px; border-radius: 7px; text-align: left; }
 .account-settings-nav > button:hover, .account-settings-nav > a:hover, .account-settings-nav > .selected { background: var(--sidebar); }
-.account-settings-nav > .account-settings-back { margin-top: 23px; color: var(--muted); font-size: 12px; }
 .account-settings-content { min-width: 0; }
 .account-settings-content h1 { font: 500 23px/1.5 'Noto Sans SC', 'Microsoft YaHei', 'PingFang SC', sans-serif; letter-spacing: 0; }
 .account-settings-description { margin: 7px 0 22px; color: var(--muted); font-size: 12px; }
@@ -46,6 +45,38 @@
 .profile-required { color: var(--accent); }
 .profile-field input, .profile-field select, .profile-field textarea { display: block; width: 100%; min-width: 0; min-height: 39px; padding: 8px 11px; border: 1px solid var(--border); border-radius: 7px; background: transparent; color: var(--ink); font: inherit; font-size: 13px; }
 .profile-field textarea { min-height: 65px; resize: vertical; }
+.profile-picker { position: relative; min-width: 0; }
+.profile-picker-trigger, .profile-date-input { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-height: 39px; border: 1px solid var(--border); border-radius: 7px; background: transparent; font-size: 13px; }
+.profile-picker-trigger { padding: 8px 11px; text-align: left; }
+.profile-picker-trigger > svg, .profile-calendar-trigger { color: var(--muted); }
+.profile-date-input { padding-right: 4px; }
+.profile-field .profile-date-input input { flex: 1; width: 0; border: 0; background: transparent; }
+.profile-date-input:focus-within { border-color: var(--accent); outline: 2px solid #b5543725; outline-offset: 1px; }
+.profile-field .profile-date-input input:focus-visible { outline: none; }
+.profile-date-input.invalid { border-color: var(--error); }
+.profile-calendar-trigger { display: grid; place-items: center; min-width: 32px; min-height: 34px; padding: 0; border-radius: 5px; }
+.profile-picker-panel { position: absolute; top: calc(100% + 7px); left: 0; right: 0; z-index: 25; max-height: min(420px, 60dvh); overflow-y: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--canvas); box-shadow: 0 8px 24px #29272214; }
+.profile-gender-options { padding: 5px; }
+.profile-gender-options > button { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: 38px; padding: 7px 11px; border-radius: 6px; text-align: left; font-size: 13px; }
+.profile-picker button:hover:not(:disabled) { background: var(--sidebar); }
+.profile-gender-options > .selected { color: var(--accent); background: var(--accent-soft); }
+.profile-picker-panel button:focus-visible { outline-offset: -2px; }
+.profile-calendar { left: auto; width: max(100%, 272px); max-width: calc(100vw - 44px); padding: 10px 10px 0; }
+.profile-calendar-heading { display: flex; align-items: center; justify-content: space-between; gap: 4px; margin-bottom: 8px; }
+.profile-calendar-arrow { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border-radius: 6px; color: var(--muted); }
+.profile-calendar-period { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 32px; padding: 4px 8px; border-radius: 6px; font-size: 13px; font-weight: 500; }
+.profile-calendar-period > svg { color: var(--muted); }
+.profile-calendar-week, .profile-calendar-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px; }
+.profile-calendar-week { padding: 3px 0 7px; color: var(--muted); font-size: 11px; text-align: center; }
+.profile-calendar-days button { height: 31px; padding: 0; border-radius: 6px; font-size: 12px; }
+.profile-calendar-days .other-month { color: #aaa395; }
+.profile-calendar-periods { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
+.profile-calendar-periods button { min-height: 40px; padding: 4px; border-radius: 6px; font-size: 12px; }
+.profile-calendar button.selected, .profile-calendar button.selected:hover { color: white; background: var(--accent); }
+.profile-calendar button:disabled { color: #b9b2a7; }
+.profile-calendar-footer { display: flex; justify-content: space-between; margin-top: 9px; padding: 6px 0; border-top: 1px solid var(--border); }
+.profile-calendar-footer button { min-height: 30px; padding: 4px 8px; border-radius: 5px; color: var(--accent); font-size: 12px; }
+.profile-picker-trigger:disabled, .profile-calendar-trigger:disabled { opacity: .65; }
 .profile-field input::placeholder, .profile-field textarea::placeholder { color: #938d81; }
 .profile-field input:focus-visible, .profile-field select:focus-visible, .profile-field textarea:focus-visible { border-color: var(--accent); outline: 2px solid #b5543725; outline-offset: 1px; }
 .profile-field [aria-invalid="true"] { border-color: var(--error); }
@@ -87,9 +118,10 @@
   .account-settings-nav { flex-direction: row; flex-wrap: wrap; gap: 5px; }
   .account-settings-nav h2 { width: 100%; margin: 0 0 11px; }
   .account-settings-nav > button, .account-settings-nav > a { min-height: 44px; font-size: 12px; }
-  .account-settings-nav > .account-settings-back { display: none; }
   .account-settings-content h1 { font-size: 20px; }
   .profile-field input, .profile-field select, .profile-field textarea { min-height: 44px; font-size: 16px; }
+  .profile-picker-trigger, .profile-calendar-trigger { min-height: 44px; font-size: 16px; }
+  .profile-calendar-days button { min-height: 36px; }
   .profile-grid { grid-template-columns: 1fr; }
   .account-trigger-name { max-width: 90px; }
   .account-dropdown-panel > a, .account-dropdown-panel > button { min-height: 44px; }

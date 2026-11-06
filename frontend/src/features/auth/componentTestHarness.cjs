@@ -8,9 +8,9 @@ function mount(name, imports, props = {}, configureElement = () => ({})) {
   const modules = new Map()
   function load(filename) {
     if (modules.has(filename)) return modules.get(filename).exports
-    const source = compileScript(parse(fs.readFileSync(filename, 'utf8')).descriptor, {
+    const source = filename.endsWith('.vue') ? compileScript(parse(fs.readFileSync(filename, 'utf8')).descriptor, {
       id: filename, inlineTemplate: true,
-    }).content
+    }).content : fs.readFileSync(filename, 'utf8')
     const m = new Module(filename, module)
     m.paths = module.paths
     modules.set(filename, m)
@@ -20,6 +20,7 @@ function mount(name, imports, props = {}, configureElement = () => ({})) {
       if (id === '@lucide/vue') return require('@lucide/vue')
       if (id in imports) return imports[id]
       if (id.startsWith('.') && id.endsWith('.vue')) return load(path.resolve(path.dirname(filename), id))
+      if (id.startsWith('.') && fs.existsSync(path.resolve(path.dirname(filename), `${id}.ts`))) return load(path.resolve(path.dirname(filename), `${id}.ts`))
       throw new Error(`Unexpected import ${id}`)
     }
     m._compile(ts.transpileModule(source, {
@@ -35,6 +36,9 @@ function mount(name, imports, props = {}, configureElement = () => ({})) {
       get options() { return this.children.filter(c => c.tag === 'option') },
       get isConnected() { let node = this; while (node.parent) node = node.parent; return node.tag === 'root' },
       focus() { if (global.document) global.document.activeElement = this },
+      getAttribute(name) { return this[name] == null ? null : String(this[name]) },
+      contains(target) { for (let node = target; node; node = node.parent) if (node === this) return true; return false },
+      scrollIntoView() {},
       showModal() { this.open = true },
       close() { if (!this.open) return; this.open = false; queueMicrotask(() => this.onClose?.({ target: this })) },
       ...configureElement(tag),
