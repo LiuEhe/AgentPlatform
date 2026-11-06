@@ -83,7 +83,8 @@ AgentPlatform/
 | 前端账号 | `features/auth/` 管表单和身份控制；`api/client.ts、auth.ts、users.ts` 管请求；`App.vue/router/` 处理私有页面清理与守卫 |
 | 前端会话状态 | `features/conversation-assistant/useConversation.ts` 协调历史、消息和流式运行；`conversationSnapshots.ts` 保存/恢复快照并失效引用，`conversationDeletions.ts` 维护删除待重试项与请求生命周期，两者仅供会话协调入口使用 |
 | 前端样式 | `style.css` 管公共规则；账号的 `auth.css/account.css`、会话的 `conversation.css`、审核的 `review.css`、页面的 `public-pages.css` 管各自样式，全部从 `main.ts` 按固定顺序加载 |
-| 通用确认框 | `components/ConfirmDialog.vue` 接收打开状态、标题、说明、目标标签、按钮语气及禁用状态，输出关闭和确认事件；会话删除、退出登录、账号状态与停止等待共用，原生 dialog 负责模态，业务操作留在调用方 |
+| 通用确认框 | `components/ConfirmDialog.vue` 接收打开状态、标题、说明、目标标签、按钮语气及禁用状态，输出关闭和确认事件；会话删除、退出登录、账号状态、停止等待及放弃资料修改共用，原生 dialog 负责模态，业务操作留在调用方 |
+| 资料选择与离开 | `features/auth/ProfileGenderField.vue` 与 `ProfileBirthdayField.vue` 接收资料值、禁用状态与日期上限，输出值变化；`profileDates.ts` 只管日期校验和 UTC 日期运算。三者由 `ProfileForm.vue` 使用，表单负责保存与异步离开确认 |
 | 头像裁剪 | `AvatarCropper.vue` 用 dialog、Canvas、Pointer Events 将 File 转成确认 PNG 或取消事件，仅供 `ProfileForm.vue` 调用；`UserAvatar.vue` 读取受保护图片 |
 | 数据库维护 | `scripts/manage_users.py` 负责当前结构初始化、检查点建表和 admin 密码恢复，不是旧版数据迁移器 |
 

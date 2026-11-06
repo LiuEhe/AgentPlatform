@@ -83,4 +83,5 @@ jobs:
           src/components/confirmationFlows.test.cjs
           src/features/auth/AccountMenu.test.cjs
           src/features/auth/UserManagement.test.cjs
+          src/features/auth/ProfileForm.test.cjs
       - run: pnpm build
