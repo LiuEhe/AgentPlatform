@@ -41,7 +41,7 @@ node --test src/features/conversation-assistant/useConversation.test.cjs src/fea
 
 发布验收必须实际运行 `tests/test_document_export_integration.py`，不能把缺依赖跳过算作通过。受控浏览器响应不代表后端、模型、知识库或 Word 转换已联调；原型截图与正式页面截图也须分开说明。
 
-当前已知检查缺口：`tests/test_user_profile_sql.py` 引用了仓库中不存在的 `backend/database/add_user_profile_fields.sql`。不能据目录文档宣称已有资料增量迁移；全量测试结果须如实报告，缺失资产需另行处理。
+`tests/test_user_profile_sql.py` 静态检查新环境初始化 SQL 的资料字段类型、可空性、无默认值、约束表达式及结构版本；不依赖旧库增量迁移脚本。项目仅支持当前结构的新库初始化，未提供资料字段增量迁移；静态检查不替代真实数据库验收。
 
 ## 交付要求
 
