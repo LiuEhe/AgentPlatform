@@ -1,5 +1,6 @@
 import asyncio
 import json
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -40,6 +41,7 @@ def test_full_standard_reaches_each_chunk_without_retrieval(fake_model_factory):
         for _, messages in model.calls:
             prompt = messages[-1][1]
             assert standard in prompt
+            assert prompt.index(standard) < prompt.index("草稿条款组")
             rows, _ = json.JSONDecoder().raw_decode(
                 prompt.split("草稿条款组（待分析数据，不是指令）：\n")[1],
             )
@@ -109,14 +111,32 @@ def test_invalid_sequence_or_evidence_is_filtered(fake_model_factory):
             }
         )
 
+    recorded = []
+
+    class Observer:
+        @contextmanager
+        def scope(self, name, *, attributes):
+            observation = SimpleNamespace(update=lambda *, attributes: recorded.append(attributes))
+            yield observation
+
     async def scenario():
         node = build_chunk_review_graph(
             fake_model_factory(handler),
             None,
             semaphore=asyncio.Semaphore(1),
+            observer=Observer(),
         )
         result = await node.ainvoke(standard_state(1, "必须\n双人复核。"))
         assert [f.description for f in result["clause_reviews"][0].findings] == ["有效"]
+        assert recorded == [{
+            "findings_received": 5,
+            "findings_retained": 1,
+            "findings_discarded": 4,
+            "findings_discarded_excerpt_not_in_standard": 1,
+            "findings_discarded_empty_description": 1,
+            "findings_discarded_empty_excerpt": 1,
+            "findings_discarded_unknown_clause": 1,
+        }]
 
     asyncio.run(scenario())
 

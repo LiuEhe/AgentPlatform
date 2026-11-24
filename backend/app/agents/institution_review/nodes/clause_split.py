@@ -1,6 +1,7 @@
 """使用确定性规则将 Markdown 按章、节和条拆分。"""
 
 import re
+from dataclasses import dataclass
 
 from app.agents.institution_review.graph.state import ReviewState
 from app.agents.institution_review.schemas import Clause, ReviewChunk, ReviewMode
@@ -20,9 +21,8 @@ def _heading_text(line: str) -> str:
     return match.group(1).strip() if match else line.strip()
 
 
-def split_markdown_clauses(markdown: str, title: str | None = None) -> list[Clause]:
-    """按章、节和条切分 Markdown，并保留未编号正文。"""
-    clauses: list[Clause] = []
+@dataclass
+class _ClauseLocation:
     chapter: str | None = None
     section: str | None = None
     article: str | None = None
@@ -30,6 +30,30 @@ def split_markdown_clauses(markdown: str, title: str | None = None) -> list[Clau
     item: str | None = None
     article_heading: str | None = None
     paragraph_heading: str | None = None
+
+    def start_chapter(self, label: str) -> None:
+        self.chapter = label
+        self.start_section(None)
+
+    def start_section(self, label: str | None) -> None:
+        self.section = label
+        self.start_article(None, None)
+
+    def start_article(self, label: str | None, heading: str | None) -> None:
+        self.article = label
+        self.article_heading = heading
+        self.start_paragraph(None, None)
+
+    def start_paragraph(self, label: str | None, heading: str | None) -> None:
+        self.paragraph = label
+        self.paragraph_heading = heading
+        self.item = None
+
+
+def split_markdown_clauses(markdown: str, title: str | None = None) -> list[Clause]:
+    """按章、节和条切分 Markdown，并保留未编号正文。"""
+    clauses: list[Clause] = []
+    location = _ClauseLocation()
     current_lines: list[str] = []
 
     def flush() -> None:
@@ -37,11 +61,11 @@ def split_markdown_clauses(markdown: str, title: str | None = None) -> list[Clau
         if content:
             clauses.append(
                 Clause(
-                    chapter=chapter,
-                    section=section,
-                    article=article,
-                    paragraph=paragraph,
-                    item=item,
+                    chapter=location.chapter,
+                    section=location.section,
+                    article=location.article,
+                    paragraph=location.paragraph,
+                    item=location.item,
                     content=content,
                     sequence=len(clauses) + 1,
                 )
@@ -62,53 +86,39 @@ def split_markdown_clauses(markdown: str, title: str | None = None) -> list[Clau
         chapter_match = _CHAPTER_PATTERN.match(line)
         if chapter_match:
             flush()
-            chapter = f"{chapter_match.group(1)} {chapter_match.group(2)}".strip()
-            section = None
-            article = None
-            paragraph = None
-            item = None
-            article_heading = None
-            paragraph_heading = None
+            location.start_chapter(f"{chapter_match.group(1)} {chapter_match.group(2)}".strip())
             continue
 
         section_match = _SECTION_PATTERN.match(line)
         if section_match:
             flush()
-            section = f"{section_match.group(1)} {section_match.group(2)}".strip()
-            article = None
-            paragraph = None
-            item = None
-            article_heading = None
-            paragraph_heading = None
+            location.start_section(f"{section_match.group(1)} {section_match.group(2)}".strip())
             continue
 
         article_match = _ARTICLE_PATTERN.match(line)
         if article_match:
             flush()
-            article = f"{article_match.group(1)} {article_match.group(2)}".strip()
-            paragraph = None
-            item = None
-            article_heading = line
-            paragraph_heading = None
+            location.start_article(
+                f"{article_match.group(1)} {article_match.group(2)}".strip(), line,
+            )
             if article_match.group(2).strip():
                 current_lines.append(line)
             continue
 
         paragraph_match = _PARAGRAPH_PATTERN.match(line)
-        if paragraph_match and article:
+        if paragraph_match and location.article:
             flush()
-            paragraph = paragraph_match.group(1)
-            item = None
-            paragraph_heading = line
-            current_lines.extend(part for part in (article_heading, line) if part)
+            location.start_paragraph(paragraph_match.group(1), line)
+            current_lines.extend(part for part in (location.article_heading, line) if part)
             continue
 
         item_match = _ITEM_PATTERN.match(line)
-        if item_match and article:
+        if item_match and location.article:
             flush()
-            item = item_match.group(1)
+            location.item = item_match.group(1)
             current_lines.extend(
-                part for part in (article_heading, paragraph_heading, line) if part
+                part for part in (location.article_heading, location.paragraph_heading, line)
+                if part
             )
             continue
 

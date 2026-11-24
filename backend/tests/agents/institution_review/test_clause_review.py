@@ -472,7 +472,7 @@ def test_send_failure_or_cancel_releases_quota(mode, cancel, stage, fake_model_f
     from contextlib import contextmanager
 
     from app.agents.institution_review.graph.chunk_review import build_chunk_review_graph
-    from app.core.observability import NullObserver
+    from app.core.observability import NullObservation, NullObserver
 
     async def scenario():
         entered, attempted = asyncio.Queue(), asyncio.Queue()
@@ -488,7 +488,7 @@ def test_send_failure_or_cancel_releases_quota(mode, cancel, stage, fake_model_f
                 open_scopes.add(number)
                 attempted.put_nowait(number)
                 try:
-                    yield
+                    yield NullObservation()
                 finally:
                     open_scopes.remove(number)
 

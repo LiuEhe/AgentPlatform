@@ -50,7 +50,7 @@ uv run uvicorn app.main:create_app --factory --reload --loop app.infrastructure.
 
 `POST /api/v1/reviews` 使用 `multipart/form-data`，通过 `review_mode` 指定方式，同步返回 `text/markdown`。前端默认选标准文档，并显式传入方式。
 
-流程是“拆分条款 + 全文术语检查 → 审核条款 → 汇总报告与建议”。条款任务由 LangGraph `Send` 分发，共享同进程额度，结果按原序号汇总，并等待全文检查完成。**标准文档模式**超过 30 个草稿块时按原顺序合并到最多 30 组，每组输入完整标准，不截断原文。
+流程是“拆分条款 + 全文术语检查 → 审核条款 → 汇总报告与建议”。条款任务由 LangGraph `Send` 分发，共享同进程额度，结果按原序号汇总，并等待全文检查完成。**标准文档模式**超过 30 个草稿块时按原顺序合并到最多 30 组，每组输入完整标准，将标准名称和全文放在变化的草稿条款组之前。
 
 草稿与标准分别受文件和字符上限约束。字符数不等于模型 Token 数，模型上下文或额度不足时明确报错；通过条款不列入问题汇总，模型或检索失败不会当作通过。
 
@@ -175,6 +175,7 @@ uv run uvicorn app.main:create_app --factory --reload --loop app.infrastructure.
 
 - 设置后端凭据与 `LANGFUSE_ENABLED=true`。默认 `LANGFUSE_CAPTURE_CONTENT=false`，仅上传标识、状态、用量和白名单元数据；开启正文采集才上传正文与图状态，凭据始终过滤。上报失败不改变业务结果。
 - 会话每轮独立追踪，以 session_id 分组；健康、状态查询与 SSE 订阅不重复追踪。
+- 条款执行组记录收到、保留和过滤的发现数及过滤原因。计数字段随追踪关联到审核运行。
 - Token 用供应商 usage；美元费用按 Langfuse 模型价表估算，缺价格或用量为未知，不统计 RAGFlow 内部不可见费用。
 - 人民币估算需精确匹配 `LANGFUSE_COST_MODEL`，并填输入、输出、缓存输入的 `LANGFUSE_*_CNY_PER_MILLION` 价格；写入 metadata 的 `estimated_cost_cny`，不替代美元 `cost_details`。服务不自动同步价格或汇率，历史费用不补算。
 

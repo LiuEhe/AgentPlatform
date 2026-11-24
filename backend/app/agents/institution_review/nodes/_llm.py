@@ -3,7 +3,7 @@
 import logging
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from app.agents.institution_review.config import SYSTEM_PROMPT
 from app.core.errors import AppError
@@ -42,7 +42,7 @@ async def invoke_structured[OutputT: BaseModel](
         return result
     try:
         return output_schema.model_validate(result)
-    except Exception as exc:
+    except ValidationError as exc:
         logger.warning("model_output_invalid schema=%s", output_schema.__name__)
         raise AppError("MODEL_ERROR", "模型服务返回格式无效", 502) from exc
 

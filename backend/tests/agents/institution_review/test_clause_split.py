@@ -63,3 +63,21 @@ def test_split_preserves_chapter_section_article_paragraph_item():
         "第一章 总则", "第二节 范围", "第三条 要求", "（一）", "1.",
     )
     assert "具体要求" in clause.content
+
+
+
+def test_numeric_articles_reset_subitems_and_keep_unstructured_numbering():
+    from app.agents.institution_review.nodes.clause_split import split_markdown_clauses
+
+    clauses = split_markdown_clauses(
+        "一、概述\n| 1. 表内编号 | 内容 |\n"
+        "第1条 范围\n（一）职责\n    1. 子项\n"
+        "第2条 例外\n一般正文"
+    )
+    assert [(c.article, c.paragraph, c.item) for c in clauses] == [
+        (None, None, None), ("第1条 范围", None, None),
+        ("第1条 范围", "（一）", None), ("第1条 范围", "（一）", "1."),
+        ("第2条 例外", None, None),
+    ]
+    assert "一、概述\n| 1. 表内编号 | 内容 |" == clauses[0].content
+    assert clauses[-1].content == "第2条 例外\n一般正文"

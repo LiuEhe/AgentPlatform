@@ -19,8 +19,8 @@ class LangfuseObservation:
             status = attributes.get("status")
             level = "ERROR" if status == "failed" else "WARNING" if status == "cancelled" else None
             self._span.update(metadata=dict(attributes), level=level)
-        except Exception:
-            logger.warning("observation_update_failed")
+        except Exception as exc:
+            logger.warning("observation_update_failed error_type=%s", type(exc).__name__)
 
 
 class LangfuseObserver:
@@ -50,8 +50,8 @@ class LangfuseObserver:
                 )
                 propagation.__enter__()
                 observation = LangfuseObservation(span)
-            except Exception:
-                logger.warning("observation_start_failed")
+            except Exception as exc:
+                logger.warning("observation_start_failed error_type=%s", type(exc).__name__)
                 observation = NullObservation()
             try:
                 yield observation
@@ -68,8 +68,10 @@ class LangfuseObserver:
                 if manager is not None:
                     try:
                         manager.__exit__(None, None, None)
-                    except Exception:
-                        logger.warning("observation_close_failed")
+                    except Exception as exc:
+                        logger.warning(
+                            "observation_close_failed error_type=%s", type(exc).__name__,
+                        )
             if token is not None:
                 context.detach(token)
 
