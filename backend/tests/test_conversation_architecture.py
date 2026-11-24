@@ -40,13 +40,15 @@ def test_store_does_not_import_http_views():
 
 
 def test_service_has_no_private_agent_orchestration():
-    assert not any(
-        module.startswith("app.agents")
-        for module in imports(APP / "services" / "conversation_service.py")
-    )
-    assert {path.name for path in (APP / "services").glob("conversation_*.py")} == {
+    services = set((APP / "services").glob("conversation_*.py"))
+    assert {path.name for path in services} == {
+        "conversation_deletion_service.py",
+        "conversation_run_service.py",
         "conversation_service.py",
+        "conversation_upload_service.py",
     }
+    for path in services:
+        assert not any(module.startswith("app.agents") for module in imports(path)), path
 
 
 def test_legacy_intent_entry_is_removed():

@@ -70,7 +70,7 @@
 | --- | --- | --- |
 | `UNSUPPORTED_DOCUMENT_TYPE` | 415 | 文件类型不支持，仅接受 DOCX |
 | `EMPTY_DOCUMENT` | 422 | 上传文件为空 |
-| `UPLOAD_TOO_LARGE` | 413 | 原件或解压后的内容/条目超过限制 |
+| `UPLOAD_TOO_LARGE` | 413 | 上传请求、单件原件或解压后的内容与条目超过限制 |
 | `INVALID_DOCX` | 422 | DOCX 损坏、格式无效或没有有效文字 |
 | `REVIEW_CONTENT_TOO_LONG` | 422 / 413 | 正文过长；独立审核为 422，会话上传为 413 |
 | `REVIEW_CONTENT_EMPTY` | 422 | 没有可审核的条款内容 |

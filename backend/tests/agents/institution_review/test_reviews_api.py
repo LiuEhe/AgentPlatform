@@ -1,3 +1,5 @@
+import asyncio
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -37,7 +39,7 @@ def test_standard_request_without_rag_runs_real_graph(
         assert "第一条 草稿正文" in prompt and "标准全文" in prompt
 
 
-def test_readiness_reports_mode_configuration_without_probing(monkeypatch, fake_model_factory):
+def test_readiness_reports_mode_configuration(monkeypatch, fake_model_factory):
     monkeypatch.setattr("app.main.create_llm_service", lambda _: fake_model_factory())
     with TestClient(create_app(settings())) as client:
         response = client.get("/health/ready")
@@ -147,3 +149,59 @@ def test_title_only_draft_rejected_without_model_calls(
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "REVIEW_CONTENT_EMPTY"
     assert model.calls == []
+
+
+@pytest.mark.parametrize("failure", ["acquire_timeout", "owner_closed"])
+def test_readiness_reports_unavailable_business_storage(monkeypatch, fake_model_factory, failure):
+    monkeypatch.setattr("app.main.create_llm_service", lambda _: fake_model_factory())
+
+    @asynccontextmanager
+    async def blocked_acquire(_pool, *, timeout):
+        await asyncio.sleep(10)
+        yield
+
+    with TestClient(create_app(settings())) as client:
+        database = client.app.state.database
+        assert client.get("/health/ready").status_code == 200
+        if failure == "acquire_timeout":
+            monkeypatch.setattr(type(database._pool), "acquire", blocked_acquire)
+        else:
+            client.portal.call(database.aclose)
+        response = client.get("/health/ready")
+        assert response.status_code == 503
+        assert response.json()["issues"] == ["数据库暂时不可用"]
+        assert client.get("/health/live").status_code == 200
+
+
+def test_startup_failure_closes_registered_workloads_before_http_client(monkeypatch):
+    from app.services.conversation_service import ConversationService
+
+    closed = []
+    close_service = ConversationService.aclose
+
+    async def close_workload(self):
+        closed.append("conversation")
+        await close_service(self)
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            closed.append("http")
+
+    def fail(_settings):
+        raise RuntimeError("test startup failure")
+
+    monkeypatch.setattr(ConversationService, "aclose", close_workload)
+    monkeypatch.setattr("app.main.httpx.AsyncClient", Client)
+    monkeypatch.setattr("app.main.create_llm_service", fail)
+    app = create_app(settings())
+    with pytest.raises(RuntimeError, match="test startup failure"), TestClient(app):
+        pytest.fail("startup must fail")
+    assert closed == ["conversation", "http"]
+    assert app.state.database is None
+    assert app.state.conversation_service is None

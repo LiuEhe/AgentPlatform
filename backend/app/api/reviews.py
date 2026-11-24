@@ -35,8 +35,8 @@ async def create_review(
             raise AppError("STANDARD_DOCUMENT_REQUIRED", "请上传标准文档", 422)
         if review_mode == ReviewMode.KNOWLEDGE_BASE and standard_file is not None:
             raise AppError("INVALID_REVIEW_INPUT", "知识库模式不能附带标准文档", 422)
-        runtime = getattr(request.app.state, "agent_runtime", None)
-        if runtime is None:
+        service: ReviewService | None = getattr(request.app.state, "review_service", None)
+        if service is None:
             raise AppError("SERVICE_NOT_READY", "模型服务尚未配置就绪", 503)
         if review_mode == ReviewMode.KNOWLEDGE_BASE and settings.ragflow_issues():
             raise AppError("RAGFLOW_NOT_CONFIGURED", "知识库审核所需的 RAGFlow 配置不完整", 503)
@@ -45,9 +45,6 @@ async def create_review(
         standard_content = None
         if standard_file is not None:
             standard_content = await standard_file.read(settings.max_upload_bytes + 1)
-        service = ReviewService(
-            settings, runtime, observer=getattr(request.app.state, "observer", None)
-        )
         report = await service.review_document(
             file.filename or "",
             content,

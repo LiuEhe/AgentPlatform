@@ -1,6 +1,8 @@
 import asyncio
 from io import BytesIO
+from threading import Event
 from types import SimpleNamespace
+from zipfile import ZipFile
 
 import pytest
 from docx import Document
@@ -187,3 +189,54 @@ def test_rejects_conflicting_mode_inputs_before_runtime(kwargs, expected) -> Non
     assert raised.value.code == expected
     assert raised.value.status_code == 422
     assert runtime.calls == []
+
+
+
+def test_rejects_archive_entry_limit_in_standard_document():
+    service, runtime = make_service()
+    buffer = BytesIO()
+    with ZipFile(buffer, "w") as archive:
+        for index in range(2001):
+            archive.writestr(f"entry-{index}", b"")
+
+    with pytest.raises(AppError) as raised:
+        asyncio.run(service.review_document(
+            "draft.docx", make_docx(), review_mode="standard_document",
+            standard_filename="standard.docx", standard_content=buffer.getvalue(),
+        ))
+    assert (raised.value.code, raised.value.status_code) == ("UPLOAD_TOO_LARGE", 413)
+    assert runtime.calls == []
+
+
+def test_cancelled_converter_keeps_slot_until_thread_exits(monkeypatch):
+    async def scenario():
+        entered = asyncio.Event()
+        release = Event()
+        started = []
+        loop = asyncio.get_running_loop()
+        service = ReviewService(Settings(_env_file=None), FakeRuntime(), parse_concurrency=1)
+
+        def parse(content, *, max_chars):
+            started.append(content)
+            if content == b"first":
+                loop.call_soon_threadsafe(entered.set)
+                assert release.wait(3)
+            return "正文"
+
+        monkeypatch.setattr("app.services.review_service.parse_docx", parse)
+        pending = asyncio.create_task(service.review_document("first.docx", b"first"))
+        following = asyncio.create_task(service.review_document("second.docx", b"second"))
+        try:
+            await entered.wait()
+            pending.cancel()
+            await asyncio.sleep(0)
+            assert not pending.done()
+            assert started == [b"first"]
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert await following == "# 审核报告"
+        assert started == [b"first", b"second"]
+
+    asyncio.run(asyncio.wait_for(scenario(), 5))

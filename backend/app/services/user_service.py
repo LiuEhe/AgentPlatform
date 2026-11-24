@@ -52,8 +52,8 @@ class UserService:
         except asyncio.CancelledError:
             try:
                 await self._settle(task)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("avatar_work_cancelled error_type=%s", type(exc).__name__)
             raise
 
     async def _discard_avatar(self, path):
@@ -73,8 +73,8 @@ class UserService:
             except asyncio.CancelledError:
                 try:
                     path = await self._settle(worker)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("avatar_publish_cancelled error_type=%s", type(exc).__name__)
                 raise
             result = await self.store.replace_avatar(actor, path, state=state)
         except BaseException:

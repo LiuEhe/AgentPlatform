@@ -76,6 +76,8 @@ AgentPlatform/
 | 业务数据库 | `infrastructure/database.py` 提供 Database/BaseDatabase，身份与会话仓储共享池和事务；维护脚本及数据库测试也复用基类 |
 | 账号与资料 | `api/auth.py、users.py` → `auth_service.py、user_service.py` → `infrastructure/identity/`；共享契约在 `schemas/identity.py` |
 | 头像处理 | `identity/avatar_store.py` 接收可信用户 ID、文件名和字节，输出相对路径或图片字节；用户服务协调额度与提交，API 约束请求量 |
+| 会话应用用例 | `services/conversation_service.py` 保留应用入口。上传由 `conversation_upload_service.py` 管理，删除与恢复由 `conversation_deletion_service.py` 管理，运行和 SSE 由 `conversation_run_service.py` 管理 |
+| DOCX 接收与解析 | `api/document_uploads.py` 按入口限制实际请求体，独立审核和会话上传复用 `nodes/document/parse.py`，由各自应用用例管理线程解析额度 |
 | 完整会话历史 | `conversation/postgres_store.py` 保存业务历史与归属；`conversation_service.py` 协调用例，`active_runs.py` 只管进程内活动资源 |
 | 短期记忆资源 | `conversation/checkpoints.py` 接收配置/schema，提供官方 saver；应用、初始化脚本和删除用例使用，独立 Psycopg 池仅供官方 API |
 | 记忆输入输出 | `schemas/conversation_turn.py` 定义当前轮、材料 reader、成功位置和 thread_id；服务与 Agent 适配器共用 |

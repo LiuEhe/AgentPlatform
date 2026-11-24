@@ -146,7 +146,7 @@ def test_pending_review_then_smalltalk_never_executes_review(monkeypatch, fake_m
         async def pending():
             from app.schemas.conversation_turn import conversation_thread_id
 
-            saver = client.app.state.conversation_service._checkpoints.saver
+            saver = client.app.state.conversation_service._runs._checkpoints.saver
             checkpoint = await saver.aget_tuple({
                 "configurable": {"thread_id": conversation_thread_id("conversation_assistant", id)}
             })
@@ -238,7 +238,7 @@ def test_summary_then_review_uses_original_and_restart_ignores_uncommitted_branc
                 turn.agent_id,
                 turn.model_dump(),
                 resources=ConversationTurnResources(
-                    service._material_reader(actor.user.user_id, sid)
+                    service._runs._material_reader(actor.user.user_id, sid)
                 ),
             )
             assert result.output.checkpoint_id != turn.checkpoint_id
@@ -254,7 +254,7 @@ def test_summary_then_review_uses_original_and_restart_ignores_uncommitted_branc
 
         async def memory_state():
             service = client.app.state.conversation_service
-            saved = await service._checkpoints.saver.aget_tuple({"configurable": {
+            saved = await service._runs._checkpoints.saver.aget_tuple({"configurable": {
                 "thread_id": conversation_thread_id("conversation_assistant", sid),
             }})
             return saved.checkpoint["channel_values"]
@@ -333,7 +333,7 @@ def test_cancel_conversation_waits_for_review_chunk_cleanup(
                     assert await controls["entered"][key].get() == key
 
         async def release_and_wait(key, run_id):
-            task = client.app.state.conversation_service._tasks.get(run_id)
+            task = client.app.state.conversation_service._runs._tasks.get(run_id)
             controls[key].set()
             if task:
                 await asyncio.wait_for(task, 5)
@@ -373,7 +373,7 @@ def test_cancel_after_graph_completion_keeps_committed_memory(monkeypatch, fake_
         sid = client.post("/api/v1/sessions").json()["session_id"]
         send(client, sid, "成功轮", 1)
         service = client.app.state.conversation_service
-        original_finish = service._finish
+        original_finish = service._runs._finish
         block = {"enabled": True}
 
         async def setup():
@@ -387,7 +387,7 @@ def test_cancel_after_graph_completion_keeps_committed_memory(monkeypatch, fake_
                 await asyncio.Event().wait()
             return await original_finish(owner, session_id, run_id, completion)
 
-        monkeypatch.setattr(service, "_finish", before_commit)
+        monkeypatch.setattr(service._runs, "_finish", before_commit)
         submitted = client.post(
             f"/api/v1/sessions/{sid}/messages",
             json={"client_message_id": "2", "content": "图完成但未提交"},

@@ -140,7 +140,7 @@ def test_terminal_commit_failure_never_emits_done(actor, postgres_target, monkey
 
         original = store.finish
         monkeypatch.setattr(store, "finish", fail)
-        task = service._tasks[run.run_id]
+        task = service._runs._tasks[run.run_id]
         gate.set()
         await task
         with pytest.raises(AppError):

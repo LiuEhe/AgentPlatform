@@ -1,5 +1,6 @@
 """协调 DOCX 读取、请求校验和制度审核运行时。"""
 
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -9,7 +10,7 @@ from app.agents.institution_review.schemas import ReviewMode
 from app.core.config import Settings
 from app.core.errors import AppError
 from app.core.observability import NullObserver
-from app.nodes.document.docx_to_markdown import DocumentReadError, convert_docx_to_markdown
+from app.nodes.document.parse import DocumentParseError, parse_docx
 from app.runtime.agent_runtime import AgentRuntime
 
 logger = logging.getLogger(__name__)
@@ -20,12 +21,22 @@ _STRUCTURAL_HEADING_PATTERN = re.compile(r"^第[一二三四五六七八九十�
 class ReviewService:
     """执行上传制度的读取、校验和同步审核。"""
 
-    def __init__(self, settings: Settings, runtime: AgentRuntime, *, observer=None) -> None:
+    def __init__(
+        self, settings: Settings, runtime: AgentRuntime, *,
+        observer=None, parse_concurrency: int = 2,
+    ) -> None:
         self._settings = settings
         self._runtime = runtime
         self._observer = observer or NullObserver()
+        self._parse_slots = asyncio.Semaphore(parse_concurrency)
+        self._parsing: set[asyncio.Task[str]] = set()
+        self._closed = False
 
-    def _read_document(self, filename: str, content: bytes, *, label: str) -> str:
+    async def aclose(self) -> None:
+        self._closed = True
+        await asyncio.gather(*self._parsing, return_exceptions=True)
+
+    async def _read_document(self, filename: str, content: bytes, *, label: str) -> str:
         """对草稿和标准分别应用同样的文件及正文限制。"""
         if Path(filename).suffix.casefold() != ".docx":
             raise AppError("UNSUPPORTED_DOCUMENT_TYPE", f"{label}只支持 .docx 文件", 415)
@@ -34,19 +45,31 @@ class ReviewService:
         if len(content) > self._settings.max_upload_bytes:
             raise AppError("UPLOAD_TOO_LARGE", f"{label}超过大小限制", 413)
 
-        try:
+        async with self._parse_slots:
+            if self._closed:
+                raise AppError("SERVICE_NOT_READY", "审核服务正在关闭", 503)
             with self._observer.scope("document.parse"):
-                markdown = convert_docx_to_markdown(content)
-        except DocumentReadError as exc:
-            raise AppError("INVALID_DOCX", f"{label}无法读取或不包含可审核文本", 422) from exc
-
-        if len(markdown) > self._settings.max_review_chars:
-            raise AppError(
-                "REVIEW_CONTENT_TOO_LONG",
-                f"转换后的{label}正文不能超过 {self._settings.max_review_chars} 个字符",
-                422,
-            )
-        return markdown
+                worker = asyncio.create_task(asyncio.to_thread(
+                    parse_docx, content, max_chars=self._settings.max_review_chars,
+                ))
+                self._parsing.add(worker)
+                try:
+                    return await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    # Once started, the conversion owns its slot until the thread exits.
+                    while not worker.done():
+                        try:
+                            await asyncio.wait((worker,))
+                        except asyncio.CancelledError:
+                            continue
+                    if not worker.cancelled():
+                        worker.exception()
+                    raise
+                except DocumentParseError as exc:
+                    status = 413 if exc.code == "UPLOAD_TOO_LARGE" else 422
+                    raise AppError(exc.code, f"{label}：{exc.message}", status) from exc
+                finally:
+                    self._parsing.discard(worker)
 
     async def review_document(
         self,
@@ -68,10 +91,10 @@ class ReviewService:
         elif standard_filename is not None or standard_content is not None:
             raise AppError("INVALID_REVIEW_INPUT", "知识库模式不能附带标准文档", 422)
 
-        markdown = self._read_document(filename, content, label="制度草稿")
+        markdown = await self._read_document(filename, content, label="制度草稿")
         payload: dict[str, object] = {}
         if mode == ReviewMode.STANDARD_DOCUMENT:
-            standard_markdown = self._read_document(
+            standard_markdown = await self._read_document(
                 standard_filename,
                 standard_content,
                 label="标准文档",
@@ -91,6 +114,9 @@ class ReviewService:
         if document_title and document_title != title:
             payload["document_title"] = document_title
         payload.update(title=title, content=markdown)
+
+        if self._closed:
+            raise AppError("SERVICE_NOT_READY", "审核服务正在关闭", 503)
 
         try:
             execution = await self._runtime.invoke(

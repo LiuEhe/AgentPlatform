@@ -69,4 +69,4 @@ pnpm dev
 | 修改项目时遵守什么 | [AGENTS.md](AGENTS.md) |
 | 运行哪些检查、哪些仍需人工验收 | [质量门禁](docs/ai-coding/quality-gates.md) |
 
-后端启动后可在 `http://127.0.0.1:8000/docs` 查看接口。健康检查为 `/health/live` 和 `/health/ready`；后者只检查模型配置与运行时，不验证外部网络或账户额度。
+后端启动后可在 `http://127.0.0.1:8000/docs` 查看接口。健康检查为 `/health/live` 和 `/health/ready`；后者检查模型配置、运行业务所需的数据库及审核运行时。模型和知识库的外部网络及账户额度需另行验证。

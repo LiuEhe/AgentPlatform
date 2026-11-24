@@ -54,14 +54,14 @@ def test_run_has_new_root_after_202_and_preserves_request_id(actor):
             result = await service.submit(actor,
                 session.session_id, MessageCreate(client_message_id="x", content="hi")
             )
-        task = service._tasks[result.run_id]
+        task = service._runs._tasks[result.run_id]
         await task
         roots = [r for r in observer.records if r["name"] == "conversation.run"]
         assert len(roots) == 1 and roots[0]["parent"] is None
         assert roots[0]["request_id"] == "request-1"
         assert roots[0]["session_id"] == session.session_id
         await service.aclose()
-        await service._checkpoints.aclose()
+        await service._runs._checkpoints.aclose()
         await service._store.database.aclose()
 
     asyncio.run(run())
@@ -75,7 +75,7 @@ def test_idempotent_submit_creates_one_run_trace(actor):
         first = await service.submit(actor, session.session_id, message)
         second = await service.submit(actor, session.session_id, message)
         assert first.run_id == second.run_id
-        await asyncio.gather(*list(service._tasks.values()))
+        await asyncio.gather(*list(service._runs._tasks.values()))
         assert len(observer.records) == 1
         await service.aclose()
         await service._store.database.aclose()
@@ -87,17 +87,17 @@ def test_cancel_while_queued_finishes_observation(actor):
     async def run():
         service, observer = await build_service()
         for _ in range(service.settings.conversation_concurrency):
-            await service._slots.acquire()
+            await service._runs._slots.acquire()
         session = await service.create(actor)
         result = await service.submit(actor,
             session.session_id, MessageCreate(client_message_id="x", content="hi")
         )
-        task = service._tasks[result.run_id]
+        task = service._runs._tasks[result.run_id]
         await asyncio.sleep(0)
         await service.cancel(actor, session.session_id, result.run_id)
         await asyncio.gather(task, return_exceptions=True)
         assert observer.records[0]["attributes"]["status"] == "cancelled"
-        assert result.run_id not in service._tasks
+        assert result.run_id not in service._runs._tasks
         await service.aclose()
         await service._store.database.aclose()
 

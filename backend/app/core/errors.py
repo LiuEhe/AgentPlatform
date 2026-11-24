@@ -28,23 +28,27 @@ def request_id_for(request: Request) -> str:
     return getattr(request.state, "request_id", str(uuid4()))
 
 
+def app_error_response(request: Request, exc: AppError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        headers={"Retry-After": str(exc.retry_after_seconds)}
+        if exc.retry_after_seconds is not None else None,
+        content={
+            "error": {
+                "code": exc.code,
+                "message": exc.message,
+                "request_id": request_id_for(request),
+            }
+        },
+    )
+
+
 def install_error_handlers(app: FastAPI) -> None:
     """注册统一异常响应，不把内部异常细节返回给客户端。"""
 
     @app.exception_handler(AppError)
     async def handle_app_error(request: Request, exc: AppError) -> JSONResponse:
-        return JSONResponse(
-            status_code=exc.status_code,
-            headers={"Retry-After": str(exc.retry_after_seconds)}
-            if exc.retry_after_seconds is not None else None,
-            content={
-                "error": {
-                    "code": exc.code,
-                    "message": exc.message,
-                    "request_id": request_id_for(request),
-                }
-            },
-        )
+        return app_error_response(request, exc)
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(

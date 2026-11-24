@@ -259,11 +259,9 @@ class DocumentExportService:
         cancelled = False
         while not task.done():
             try:
-                await asyncio.shield(task)
+                await asyncio.wait((task,))
             except asyncio.CancelledError:
                 cancelled = True
-            except Exception:
-                break
         if cancelled:
             # 消费线程异常，但调用方取消始终优先，且槽位保持到线程实际结束。
             if not task.cancelled():

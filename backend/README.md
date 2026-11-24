@@ -19,7 +19,7 @@ uv run uvicorn app.main:create_app --factory --reload --loop app.infrastructure.
 
 `--reload` 用于开发时自动重启。`--loop` 在 Windows 下选择 Selector，满足 Psycopg 异步驱动要求；其他系统也可使用。
 
-启动后在 `http://127.0.0.1:8000/docs` 查接口参数。`/health/live` 检查进程存活，`/health/ready` 检查模型配置和运行时，并分别列出两种审核模式的配置问题；不探测网络或账户额度。
+启动后在 `http://127.0.0.1:8000/docs` 查接口参数。`/health/live` 检查进程存活，`/health/ready` 检查模型配置、审核运行时和业务数据库，并分别列出两种审核模式的配置问题。数据库运行权或业务连接不可用时返回 503，探针的数据库查询总时限为 1 秒。
 
 ## 必要配置
 
@@ -36,6 +36,8 @@ uv run uvicorn app.main:create_app --factory --reload --loop app.infrastructure.
 | `MAX_REVIEW_CHARS` | 每个文档解析后的正文上限，默认 50000 字符 |
 | `INSTITUTION_REVIEW_CONCURRENCY` | 同进程共享的条款审核额度，默认 3；不包含全文术语、报告和建议节点 |
 | `DOCUMENTS_DIR`、`AVATARS_DIR` | 附件和头像目录，默认分别为 `backend/documents`、`backend/avatars` |
+
+DOCX 接收按实际请求体计量。会话上传最多接收一份文件的额度加 64 KiB 表单开销，独立审核最多接收两份文件的额度加 64 KiB。各文件还须分别满足原件上限。两种入口复用有界 DOCX 解析，独立审核每个应用实例最多有两个文档处于解析中。
 
 百炼兼容接口通过 `enable_thinking=false` 关闭思考模式。无模型配置时仍可管理账号、会话和材料，消息执行返回 503；标准文档审核不需要 RAGFlow。
 

@@ -73,6 +73,11 @@ class Database:
         if not self._available or not self._owner or self._owner.is_closed():
             raise _unavailable()
 
+    async def probe(self):
+        """通过业务连接池检查运行权和连接可用性。"""
+        async with asyncio.timeout(1):
+            await BaseDatabase(self).fetchval("SELECT 1")
+
     async def aclose(self):
         self._available = False
         if self._pool:
