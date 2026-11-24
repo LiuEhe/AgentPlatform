@@ -6,10 +6,18 @@ import { isTerminal } from './types'
 import type { SessionSummary, SessionView, FileView, MessageCreate, MessageView, RunView } from './types'
 import { ConversationSnapshots, type RetryAction } from './conversationSnapshots'
 import { createConversationDeletions } from './conversationDeletions'
+import { mergeMessages, mergeSessions } from './conversationHistory'
+import { createConversationStream } from './conversationStream'
+import { prepareSubmission } from './conversationSubmission'
 
 const SESSION_KEY = 'agent-platform-session'
 const PENDING_KEY = 'agent-platform-session-pending-id'
 const DELETIONS_KEY = 'agent-platform-session-deletions'
+
+function isMissing(reason: unknown) {
+  return reason instanceof ApiError && reason.status === 404
+}
+
 export function useConversation(options?: { auth: AuthController }) {
   const owner = options?.auth.capture()
   const storageKey = (key: string) => owner ? `${key}:${owner.userId}` : key
@@ -26,7 +34,6 @@ export function useConversation(options?: { auth: AuthController }) {
   const initializing = ref(false)
   const sending = ref(false)
   const uploading = ref(false)
-  const retryable = ref(false)
   const earlierCursor = ref<number | null>(null)
   const receivedSequence = ref(0)
   const hasEarlierMessages = computed(() => earlierCursor.value !== null)
@@ -49,13 +56,13 @@ export function useConversation(options?: { auth: AuthController }) {
   const listCursor = ref<string | null>(null)
   const hasMoreSessions = computed(() => listCursor.value !== null)
   let pending: MessageCreate | null = null
-  let retryAction: RetryAction = null
+  const retryAction = ref<RetryAction>(null)
+  const retryable = computed(() => retryAction.value !== null)
   let retryTarget: string | null = null
   const snapshots = new ConversationSnapshots()
   let generation = 0
   let controller = new AbortController()
-  let unsubscribe: (() => void) | undefined
-  let subscriptionVersion = 0
+  const stream = createConversationStream()
   const busy = computed(() => initializing.value || sending.value || uploading.value || deleting.value ||
     Boolean(activeRun.value && !isTerminal(activeRun.value.status)))
   const canDelete = computed(() => !initializing.value && !sending.value && !uploading.value && !deleting.value)
@@ -67,8 +74,8 @@ export function useConversation(options?: { auth: AuthController }) {
     loadingHistory.value = false
     sessions.value = sessions.value.filter(item => item.session_id !== id)
     snapshots.invalidate(id)
-    if (retryTarget === id) { retryTarget = null; retryAction = null; retryable.value = false }
-    if (stored(SESSION_KEY) === id) { remember(SESSION_KEY, null); remember(PENDING_KEY, null) }
+    if (retryTarget === id) { retryTarget = null; retryAction.value = null }
+    if (stored(SESSION_KEY) === id) { clearStoredSession() }
     if (sessionId.value === id) {
       resetRequests()
       restore(null)
@@ -80,7 +87,7 @@ export function useConversation(options?: { auth: AuthController }) {
     snapshots.save(id, {
       messages: messages.value, files: files.value,
       selectedIds: selectedFileIds.value, draft: draft.value, run: activeRun.value,
-      pending, retryAction: retryAction ?? (pending ? 'send' : null), retryTarget, error: error.value,
+      pending, retryAction: retryAction.value ?? (pending ? 'send' : null), retryTarget, error: error.value,
       streamingText: streamingText.value, earlierCursor: earlierCursor.value, receivedSequence: receivedSequence.value,
     })
   }
@@ -94,9 +101,8 @@ export function useConversation(options?: { auth: AuthController }) {
     activeRun.value = snapshot.run
     pending = snapshot.pending
     error.value = snapshot.error
-    retryAction = snapshot.retryAction
+    retryAction.value = snapshot.retryAction
     retryTarget = snapshot.retryTarget
-    retryable.value = retryAction !== null
     streamingText.value = snapshot.streamingText
     earlierCursor.value = snapshot.earlierCursor
     receivedSequence.value = snapshot.receivedSequence
@@ -107,8 +113,7 @@ export function useConversation(options?: { auth: AuthController }) {
       activeRun.value = null
       streamingText.value = ''
       if (pending) {
-        retryable.value = true
-        retryAction = 'send'
+        retryAction.value = 'send'
         error.value = '上一条消息的发送结果尚未确认，请重试以确认，避免重复执行。'
       }
     }
@@ -122,10 +127,9 @@ export function useConversation(options?: { auth: AuthController }) {
   function stored(key: string) {
     try { return sessionStorage.getItem(storageKey(key)) } catch { return null }
   }
-  function merge(incoming: MessageView[]) {
-    const indexed = new Map(messages.value.map(message => [message.message_id, message]))
-    incoming.forEach(message => indexed.set(message.message_id, message))
-    messages.value = [...indexed.values()].sort((a, b) => a.sequence - b.sequence)
+  function clearStoredSession() {
+    remember(SESSION_KEY, null)
+    remember(PENDING_KEY, null)
   }
   function receive(view: SessionView, direction: 'latest' | 'earlier' | 'after' = 'latest') {
     if (deletedSessionIds.has(view.session_id)) return
@@ -133,14 +137,11 @@ export function useConversation(options?: { auth: AuthController }) {
     if (direction !== 'earlier') receivedSequence.value = Math.max(receivedSequence.value, ...view.messages.map(m => m.sequence))
     sessionId.value = view.session_id
     remember(SESSION_KEY, view.session_id)
-    merge(view.messages)
+    messages.value = mergeMessages(messages.value, view.messages)
     files.value = view.files
     const summary = { session_id: view.session_id, agent_id: view.agent_id, title: view.title,
       created_at: view.created_at, updated_at: view.updated_at }
-    const existing = sessions.value.find(item => item.session_id === view.session_id)
-    if (existing) Object.assign(existing, summary)
-    else sessions.value.unshift(summary)
-    sessions.value.sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.session_id.localeCompare(a.session_id))
+    sessions.value = mergeSessions(sessions.value, [summary], deletedSessionIds)
     saveCurrent()
   }
   function fail(reason: unknown) {
@@ -171,34 +172,34 @@ export function useConversation(options?: { auth: AuthController }) {
     generation += 1
     controller.abort()
     controller = new AbortController()
-    closeStream()
+    stream.close()
     sending.value = false
     uploading.value = false
     loadingEarlier.value = false
     loadingHistory.value = false
-    retryable.value = false
-    retryAction = null
+    retryAction.value = null
     retryTarget = null
     return generation
   }
-  function closeStream() {
-    subscriptionVersion += 1
-    unsubscribe?.()
-    unsubscribe = undefined
+  function clearPending() {
+    pending = null
+    remember(PENDING_KEY, null)
+  }
+  function clearComposer() {
+    clearPending()
+    draft.value = ''
+    selectedFileIds.value = []
   }
   function acceptRun(run: RunView) {
     activeRun.value = run
-    if (pending?.client_message_id === run.client_message_id) {
-      pending = null
-      draft.value = ''
-      selectedFileIds.value = []
-      remember(PENDING_KEY, null)
-    }
-    if (run.message) merge([run.message])
+    if (pending?.client_message_id === run.client_message_id) clearComposer()
+    if (run.message) messages.value = mergeMessages(messages.value, [run.message])
+  }
+  function isCurrentRun(id: string, runId: string, current: number) {
+    return current === generation && id === sessionId.value && activeRun.value?.run_id === runId
   }
   async function refreshCompleted(id: string, runId: string, current: number, version: number) {
-    const valid = () => current === generation && version === subscriptionVersion &&
-      id === sessionId.value && activeRun.value?.run_id === runId
+    const valid = () => version === stream.version && isCurrentRun(id, runId, current)
     try {
       let after = receivedSequence.value
       while (valid()) {
@@ -212,65 +213,41 @@ export function useConversation(options?: { auth: AuthController }) {
     } catch (reason) {
       if (!valid() || controller.signal.aborted) return
       fail(reason)
-      retryable.value = !(reason instanceof ApiError && reason.status === 404)
-      retryAction = retryable.value ? 'refresh' : null
+      retryAction.value = isMissing(reason) ? null : 'refresh'
     }
   }
   function finishRun(id: string, run: RunView, current: number) {
-    closeStream()
+    stream.close()
     acceptRun(run)
     streamingText.value = ''
     error.value = run.error?.message ?? ''
-    retryable.value = false; retryAction = null
-    void refreshCompleted(id, run.run_id, current, subscriptionVersion)
+    retryAction.value = null
+    void refreshCompleted(id, run.run_id, current, stream.version)
   }
   function watchRun(id: string, runId: string, current: number) {
-    closeStream()
-    const version = subscriptionVersion
-    let reconnecting = false
     if (activeRun.value?.run_id !== runId) {
       streamingText.value = ''
       activeRun.value = { run_id: runId, client_message_id: '', status: 'running', stage: '正在连接任务…', message: null, error: null }
     }
-    const valid = () => current === generation && version === subscriptionVersion &&
-      id === sessionId.value && activeRun.value?.run_id === runId
-    async function disconnected(reason: unknown) {
-      if (!valid()) return
-      closeStream()
-      const recoveryVersion = subscriptionVersion
-      const recoveryValid = () => current === generation && recoveryVersion === subscriptionVersion && id === sessionId.value && activeRun.value?.run_id === runId
-      try {
-        // 只查询一次以识别终态/失效；手动重试重新订阅，不回退到定时查询。
-        const run = await api.getSessionRun(id, runId, controller.signal)
-        if (!recoveryValid()) return
-        if (isTerminal(run.status)) { finishRun(id, run, current); return }
-        acceptRun(run)
-        fail(reason); retryable.value = true; retryAction = 'stream'
-      } catch (failure) {
-        if (!recoveryValid() || controller.signal.aborted) return
-        fail(failure)
-        const expired = failure instanceof ApiError && failure.status === 404
+    stream.open(id, runId, {
+      signal: controller.signal,
+      isCurrent: () => isCurrentRun(id, runId, current),
+      onEvent(event) {
+        if (event.event === 'delta') {
+          streamingText.value += event.text
+          return
+        }
+        if (event.event === 'snapshot') streamingText.value = event.text
+        if (isTerminal(event.run.status)) finishRun(id, event.run, current)
+        else acceptRun(event.run)
+      },
+      onReconnecting: reconnecting => { error.value = reconnecting ? '连接中断，正在重新连接…' : '' },
+      onDisconnected(reason, expired) {
+        fail(reason)
         if (expired) { activeRun.value = null; streamingText.value = '' }
-        retryable.value = !expired; retryAction = expired ? null : 'stream'
-      }
-    }
-    try {
-      unsubscribe = api.subscribeSessionRun(id, runId, {
-        onEvent(event) {
-          if (!valid()) return
-          if (reconnecting) { error.value = ''; reconnecting = false }
-          if (event.event === 'delta') { streamingText.value += event.text; return }
-          acceptRun(event.run)
-          if (event.event === 'snapshot') streamingText.value = event.text
-          if (isTerminal(event.run.status)) finishRun(id, event.run, current)
-        },
-        onReconnecting() {
-          if (!valid()) return
-          reconnecting = true; error.value = '连接中断，正在重新连接…'
-        },
-        onError: reason => { void disconnected(reason) },
-      }, controller.signal)
-    } catch (reason) { void disconnected(reason) }
+        retryAction.value = expired ? null : 'stream'
+      },
+    })
   }
   async function initialize() {
     deletions.resume()
@@ -295,19 +272,19 @@ export function useConversation(options?: { auth: AuthController }) {
           break
         } catch (reason) {
           if (current !== generation) return
-          if (!(reason instanceof ApiError && reason.status === 404)) throw reason
+          if (!isMissing(reason)) throw reason
           // 当前初始化已隔离旧请求；只失效目标，保持本轮请求代次。
           deletedSessionIds.add(id)
           snapshots.discard(id)
           sessions.value = sessions.value.filter(item => item.session_id !== id)
           if (sessionId.value === id) restore(null)
-          remember(SESSION_KEY, null); remember(PENDING_KEY, null)
+          clearStoredSession()
         }
       }
       if (current !== generation) return
       if (!view) {
         restore(null)
-        remember(SESSION_KEY, null); remember(PENDING_KEY, null)
+        clearStoredSession()
         return
       }
       if (sessionId.value !== view.session_id) restore(view.session_id)
@@ -317,16 +294,10 @@ export function useConversation(options?: { auth: AuthController }) {
     } catch (reason) {
       if (current === generation && !controller.signal.aborted) {
         fail(reason)
-        retryable.value = true
-        retryAction = reason instanceof ApiError && reason.status === 404 ? 'create' : 'initialize'
+        retryAction.value = isMissing(reason) ? 'create' : 'initialize'
       }
     }
     finally { if (current === generation) initializing.value = false }
-  }
-  function mergeSummaries(items: SessionSummary[]) {
-    const indexed = new Map(sessions.value.map(item => [item.session_id, item]))
-    items.forEach(item => { if (!deletedSessionIds.has(item.session_id)) indexed.set(item.session_id, item) })
-    sessions.value = [...indexed.values()].sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.session_id.localeCompare(a.session_id))
   }
   async function loadMoreSessions() {
     if (deleting.value || loadingHistory.value || !listCursor.value) return
@@ -336,7 +307,7 @@ export function useConversation(options?: { auth: AuthController }) {
     try {
       const page = await api.listSessions({ cursor: listCursor.value }, controller.signal)
       if (current !== generation || version !== historyVersion) return
-      mergeSummaries(page.items)
+      sessions.value = mergeSessions(sessions.value, page.items, deletedSessionIds)
       listCursor.value = page.next_cursor
     } catch (reason) { if (current === generation && !controller.signal.aborted) fail(reason) }
     finally { if (current === generation && version === historyVersion) loadingHistory.value = false }
@@ -366,15 +337,13 @@ export function useConversation(options?: { auth: AuthController }) {
       const view = await api.createSession(controller.signal)
       if (current !== generation) return
       restore(null)
-      sending.value = false; uploading.value = false
       remember(PENDING_KEY, null)
       receive(view)
     } catch (reason) {
       if (current !== generation || controller.signal.aborted) return
       restore(previousId)
       fail(reason)
-      retryable.value = true
-      retryAction = 'create'
+      retryAction.value = 'create'
       // 新会话创建失败时恢复原会话的实际状态，避免旧请求的标记永久禁用输入。
       if (previousId) {
         try {
@@ -404,12 +373,12 @@ export function useConversation(options?: { auth: AuthController }) {
     } catch (reason) {
       if (current !== generation || controller.signal.aborted) return
       restore(previousId)
-      if (reason instanceof ApiError && reason.status === 404) invalidateSession(id)
-      error.value = reason instanceof ApiError && reason.status === 404
+      const missing = isMissing(reason)
+      if (missing) invalidateSession(id)
+      error.value = missing
         ? '这段会话不存在。当前对话与输入仍保留。'
         : reason instanceof Error ? reason.message : '切换对话失败，请重试。'
-      retryable.value = !(reason instanceof ApiError && reason.status === 404)
-      retryAction = retryable.value ? 'switch' : null
+      retryAction.value = missing ? null : 'switch'
       retryTarget = id
       if (previousId && activeRun.value && !isTerminal(activeRun.value.status)) {
         watchRun(previousId, activeRun.value.run_id, current)
@@ -420,22 +389,22 @@ export function useConversation(options?: { auth: AuthController }) {
     const id = sessionId.value
     if (!id || busy.value || (!draft.value.trim() && !selectedFileIds.value.length)) return
     const current = generation
-    const body = { content: draft.value.trim() ? draft.value : '请查看我上传的文件。', file_ids: [...selectedFileIds.value] }
-    if (pending && (pending.content !== body.content || JSON.stringify(pending.file_ids) !== JSON.stringify(body.file_ids))) {
+    const submission = prepareSubmission(pending, draft.value, selectedFileIds.value)
+    if (!submission) {
       error.value = '上一条消息的发送状态尚未确认，请先重试，或新建对话。'
       return
     }
-    // 断网或 5xx 可能发生在服务接收之后，重试必须沿用同一个消息标识。
-    pending ??= { client_message_id: crypto.randomUUID(), ...body }
-    const submittedId = pending.client_message_id
+    pending = submission
+    const submittedId = submission.client_message_id
     remember(PENDING_KEY, pending.client_message_id)
     sending.value = true
     error.value = ''
     try {
       const run = await api.sendSessionMessage(id, pending, controller.signal)
       if (current !== generation) return
-      pending = null; remember(PENDING_KEY, null); retryable.value = false
-      draft.value = ''; selectedFileIds.value = []; activeRun.value = run
+      clearComposer()
+      retryAction.value = null
+      activeRun.value = run
       const view = await api.getSession(id, {}, controller.signal)
       if (current !== generation) return
       if (!await receiveLatest(view, current)) return
@@ -444,10 +413,9 @@ export function useConversation(options?: { auth: AuthController }) {
       if (current !== generation || controller.signal.aborted) return
       fail(reason)
       if (reason instanceof ApiError && reason.status >= 400 && reason.status < 500 && reason.status !== 408) {
-        pending = null; remember(PENDING_KEY, null)
+        clearPending()
       }
-      retryable.value = true
-      retryAction = activeRun.value?.client_message_id === submittedId ? 'stream' : 'send'
+      retryAction.value = activeRun.value?.client_message_id === submittedId ? 'stream' : 'send'
     } finally { if (current === generation) sending.value = false }
   }
   async function upload(file: File) {
@@ -468,24 +436,23 @@ export function useConversation(options?: { auth: AuthController }) {
     if (deleting.value || !id || !run || initializing.value || isTerminal(run.status)) return
     try {
       const result = await api.cancelSessionRun(id, run.run_id)
-      if (current !== generation || id !== sessionId.value || run.run_id !== activeRun.value?.run_id) return
+      if (!isCurrentRun(id, run.run_id, current)) return
       if (isTerminal(result.status)) finishRun(id, result, current)
       else {
         acceptRun(result)
-        if (!unsubscribe) watchRun(id, run.run_id, current)
+        if (!stream.connected) watchRun(id, run.run_id, current)
       }
     } catch (reason) { if (current === generation) fail(reason) }
   }
   async function retry() {
     if (deleting.value) return
-    const action = retryAction
+    const action = retryAction.value
     if (action === 'create') { await newSession(); return }
-    error.value = ''; retryable.value = false
-    retryAction = null
+    error.value = ''; retryAction.value = null
     if (action === 'initialize') await initialize()
     else if (action === 'switch' && retryTarget) await switchSession(retryTarget)
     else if (action === 'stream' && activeRun.value && sessionId.value) watchRun(sessionId.value, activeRun.value.run_id, generation)
-    else if (action === 'refresh' && activeRun.value && sessionId.value) await refreshCompleted(sessionId.value, activeRun.value.run_id, generation, subscriptionVersion)
+    else if (action === 'refresh' && activeRun.value && sessionId.value) await refreshCompleted(sessionId.value, activeRun.value.run_id, generation, stream.version)
     else if (action === 'send' || pending) await send()
     else if (activeRun.value && sessionId.value) watchRun(sessionId.value, activeRun.value.run_id, generation)
   }
@@ -501,9 +468,9 @@ export function useConversation(options?: { auth: AuthController }) {
     snapshots.clear(); deletedSessionIds.clear(); deletions.clear()
     sessionId.value = null; sessions.value = []; messages.value = []; files.value = []
     selectedFileIds.value = []; draft.value = ''; activeRun.value = null; streamingText.value = ''
-    pending = null; retryAction = null; retryTarget = null
-    pendingDeletions.value = []; error.value = ''; deletionError.value = ''; retryable.value = false
-    uploading.value = false; sending.value = false; listCursor.value = null; earlierCursor.value = null
+    pending = null
+    pendingDeletions.value = []; error.value = ''; deletionError.value = ''
+    listCursor.value = null; earlierCursor.value = null
   }
   const unregister = options?.auth.registerCleanup(resetForIdentityChange)
   onBeforeUnmount(() => { unregister?.(); resetForIdentityChange() })
