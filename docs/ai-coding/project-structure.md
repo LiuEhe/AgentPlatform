@@ -52,6 +52,7 @@ AgentPlatform/
 │   │   ├── App.vue                   # 公共外壳与助手 KeepAlive
 │   │   ├── main.ts                   # 启动入口与固定顺序的样式加载
 │   │   └── style.css                 # 主题、基础、公共样式与无障碍
+│   ├── tests/                        # Vitest 测试及测试辅助代码
 │   └── README.md                     # 页面、开发与交互
 ├── docs/
 │   ├── database.md                   # 数据库操作与字段字典
@@ -64,7 +65,7 @@ AgentPlatform/
 │       ├── context-management.md     # 长期文档与任务恢复
 │       ├── quality-gates.md          # 检查与验收边界
 │       └── risk-management.md        # 数据、安全与外部操作
-└── .github/workflows/ci.yml           # 后端检查、前端回归子集与构建
+└── .github/workflows/ci.yml           # 后端检查、前端全量回归与构建
 ```
 
 ## 关键实现位置

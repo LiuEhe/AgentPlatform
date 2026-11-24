@@ -1,12 +1,17 @@
-const test = require('node:test')
-const assert = require('node:assert/strict')
-const { mount, find, text, flush, vue } = require('./componentTestHarness.cjs')
+// @vitest-environment jsdom
+import assert from 'node:assert/strict'
+import { test, vi } from 'vitest'
+import { mount, find, text, flush, auth, vue } from '../../helpers/componentTestHarness.mjs'
+import AvatarCropper from '../../../src/features/auth/AvatarCropper.vue'
+
+
+
 
 function setup(decode, encode = callback => callback(new Blob(['encoded pixels'], { type: 'image/png' }))) {
   const previous = global.createImageBitmap, draws = [], results = [], cancellations = []
   global.createImageBitmap = decode
   const props = vue.reactive({ file: new File(['x'], 'a.png'), onConfirm: file => results.push(file), onCancel: () => cancellations.push(true) })
-  const f = mount('AvatarCropper.vue', {}, props, tag => tag === 'canvas' ? {
+  const f = mount(AvatarCropper, {}, props, tag => tag === 'canvas' ? {
     getContext: () => ({ clearRect() {}, drawImage: (...args) => draws.push(args.slice(1)) }),
     getBoundingClientRect: () => ({ width: 256 }), setPointerCapture() {}, releasePointerCapture() {},
     toBlob: encode,

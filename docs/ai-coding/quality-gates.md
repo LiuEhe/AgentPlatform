@@ -8,24 +8,21 @@
 | --- | --- | --- |
 | 后端静态检查 | `backend/`：`uv run ruff check app scripts tests` | 已安装开发依赖 |
 | 后端测试 | `backend/`：`uv run pytest` | 数据库用例须显式设置专用 `TEST_DATABASE_URL`，见[数据库测试](../database.md#测试与维护) |
-| 前端回归 | `frontend/`：`node --test` | 使用 Node 内置测试及已有 Vue/TypeScript |
+| 前端回归 | `frontend/`：`pnpm test` | Vitest 自动发现 `frontend/tests/` 中的用例 |
+| 前端静态检查 | `frontend/`：`pnpm lint` | Vue ESLint 检查 TypeScript 和 Vue 源码 |
 | 前端类型与构建 | `frontend/`：`pnpm build` | 脚本为 `vue-tsc -b && vite build` |
 | 纯文档 | 核对链接、路径、命令、规则与实现的一致性 | 无需运行无关业务测试 |
 
-依赖锁为 `backend/uv.lock` 和 `frontend/pnpm-lock.yaml`。准备开发依赖使用 `uv sync --locked --group dev`，前端使用冻结锁文件安装；依赖变更仍需审批。当前没有独立前端 lint/test 脚本、浏览器端到端测试框架或依赖漏洞扫描。
+依赖锁为 `backend/uv.lock` 和 `frontend/pnpm-lock.yaml`。准备开发依赖使用 `uv sync --locked --group dev`，前端使用冻结锁文件安装；依赖变更仍需审批。当前前端回归包括组件和模块测试。
 
 ## CI 实际运行什么
 
 [ci.yml](../../.github/workflows/ci.yml) 在 Pull Request 和推送到 main/dev 时执行：
 
 - 后端：Python 3.12、3.13，专用 PostgreSQL 18 测试库，Ruff 和 pytest。
-- 前端：冻结锁文件安装，以下 9 个 Node 测试文件，再运行生产构建。
+- 前端：冻结锁文件安装后依次运行 `pnpm test`、`pnpm lint` 和 `pnpm build`。
 
-```powershell
-node --test src/features/conversation-assistant/useConversation.test.cjs src/features/auth/useAuth.test.cjs src/features/auth/appLifecycle.test.cjs src/api/auth.test.cjs src/components/ConfirmDialog.test.cjs src/components/confirmationFlows.test.cjs src/features/auth/AccountMenu.test.cjs src/features/auth/UserManagement.test.cjs src/features/auth/ProfileForm.test.cjs
-```
-
-确认框回归覆盖取消/焦点恢复、忙碌与重复确认、删除目标、账号身份变化、过时停止提示和未保存资料的离开决策；资料表单覆盖性别/生日选择、日期有效性及跨日上限。CI 尚未运行其余头像和会话状态模块独立测试；本地 `node --test` 可运行全部现有前端回归。可按文件路径单独运行相关用例。
+确认框回归覆盖取消、焦点恢复、忙碌与重复确认、删除目标、账号身份变化、过时停止提示和未保存资料的离开决策。资料表单覆盖性别、生日和跨日上限。全量测试同时覆盖用户 API、头像裁剪、头像加载和会话状态。
 
 ## 已有覆盖与验收边界
 

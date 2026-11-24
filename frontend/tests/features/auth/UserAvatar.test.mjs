@@ -1,23 +1,20 @@
-const test = require('node:test')
-const assert = require('node:assert/strict')
-const { mount, find, flush, auth, vue } = require('./componentTestHarness.cjs')
-const fs = require('node:fs'), path = require('node:path'), Module = require('node:module'), ts = require('typescript')
-function realAuth(api) {
-  const filename = path.join(__dirname, 'useAuth.ts'), m = new Module(filename, module)
-  m.paths = module.paths
-  m.require = id => id === 'vue' ? vue : { ApiError: class extends Error {} }
-  m._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText, filename)
-  return m.exports.createAuthController(api)
-}
+// @vitest-environment jsdom
+import assert from 'node:assert/strict'
+import { test, vi } from 'vitest'
+import { mount, find, text, flush, auth, vue, mocked } from '../../helpers/componentTestHarness.mjs'
+import { createAuthController } from '../../../src/features/auth/useAuth'
+import UserAvatar from '../../../src/features/auth/UserAvatar.vue'
+
+vi.mock('../../../src/features/auth/useAuth', async original => ({ ...await original(), useAuth: mocked('./useAuth', 'useAuth') }))
+vi.mock('../../../src/api/users', async original => ({ ...await original(), getAvatar: mocked('../../api/users', 'getAvatar') }))
+
 test('late avatar does not replace new target and urls are revoked', async () => {
   const previousCreate = URL.createObjectURL, previousRevoke = URL.revokeObjectURL
   const requests = [], revoked = [], identity = auth()
   URL.createObjectURL = blob => 'blob:' + blob.id
   URL.revokeObjectURL = url => revoked.push(url)
   const props = vue.reactive({ hasAvatar: true, userId: 'a', revision: 1, alt: 'Alice' })
-  const f = mount('UserAvatar.vue', { '../../api/users': { getAvatar: id => new Promise(resolve => requests.push({ id, resolve })) },
+  const f = mount(UserAvatar, { '../../api/users': { getAvatar: id => new Promise(resolve => requests.push({ id, resolve })) },
     './useAuth': { useAuth: () => identity } }, props)
   try {
     await flush()
@@ -43,12 +40,12 @@ test('late avatar does not replace new target and urls are revoked', async () =>
 test('avatar reloads after real auth checking becomes authenticated with same epoch', async () => {
   let release, reads = 0, calls = 0
   const view = () => ({ user: { user_id: 'a', has_avatar: true }, auth_session_id: 'one', csrf_token: 'csrf', expires_at: new Date(Date.now() + 60000).toISOString() })
-  const identity = realAuth({ me: async () => ++reads === 1 ? view() : new Promise(resolve => { release = resolve }) })
+  const identity = createAuthController({ me: async () => ++reads === 1 ? view() : new Promise(resolve => { release = resolve }) })
   await identity.bootstrap()
   const create = URL.createObjectURL, revoke = URL.revokeObjectURL
   URL.createObjectURL = () => 'blob:avatar'; URL.revokeObjectURL = () => {}
   const props = vue.reactive({ hasAvatar: true, revision: 1, alt: 'Alice' })
-  const f = mount('UserAvatar.vue', { '../../api/users': { getAvatar: async () => { calls++; return new Blob(['image']) } }, './useAuth': { useAuth: () => identity } }, props)
+  const f = mount(UserAvatar, { '../../api/users': { getAvatar: async () => { calls++; return new Blob(['image']) } }, './useAuth': { useAuth: () => identity } }, props)
   try {
     await flush()
     assert.equal(calls, 1)

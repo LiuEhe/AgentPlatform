@@ -1,19 +1,13 @@
-const test = require('node:test')
-const assert = require('node:assert/strict')
-const fs = require('node:fs')
-const path = require('node:path')
-const Module = require('node:module')
-const ts = require('typescript')
+import assert from 'node:assert/strict'
+import { test, vi } from 'vitest'
+import * as client from '../../src/api/client'
+
 function load() {
-  const filename=path.join(__dirname,'client.ts')
-  const m=new Module(filename,module)
-  m.paths=module.paths
-  const source=fs.readFileSync(filename,'utf8').replace('import.meta.env.VITE_API_BASE_URL', "''")
-  m._compile(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,filename)
+  vi.stubEnv('VITE_API_BASE_URL', '')
   let current=true, handled=0
   const ticket={epoch:1,userId:'a',authSessionId:'public-session-id',csrfToken:'memory-only'}
-  m.exports.installAuthHooks({capture:()=>ticket,isCurrent:()=>current,onAuthError:()=>handled++})
-  return {...m.exports,ticket,replace:()=>{current=false},handled:()=>handled}
+  client.installAuthHooks({capture:()=>ticket,isCurrent:()=>current,onAuthError:()=>handled++})
+  return {...client,ticket,replace:()=>{current=false},handled:()=>handled}
 }
 test('bound JSON/text/blob/204 use credentials and context; only writes carry CSRF',async()=>{
   const f=load(), previous=global.fetch, calls=[]

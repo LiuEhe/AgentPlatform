@@ -1,15 +1,24 @@
-// Uses Node's built-in runner and already installed Vue/TypeScript; no test framework dependency.
-const test = require('node:test')
-const assert = require('node:assert/strict')
-const fs = require('node:fs')
-const path = require('node:path')
-const Module = require('node:module')
-const ts = require('typescript')
-const vue = require('vue')
-const loadConversationModule = require('./loadConversationModule.cjs')
+import assert from 'node:assert/strict'
+import { test, vi } from 'vitest'
+import { ApiError as RequestError, installAuthHooks } from '../../../src/api/client'
+import { useConversation } from '../../../src/features/conversation-assistant/useConversation'
 
-class ApiError extends Error {
-  constructor(status, code) { super('simulated request failure'); this.status = status; this.code = code }
+const mocks = vi.hoisted(() => ({ api: {}, onUnmount: () => {} }))
+vi.mock('vue', async original => ({
+  ...await original(),
+  onBeforeUnmount: callback => mocks.onUnmount(callback),
+}))
+vi.mock('../../../src/api/conversations', async original => {
+  const api = await original()
+  return Object.fromEntries(Object.entries(api).map(([name, method]) => [
+    name, (...args) => (mocks.api[name] ?? method)(...args),
+  ]))
+})
+
+const actualApi = await vi.importActual('../../../src/api/conversations')
+
+class ApiError extends RequestError {
+  constructor(status, code) { super({ status, code, message: 'simulated request failure' }) }
 }
 async function openInitialSession(f) {
   await f.hook.initialize()
@@ -62,12 +71,10 @@ function fixture(overrides = {}, initialStorage = []) {
     })
     return close
   }
-  const loaded = loadConversationModule('useConversation.ts', {
-    vue: { ...vue, onBeforeUnmount: callback => cleanup.push(callback) },
-    '../../api/conversations': api,
-    '../../api/client': { ApiError },
-  })
-  return { hook: loaded.useConversation(), cleanup: () => cleanup.forEach(fn => fn()), calls, api, completed, storage, subscriptions }
+  mocks.api = api
+  mocks.onUnmount = callback => cleanup.push(callback)
+  const hook = useConversation()
+  return { hook, cleanup: () => cleanup.forEach(fn => fn()), calls, api, completed, storage, subscriptions }
 }
 
 test('empty history stays empty across initialization and activation', async () => {
@@ -468,19 +475,13 @@ function streamApiFixture() {
     emit(kind, data) { this.listeners.get(kind)?.({ data: typeof data === 'string' ? data : JSON.stringify(data) }) }
   }
   global.EventSource = Source
-  const filename = path.resolve(__dirname, '../../api/conversations.ts')
-  const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText
-  const loaded = new Module(filename, module)
-  loaded.filename = filename; loaded.paths = module.paths
-  loaded.require = id => {
-    if (id === './client') return { ApiError, getApiBaseUrl: () => '', authStreamContext: () => ({ ticket: { authSessionId: 'test-session' }, isCurrent: () => true }), apiRequest: async (url, init) => { const response = await fetch(url, init); if (!response.ok) throw new ApiError(response.status); return response.status === 204 ? undefined : response.json() } }
-    if (id.endsWith('/types')) return { isTerminal: status => ['succeeded', 'failed', 'cancelled'].includes(status) }
-    return require(id)
-  }
-  loaded._compile(compiled, filename)
-  return { api: loaded.exports, sources, cleanup: () => { global.EventSource = previous } }
+  vi.stubEnv('VITE_API_BASE_URL', '')
+  installAuthHooks({
+    capture: () => ({ authSessionId: 'test-session', csrfToken: 'test-csrf' }),
+    isCurrent: () => true,
+    onAuthError: () => {},
+  })
+  return { api: actualApi, sources, cleanup: () => { global.EventSource = previous } }
 }
 
 test('native EventSource reconnects only within the bound and closes on abort or terminal', () => {

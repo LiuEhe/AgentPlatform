@@ -1,12 +1,19 @@
-const test = require('node:test')
-const assert = require('node:assert/strict')
-const { mount, find, flush, auth, vue } = require('./componentTestHarness.cjs')
+// @vitest-environment jsdom
+import assert from 'node:assert/strict'
+import { test, vi } from 'vitest'
+import { mount, find, text, flush, auth, vue, mocked, stubComponent, routerStubs } from '../../helpers/componentTestHarness.mjs'
+import AccountMenu from '../../../src/features/auth/AccountMenu.vue'
+
+vi.mock('../../../src/features/auth/useAuth', async original => ({ ...await original(), useAuth: mocked('./useAuth', 'useAuth') }))
+vi.mock('../../../src/features/auth/UserAvatar.vue', () => ({ default: stubComponent('./UserAvatar.vue') }))
+vi.mock('vue-router', () => routerStubs)
+
 
 test('account navigation closes dropdown; cancelled logout preserves login and confirmed logout redirects', async () => {
   const previous = global.document, calls = [], identity = auth()
   global.document = { activeElement: null, addEventListener() {}, removeEventListener() {} }
   identity.logout = async () => calls.push('logout')
-  const f = mount('AccountMenu.vue', { './useAuth': { useAuth: () => identity },
+  const f = mount(AccountMenu, { './useAuth': { useAuth: () => identity },
     'vue-router': { useRouter: () => ({ replace: async path => calls.push(path) }) },
     './UserAvatar.vue': { __esModule: true, default: vue.defineComponent({ setup: () => () => vue.h('span') }) },
   })

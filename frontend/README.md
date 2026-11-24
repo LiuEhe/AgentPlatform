@@ -112,8 +112,9 @@ pnpm dev
 在 `frontend/` 运行：
 
 ```powershell
-node --test
+pnpm test
+pnpm lint
 pnpm build
 ```
 
-Node 内置测试复用已有 Vue/TypeScript；构建包含类型检查。CI 只运行指定的 Node 用例及构建，具体范围见[质量门禁](../docs/ai-coding/quality-gates.md)。真实浏览器的多标签页、输入法、手机布局、Canvas/dialog，以及模型、文件解析、知识库和 Word/WPS 版式仍需对应环境验收。
+前端测试集中在 [tests/](tests/)，按被测模块组织，公用测试辅助代码放在 `tests/helpers/`。Vitest 自动发现测试，组件测试使用 Vue Test Utils 和受控 DOM。Vue ESLint 检查 TypeScript 与 Vue 源码，构建包含类型检查。使用 Node 22 时，ESLint 10 要求 22.13+。CI 运行全量测试、lint 和构建，具体范围见[质量门禁](../docs/ai-coding/quality-gates.md)。真实浏览器的多标签页、输入法、手机布局、Canvas/dialog，以及模型、文件解析、知识库和 Word/WPS 版式仍需对应环境验收。

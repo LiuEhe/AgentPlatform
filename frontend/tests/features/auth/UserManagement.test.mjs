@@ -1,12 +1,19 @@
-const test = require('node:test')
-const assert = require('node:assert/strict')
-const { mount, find, text, flush, auth, vue } = require('./componentTestHarness.cjs')
+// @vitest-environment jsdom
+import assert from 'node:assert/strict'
+import { test, vi } from 'vitest'
+import { mount, find, text, flush, auth, vue, mocked, stubComponent } from '../../helpers/componentTestHarness.mjs'
+import UserManagement from '../../../src/features/auth/UserManagement.vue'
+
+vi.mock('../../../src/features/auth/useAuth', async original => ({ ...await original(), useAuth: mocked('./useAuth', 'useAuth') }))
+vi.mock('../../../src/features/auth/UserAvatar.vue', () => ({ default: stubComponent('./UserAvatar.vue') }))
+vi.mock('../../../src/api/users', async original => ({ ...await original(), createUser: mocked('../../api/users', 'createUser'), getUserProfile: mocked('../../api/users', 'getUserProfile'), listUsers: mocked('../../api/users', 'listUsers'), resetUserPassword: mocked('../../api/users', 'resetUserPassword'), setUserStatus: mocked('../../api/users', 'setUserStatus') }))
+
 const users = [{ user_id: 'a', username: 'admin', display_name: 'Admin', role: 'admin', status: 'active' },
   { user_id: 'b', username: 'bob', display_name: 'Bob', role: 'user', status: 'disabled' }]
 function setup(getUserProfile, api = {}) {
   const identity = auth(), previous = global.document
   global.document = { activeElement: null }
-  const f = mount('UserManagement.vue', { '../../api/users': { listUsers: async () => ({ items: users, next_cursor: null }), getUserProfile, ...api },
+  const f = mount(UserManagement, { '../../api/users': { listUsers: async () => ({ items: users, next_cursor: null }), getUserProfile, ...api },
     './useAuth': { useAuth: () => identity }, './UserAvatar.vue': { __esModule: true, default: vue.defineComponent({ setup: () => () => vue.h('span') }) } })
   return { ...f, identity, dispose() { f.app.unmount(); global.document = previous } }
 }

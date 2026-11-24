@@ -1,6 +1,15 @@
-const test = require('node:test')
-const assert = require('node:assert/strict')
-const { mount, find, text, flush, auth, vue } = require('./componentTestHarness.cjs')
+// @vitest-environment jsdom
+import assert from 'node:assert/strict'
+import { test, vi } from 'vitest'
+import { mount, find, text, flush, auth, vue, mocked, stubComponent, routerStubs } from '../../helpers/componentTestHarness.mjs'
+import ProfileForm from '../../../src/features/auth/ProfileForm.vue'
+
+vi.mock('../../../src/features/auth/useAuth', async original => ({ ...await original(), useAuth: mocked('./useAuth', 'useAuth') }))
+vi.mock('../../../src/features/auth/UserAvatar.vue', () => ({ default: stubComponent('./UserAvatar.vue') }))
+vi.mock('vue-router', () => routerStubs)
+vi.mock('../../../src/api/users', async original => ({ ...await original(), getProfile: mocked('../../api/users', 'getProfile'), updateProfile: mocked('../../api/users', 'updateProfile'), uploadAvatar: mocked('../../api/users', 'uploadAvatar') }))
+vi.mock('../../../src/features/auth/AvatarCropper.vue', () => ({ default: stubComponent('./AvatarCropper.vue') }))
+
 const profile = { user_id: 'a', username: 'alice', display_name: 'Alice', role: 'user', has_avatar: false, updated_at: 'one',
   email: 'old@example.com', gender: null, birthday: null, phone_number: null, address: null, bio: 'old' }
 function setup(api) {
@@ -8,7 +17,7 @@ function setup(api) {
   let leaveGuard
   const previous = global.document
   global.document = { activeElement: null, addEventListener() {}, removeEventListener() {} }
-  const f = mount('ProfileForm.vue', { '../../api/client': { ApiError: class extends Error {} }, '../../api/users': { getProfile: async () => ({ ...profile }), ...api },
+  const f = mount(ProfileForm, { '../../api/users': { getProfile: async () => ({ ...profile }), ...api },
     'vue-router': { onBeforeRouteLeave: guard => { leaveGuard = guard } },
     './useAuth': { useAuth: () => identity }, './UserAvatar.vue': { __esModule: true, default: vue.defineComponent({ setup: () => () => vue.h('span') }) },
     './AvatarCropper.vue': { __esModule: true, default: vue.defineComponent({ props: ['file'], emits: ['confirm', 'cancel'], setup: (_, { emit }) => () => vue.h('div', [

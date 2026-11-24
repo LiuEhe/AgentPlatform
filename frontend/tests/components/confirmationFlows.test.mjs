@@ -1,6 +1,23 @@
-const test = require('node:test')
-const assert = require('node:assert/strict')
-const { mount, find, text, flush, auth, vue } = require('../features/auth/componentTestHarness.cjs')
+// @vitest-environment jsdom
+import assert from 'node:assert/strict'
+import { test, vi } from 'vitest'
+import { mount, find, text, flush, auth, vue, mocked, stubComponent, routerStubs } from '../helpers/componentTestHarness.mjs'
+import AgentConversationView from '../../src/views/AgentConversationView.vue'
+import AgentWorkbenchView from '../../src/views/AgentWorkbenchView.vue'
+
+vi.mock('vue-router', () => routerStubs)
+vi.mock('../../src/features/conversation-assistant/useConversation', async original => ({ ...await original(), useConversation: mocked('../features/conversation-assistant/useConversation', 'useConversation') }))
+vi.mock('../../src/features/auth/useAuth', async original => ({ ...await original(), useAuth: mocked('../features/auth/useAuth', 'useAuth') }))
+vi.mock('../../src/api/reviews', async original => ({ ...await original(), submitReview: mocked('../api/reviews', 'submitReview') }))
+vi.mock('../../src/features/auth/AccountMenu.vue', () => ({ default: stubComponent('../features/auth/AccountMenu.vue') }))
+vi.mock('../../src/features/conversation-assistant/ConversationComposer.vue', () => ({ default: stubComponent('../features/conversation-assistant/ConversationComposer.vue') }))
+vi.mock('../../src/features/conversation-assistant/ConversationMessages.vue', () => ({ default: stubComponent('../features/conversation-assistant/ConversationMessages.vue') }))
+vi.mock('../../src/features/conversation-assistant/ConversationAttachments.vue', () => ({ default: stubComponent('../features/conversation-assistant/ConversationAttachments.vue') }))
+vi.mock('../../src/features/conversation-assistant/ConversationHistory.vue', () => ({ default: stubComponent('../features/conversation-assistant/ConversationHistory.vue') }))
+vi.mock('../../src/components/workbench/ExecutionStatus.vue', () => ({ default: stubComponent('../components/workbench/ExecutionStatus.vue') }))
+vi.mock('../../src/features/institution-review/ReviewUpload.vue', () => ({ default: stubComponent('../features/institution-review/ReviewUpload.vue') }))
+vi.mock('../../src/features/institution-review/ReviewReport.vue', () => ({ default: stubComponent('../features/institution-review/ReviewReport.vue') }))
+
 const Empty = vue.defineComponent({ setup: () => () => vue.h('span') })
 const component = value => ({ __esModule: true, default: value })
 function documentFixture() {
@@ -21,7 +38,7 @@ test('conversation deletion shares confirmation, preserves drafts on cancel and 
   hook.hasDraft = () => true
   hook.deleteSession = async id => { calls.push(id) }
   const History = vue.defineComponent({ emits: ['delete'], setup: (_, { emit }) => () => vue.h('button', { 'data-delete': 'c1', onClick: () => emit('delete', 'c1') }, '删除') })
-  const f = mount('../../views/AgentConversationView.vue', {
+  const f = mount(AgentConversationView, {
     '../features/conversation-assistant/useConversation': { useConversation: () => hook },
     '../features/auth/useAuth': { useAuth: () => auth() },
     '../features/auth/AccountMenu.vue': component(Empty),
@@ -57,9 +74,8 @@ function reviewFixture() {
   const document = documentFixture(), requests = []
   const Upload = vue.defineComponent({ emits: ['submit'], setup: (_, { emit }) => () => vue.h('button', { id: 'submit-review', onClick: () => emit('submit', { mode: 'knowledge_base', file: { name: 'draft.docx' } }) }, '审核') })
   const Report = vue.defineComponent({ props: ['markdown'], emits: ['restart'], setup: (props, { emit }) => () => vue.h('div', [vue.h('pre', props.markdown), vue.h('button', { id: 'restart-review', onClick: () => emit('restart') }, '重来')]) })
-  const f = mount('../../views/AgentWorkbenchView.vue', {
+  const f = mount(AgentWorkbenchView, {
     'vue-router': { useRoute: () => ({ params: { agentId: 'institution-review' } }) },
-    '../api/client': { ApiError: Error },
     '../api/reviews': { submitReview: (_, signal) => new Promise(resolve => requests.push({ signal, resolve })) },
     '../components/workbench/ExecutionStatus.vue': component(Empty),
     '../features/institution-review/ReviewUpload.vue': component(Upload),

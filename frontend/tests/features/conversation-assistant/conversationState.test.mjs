@@ -1,16 +1,15 @@
-const test = require('node:test')
-const assert = require('node:assert/strict')
-const load = require('./loadConversationModule.cjs')
+import assert from 'node:assert/strict'
+import { test } from 'vitest'
+import { ApiError as RequestError } from '../../../src/api/client'
+import { createConversationDeletions } from '../../../src/features/conversation-assistant/conversationDeletions'
+import { ConversationSnapshots } from '../../../src/features/conversation-assistant/conversationSnapshots'
 
-class ApiError extends Error {
-  constructor(status, code) { super('request failed'); this.status = status; this.code = code }
+class ApiError extends RequestError {
+  constructor(status, code) { super({ status, code, message: 'request failed' }) }
 }
 function deletionFixture(remove, initial = null) {
   let saved = initial
   const removed = []
-  const { createConversationDeletions } = load('conversationDeletions.ts', {
-    '../../api/client': { ApiError },
-  })
   const state = createConversationDeletions({
     canDelete: () => !state.deleting.value,
     readPending: () => saved,
@@ -22,7 +21,6 @@ function deletionFixture(remove, initial = null) {
 }
 
 test('snapshots restore isolated draft and attachment selections and invalidate stale retry targets', () => {
-  const { ConversationSnapshots } = load('conversationSnapshots.ts')
   const snapshots = new ConversationSnapshots()
   const first = snapshots.restore(null)
   first.draft = 'unsent'

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, KeepAlive } from 'vue'
+import { computed } from 'vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { ArrowUpRight } from '@lucide/vue'
 import PlatformBrand from './components/PlatformBrand.vue'
